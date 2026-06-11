@@ -1,0 +1,99 @@
+# ==========================================
+# Dependencies & Package Managers
+# ==========================================
+node_modules/
+bower_components/
+jspm_packages/
+.pnp/
+.pnp.js
+pnpm-lock.yaml
+package-lock.json
+yarn.lock
+
+# ==========================================
+# Build Outputs & Compiled Code
+# ==========================================
+dist/
+build/
+out/
+target/
+bin/
+obj/
+*.exe
+*.dll
+*.so
+*.dylib
+*.class
+*.pyc
+*.pyo
+.pyd
+__pycache__/
+
+# ==========================================
+# Environment Variables & Secrets
+# ==========================================
+.env
+#.env.local
+#.env.development.local
+#.env.test.local
+#.env.production.local
+*.pem
+*.key
+*.cert
+*.pfx
+*.crt
+
+# ==========================================
+# IDEs, Editors, & System Files
+# ==========================================
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ==========================================
+# Version Control & Local Backups
+# ==========================================
+.git/
+.hg/
+.svn/
+*.bak
+*.tmp
+*.log
+
+# ==========================================
+# Large Assets, Media, & Data
+# ==========================================
+#*.mp4
+#*.mp3
+#*.mov
+#*.wav
+#*.png
+#*.jpg
+#*.jpeg
+#*.gif
+#*.svg
+#*.ico
+#*.pdf
+#*.zip
+#*.tar.gz
+#*.rar
+#*.7z
+#*.sql
+#*.sqlite
+#*.db
+#*.csv
+#*.tsv
+
+# ==========================================
+# Documentation & Test Coverage
+# ==========================================
+coverage/
+.nyc_output/
+.docusaurus/
