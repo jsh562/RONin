@@ -1,0 +1,30 @@
+# Rust build artifacts
+/target/
+/src/ron-core/fuzz/target/
+**/*.rs.bk
+*.pdb
+
+# SDD Pilot tooling (kept locally, not tracked)
+/.claude/
+.claudeignore
+/.github/agents/
+/.github/instructions/
+/.github/skills/
+/.github/sddp-config.md
+
+# SDD agent-context / governance docs
+/AGENTS.md
+/CLAUDE.md
+/project-instructions.md
+
+# SDD specs / artifacts
+/specs/
+
+# Local backup of pre-rewrite git history (created during history scrub)
+/.git.backup-pre-scrub/
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

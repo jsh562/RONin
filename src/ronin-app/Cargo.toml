@@ -2,8 +2,34 @@
 name = "ronin-app"
 version = "0.1.0"
 edition.workspace = true
-rust-version.workspace = true
+# Native egui/eframe 0.34 + egui_kittest require a newer toolchain than ron-core's
+# 1.77 MSRV; native deps are confined to ronin-app, so this override is local-only.
+rust-version = "1.92"
 license.workspace = true
 description = "RONin desktop application shell (stub; full implementation deferred to E003)."
 
 [dependencies]
+directories = "6.0.0"
+# Use eframe's `glow` (OpenGL) backend, not `wgpu`: the wgpu/DX12 path pulls a
+# `windows-core` version that conflicts in this graph, and a render harness for
+# the editor does not need wgpu. `default-features = false` drops `wgpu`; we
+# re-add the cross-platform essentials.
+eframe = { version = "0.34", default-features = false, features = [
+    "accesskit",
+    "default_fonts",
+    "glow",
+    "wayland",
+    "x11",
+] }
+egui = "0.34"
+egui_extras = "0.34"
+rfd = "0.17.2"
+ron-core = { version = "0.1.0", path = "../ron-core" }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+tracing = "0.1.44"
+tracing-appender = "0.2.5"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[dev-dependencies]
+egui_kittest = "0.34.3"
