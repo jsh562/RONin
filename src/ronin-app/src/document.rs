@@ -22,10 +22,11 @@ use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::binding::{BindingOrigin, BindingState, DocumentOverride, TypeBinding};
 use crate::completion::CompletionState;
 use crate::diagnostics_map::{map_diagnostic, DiagnosticView};
 use crate::editor_view::build_highlight_model;
-use crate::reparse::{ParseResult, ReparseWorker};
+use crate::reparse::{BoundType, ParseResult, ReparseWorker};
 
 /// Process-wide monotonic source of per-document identity tokens.
 ///
@@ -305,6 +306,54 @@ pub struct EditorDocument {
     /// it once navigation ends (`$0` reached, `Esc`, or the buffer edited out from
     /// under it). `None` when no snippet navigation is active.
     pub snippet_session: Option<crate::snippets::SnippetSession>,
+    /// The type this document is currently bound to, when any (E006/FR-006).
+    ///
+    /// Passed to the off-frame [`ReparseWorker`] on each
+    /// [`request_reparse`](Self::request_reparse) so type validation runs against
+    /// it on the worker thread. `None` means no binding resolved — only structural
+    /// diagnostics are produced (FR-015). The real `BindingConfig`→`BoundType`
+    /// resolution that populates this is Phase 4 (US2); for now it defaults to
+    /// `None` and is the seam the binding resolver / per-document override will set.
+    pub bound_type: Option<BoundType>,
+    /// The resolved active binding for this document, for **display** (E006 US2 —
+    /// FR-011).
+    ///
+    /// This is the user-facing answer to "which type, from which source, does this
+    /// document conform to?" — or [`BindingState::NoBinding`]. It is recomputed by
+    /// the shell's binding-resolution step (`App::apply_binding_to_active`) whenever
+    /// the document becomes active / is opened or its override / the project config
+    /// changes, then surfaced via [`binding_label`](Self::binding_label). It is
+    /// kept *separate* from [`bound_type`](Self::bound_type) (which the worker runs
+    /// against): `binding` is always meaningful for the UI even when acquisition
+    /// degrades to structural-only (so the indicator shows the *intended* type while
+    /// `bound_type` stays `None`). Defaults to [`TypeBinding::none`].
+    pub binding: TypeBinding,
+    /// The per-document **session** override, when the user has explicitly bound
+    /// this document to a chosen type + source (E006 US2 — FR-009).
+    ///
+    /// When set it takes precedence over any project [`BindingConfig`](crate::binding::BindingConfig)
+    /// rule (override > config) and produces a [`BindingOrigin::Override`] binding.
+    /// Never persisted — only the project config persists. `None` means the document
+    /// falls back to config resolution (or no binding). Set/cleared via the shell's
+    /// override control, which then re-applies the binding so it takes effect
+    /// immediately.
+    pub override_: Option<DocumentOverride>,
+    /// Whether type validation is currently degraded for this document because it is
+    /// **oversize** past E003's large-file threshold (E006 T040 — FR-015/FR-024).
+    ///
+    /// This mirrors, for type validation, exactly what E003 already does for
+    /// highlighting / squiggles: past
+    /// [`AppSettings::effective_large_file_threshold`](crate::settings::AppSettings::effective_large_file_threshold)
+    /// the always-on intelligence degrades. When `true`,
+    /// [`request_reparse`](Self::request_reparse) ships **no** bound type to the
+    /// worker, so the worker produces zero type diagnostics (FR-015's structural-only
+    /// behavior) — the document still parses structurally, identical to how an
+    /// oversize document still parses but renders no squiggles/highlights. The flag
+    /// is reconciled against the *live* buffer size every frame by the shell's
+    /// document pump (`App::reconcile_validation_degrade`), so editing an oversize
+    /// document back down below the threshold automatically resumes validation on the
+    /// next reparse. It is purely derived (never persisted, never user-set).
+    pub validation_suppressed: bool,
 }
 
 impl EditorDocument {
@@ -342,6 +391,10 @@ impl EditorDocument {
             pending_cursor_jump: None,
             completion: CompletionState::new(),
             snippet_session: None,
+            bound_type: None,
+            binding: TypeBinding::none(),
+            override_: None,
+            validation_suppressed: false,
         })
     }
 
@@ -375,6 +428,10 @@ impl EditorDocument {
             pending_cursor_jump: None,
             completion: CompletionState::new(),
             snippet_session: None,
+            bound_type: None,
+            binding: TypeBinding::none(),
+            override_: None,
+            validation_suppressed: false,
         }
     }
 
@@ -412,6 +469,10 @@ impl EditorDocument {
             pending_cursor_jump: None,
             completion: CompletionState::new(),
             snippet_session: None,
+            bound_type: None,
+            binding: TypeBinding::none(),
+            override_: None,
+            validation_suppressed: false,
         }
     }
 
@@ -485,12 +546,31 @@ impl EditorDocument {
     /// keystrokes collapses to a single request for the newest text (only the
     /// latest generation matters). The per-frame UI path never parses inline; all
     /// parsing happens on the worker thread.
+    ///
+    /// Type validation degrades on E003's oversize signal exactly like highlighting
+    /// and squiggles (E006 T040 — FR-015/FR-024): when
+    /// [`validation_suppressed`](Self::validation_suppressed) is set (the document is
+    /// oversize), **no** bound type is shipped to the worker, so it produces zero type
+    /// diagnostics (structural-only, FR-015). The structural parse still runs, mirroring
+    /// how an oversize document still parses but renders no squiggles. The shell
+    /// reconciles the flag against the live buffer size every frame, so editing the
+    /// document back below the threshold resumes validation on the next reparse.
     pub fn request_reparse(&mut self, worker: &ReparseWorker) {
         if self.edit_generation == self.last_requested_generation {
             return;
         }
         self.last_requested_generation = self.edit_generation;
-        worker.request(self.edit_generation, self.buffer.clone());
+        // Carry the active binding so the worker validates against it off-frame
+        // (E006/FR-006). Cloning is cheap — the `TypeModel` is behind an `Arc`.
+        // When validation is degraded for an oversize document, ship `None` so the
+        // worker runs structural-only (no type diagnostics), consistent with E003
+        // disabling highlighting/squiggles past the same threshold (T040).
+        let bound = if self.validation_suppressed {
+            None
+        } else {
+            self.bound_type.clone()
+        };
+        worker.request(self.edit_generation, self.buffer.clone(), bound);
     }
 
     /// Drain finished reparse results from `worker` and install the current one
@@ -499,11 +579,16 @@ impl EditorDocument {
     /// Discards stale results (generation older than the current edit) and only
     /// acts on a result matching the live [`edit_generation`](Self::edit_generation).
     /// When a current result lands it (1) becomes the installed [`parse`](Self::parse),
-    /// (2) refreshes [`diagnostics`](Self::diagnostics) via [`map_diagnostic`], and
-    /// (3) recomputes the [`highlight`](Self::highlight) model from the CST. Old
-    /// diagnostics and highlights are kept until a fresh result lands — never
-    /// cleared on edit. Returns `true` if a result was installed (so the caller can
-    /// repaint).
+    /// (2) rebuilds [`diagnostics`](Self::diagnostics) from BOTH the structural and
+    /// type sets via [`merge_type_diagnostics`], and (3) recomputes the
+    /// [`highlight`](Self::highlight) model from the CST. Old diagnostics and
+    /// highlights are kept until a fresh result lands — never cleared on edit.
+    /// Returns `true` if a result was installed (so the caller can repaint).
+    ///
+    /// The type set is **replaced** wholesale on each landed result while the
+    /// structural set is recomputed and preserved (replace-not-merge for the type
+    /// set, FR-006). Overlap dedup between the two sets is a later task (T031) — for
+    /// now the merged view is simply structural-then-type concatenation.
     pub fn poll_parse(&mut self, worker: &ReparseWorker) -> bool {
         let mut installed = false;
         // Drain everything queued this frame; keep only the latest *current* one.
@@ -514,11 +599,7 @@ impl EditorDocument {
                 continue;
             }
             let generation = result.generation;
-            self.diagnostics = result
-                .diagnostics
-                .iter()
-                .map(|d| map_diagnostic(d, &self.buffer))
-                .collect();
+            self.diagnostics = merge_type_diagnostics(&result, &self.buffer);
             self.highlight = Some(build_highlight_model(&result, generation));
             self.parse = Some(result);
             installed = true;
@@ -565,4 +646,88 @@ impl EditorDocument {
     pub fn has_pending_cursor_jump(&self) -> bool {
         self.pending_cursor_jump.is_some()
     }
+
+    /// A short, human-readable label for the active binding, for the status
+    /// indicator and tests (E006 US2 — FR-011).
+    ///
+    /// * [`BindingState::Bound`] → `Type: <name> (<origin>)` where `<origin>` is
+    ///   `override` or `config`, e.g. `Type: Entity (config)` /
+    ///   `Type: Entity (override)`.
+    /// * [`BindingState::NoBinding`] → `no type bound`.
+    ///
+    /// The source locator is *not* in this short label (it can be a long path); the
+    /// UI shows the source separately (see [`binding_source_label`](Self::binding_source_label)).
+    /// When multiple config patterns matched, [`binding`](Self::binding) already
+    /// holds the resolved (most-specific) one, so this reflects that single chosen
+    /// binding (FR-011).
+    #[must_use]
+    pub fn binding_label(&self) -> String {
+        match &self.binding.state {
+            BindingState::Bound {
+                type_name, origin, ..
+            } => {
+                let origin = match origin {
+                    BindingOrigin::Override => "override",
+                    BindingOrigin::Config => "config",
+                };
+                format!("Type: {type_name} ({origin})")
+            }
+            BindingState::NoBinding => "no type bound".to_string(),
+        }
+    }
+
+    /// The bound type's source locator as a display string, or `None` when
+    /// [`BindingState::NoBinding`] (E006 US2 — FR-011).
+    ///
+    /// Prefixes the path with its source kind so the user can tell a Rust source
+    /// from a schema file, e.g. `schema: schemas/app.json` /
+    /// `rust: src/scene.rs`. The full source locator is surfaced alongside the
+    /// short [`binding_label`](Self::binding_label) so the active binding is fully
+    /// visible (FR-011, data-model "active binding visible").
+    #[must_use]
+    pub fn binding_source_label(&self) -> Option<String> {
+        match &self.binding.state {
+            BindingState::Bound { type_source, .. } => {
+                let (kind, path) = match type_source {
+                    crate::binding::TypeSourceLocator::RustSource(p) => ("rust", p),
+                    crate::binding::TypeSourceLocator::SchemaFile(p) => ("schema", p),
+                };
+                Some(format!("{kind}: {}", path.display()))
+            }
+            BindingState::NoBinding => None,
+        }
+    }
+}
+
+/// Build the merged editor-coordinate diagnostic view for a landed
+/// [`ParseResult`] against `buffer` (E006/FR-006, FR-017).
+///
+/// The structural set (`result.diagnostics`) is published in full; the type set
+/// (`result.type_diagnostics`) is first deduped against it via
+/// [`ron_validate::dedup_against_structural`] so any type finding whose byte range
+/// intersects a structural diagnostic is suppressed — structural always wins on
+/// overlap (FR-017). The (kept) structural-then-type sets are then mapped into
+/// [`DiagnosticView`]s (char + line/column) via [`map_diagnostic`]. Structural
+/// findings come first so they take visual/list precedence; each is
+/// distinguishable from the other by [`DiagnosticView::code`]'s
+/// [`source`](ron_core::DiagnosticCode::source) tag (`"ron-core"` vs `"ron-types"`).
+///
+/// This is the single "replace, not merge" publish point for the type set: every
+/// landed result recomputes the whole view, so no stale type finding survives
+/// (FR-006). The structural set is NEVER dropped here — only overlapping TYPE
+/// findings are (structural precedence, FR-017).
+#[must_use]
+pub fn merge_type_diagnostics(result: &ParseResult, buffer: &str) -> Vec<DiagnosticView> {
+    // Suppress type findings that overlap a structural one (structural wins,
+    // FR-017). The structural set is passed by reference and is never mutated.
+    let type_diags = ron_validate::dedup_against_structural(
+        result.type_diagnostics.clone(),
+        &result.diagnostics,
+    );
+    result
+        .diagnostics
+        .iter()
+        .chain(type_diags.iter())
+        .map(|d| map_diagnostic(d, buffer))
+        .collect()
 }

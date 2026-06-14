@@ -281,6 +281,117 @@ impl AppSettings {
     }
 }
 
+/// Whether a binding source locator names a Rust source or a schema file (E006 US2
+/// — FR-008).
+///
+/// A surface-only enum used by the binding-config form so the source-kind picker
+/// has a plain, `Copy`/`PartialEq` value to bind a combo box to; it maps to
+/// [`crate::binding::TypeSourceLocator`] when a rule/override is committed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SourceKind {
+    /// A schema file (E004's serialized JSON-Schema interchange), read as data.
+    #[default]
+    Schema,
+    /// A Rust source file / crate path E004 extracts a `TypeModel` from.
+    Rust,
+}
+
+impl SourceKind {
+    /// Build the matching [`TypeSourceLocator`](crate::binding::TypeSourceLocator)
+    /// for `path`.
+    #[must_use]
+    pub fn locator(self, path: impl Into<PathBuf>) -> crate::binding::TypeSourceLocator {
+        match self {
+            SourceKind::Schema => crate::binding::TypeSourceLocator::SchemaFile(path.into()),
+            SourceKind::Rust => crate::binding::TypeSourceLocator::RustSource(path.into()),
+        }
+    }
+
+    /// Classify an existing locator back into a [`SourceKind`] (for editing a rule).
+    #[must_use]
+    pub fn of(locator: &crate::binding::TypeSourceLocator) -> Self {
+        match locator {
+            crate::binding::TypeSourceLocator::SchemaFile(_) => SourceKind::Schema,
+            crate::binding::TypeSourceLocator::RustSource(_) => SourceKind::Rust,
+        }
+    }
+}
+
+/// Editable form state backing the binding-config window's add/edit controls (E006
+/// US2 — FR-008/FR-009).
+///
+/// Pure UI-input state — **not** persisted (only [`crate::binding::BindingConfig`]
+/// persists). The window reads/writes these text fields each frame and, on
+/// commit, validates them into a [`BindingRule`](crate::binding::BindingRule) or a
+/// [`DocumentOverride`](crate::binding::DocumentOverride). An empty `type_name` or
+/// `source_path` is rejected (the commit button is disabled) so a blank rule is
+/// never created.
+#[derive(Debug, Clone, Default)]
+pub struct BindingFormDraft {
+    /// The glob pattern for a rule (unused by the override form).
+    pub pattern: String,
+    /// Comma-separated exclude globs for a rule (unused by the override form).
+    pub exclude: String,
+    /// The named type to bind to.
+    pub type_name: String,
+    /// The source path (interpreted per [`source_kind`](Self::source_kind)).
+    pub source_path: String,
+    /// Whether the source is a schema file or a Rust source.
+    pub source_kind: SourceKind,
+}
+
+impl BindingFormDraft {
+    /// Build a [`BindingRule`](crate::binding::BindingRule) from this draft, or
+    /// `None` when the `pattern`, `type_name`, or `source_path` are blank (FR-008).
+    ///
+    /// `exclude` is split on commas; empty entries are dropped, and an empty list
+    /// becomes `None` (no exclusions).
+    #[must_use]
+    pub fn to_rule(&self) -> Option<crate::binding::BindingRule> {
+        let pattern = self.pattern.trim();
+        let type_name = self.type_name.trim();
+        let source_path = self.source_path.trim();
+        if pattern.is_empty() || type_name.is_empty() || source_path.is_empty() {
+            return None;
+        }
+        let excludes: Vec<String> = self
+            .exclude
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect();
+        Some(crate::binding::BindingRule {
+            pattern: pattern.to_string(),
+            exclude: if excludes.is_empty() {
+                None
+            } else {
+                Some(excludes)
+            },
+            type_name: type_name.to_string(),
+            type_source: self.source_kind.locator(source_path),
+        })
+    }
+
+    /// Build a [`DocumentOverride`](crate::binding::DocumentOverride) from this
+    /// draft, or `None` when the `type_name` or `source_path` are blank (FR-009).
+    ///
+    /// The override ignores `pattern` / `exclude` (it targets the active document
+    /// directly, not by glob).
+    #[must_use]
+    pub fn to_override(&self) -> Option<crate::binding::DocumentOverride> {
+        let type_name = self.type_name.trim();
+        let source_path = self.source_path.trim();
+        if type_name.is_empty() || source_path.is_empty() {
+            return None;
+        }
+        Some(crate::binding::DocumentOverride {
+            type_name: type_name.to_string(),
+            type_source: self.source_kind.locator(source_path),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -385,6 +385,33 @@ fn append_run(job: &mut LayoutJob, text: &str, font: FontId, color: Color32) {
 /// Default monospace font size (points) for the editor surface.
 const EDITOR_FONT_SIZE: f32 = 13.0;
 
+/// Render the active-binding status strip for `doc` (E006 US2 — FR-011).
+///
+/// Always visible above the editor so the author can tell whether type-awareness is
+/// on and against which type. When [`BindingState::Bound`](crate::binding::BindingState::Bound)
+/// it shows `Type: <name> (<origin>)` (via [`EditorDocument::binding_label`]) plus
+/// the source locator (`schema: …` / `rust: …`, via
+/// [`EditorDocument::binding_source_label`]); when
+/// [`BindingState::NoBinding`](crate::binding::BindingState::NoBinding) it shows an
+/// explicit `no type bound` indicator. The label text is exactly what
+/// [`EditorDocument::binding_label`] returns so tests can assert the shown state by
+/// querying the rendered label rather than scraping pixels.
+fn render_binding_indicator(ui: &mut Ui, doc: &EditorDocument) {
+    ui.horizontal(|ui| {
+        let label = doc.binding_label();
+        if doc.binding.is_bound() {
+            // Bound: emphasize the type label; show the source alongside (weak).
+            ui.strong(label);
+            if let Some(source) = doc.binding_source_label() {
+                ui.weak(source);
+            }
+        } else {
+            // Unbound: explicit "no type bound" indicator (structural-only).
+            ui.weak(label);
+        }
+    });
+}
+
 /// Render the editor surface for `doc`: a monospace multiline editor with a
 /// line-number gutter and (unless `oversize`) syntax highlighting (FR-004/FR-005).
 ///
@@ -405,6 +432,12 @@ pub fn editor_view(ui: &mut Ui, doc: &mut EditorDocument, oversize: bool) -> boo
             ui.weak("Large file — highlighting disabled");
         });
     }
+
+    // Active-binding indicator (E006 US2 — FR-011): always-visible status strip
+    // just above the editor showing the bound type + origin (or "no type bound"),
+    // with the source locator alongside. The resolved (most-specific) binding is
+    // what `doc.binding` holds, so this reflects the single chosen binding.
+    render_binding_indicator(ui, doc);
 
     let dark_mode = ui.visuals().dark_mode;
     let line_count = doc.buffer.lines().count().max(1)
@@ -873,12 +906,22 @@ fn set_caret(ui: &Ui, output: &TextEditOutput, char_offset: usize) {
     state.store(ctx, id);
 }
 
-/// Draw an underline squiggle beneath each diagnostic's character range (FR-008).
+/// Draw an underline squiggle beneath each diagnostic's character range (FR-008,
+/// E006/FR-004).
 ///
 /// For every [`DiagnosticView`], the start/end char offsets are resolved to galley
 /// rectangles via [`Galley::pos_from_cursor`]; the squiggle is drawn just below the
 /// row baseline in the severity colour. Multi-row ranges are underlined per row by
 /// walking the galley rows the range spans. Degenerate (empty) ranges are skipped.
+///
+/// The `diagnostics` slice carries both `ron-core` structural findings and
+/// `ron-validate` type findings (merged by
+/// [`merge_type_diagnostics`](crate::document::merge_type_diagnostics)); both render
+/// here by severity (type Errors like structural Errors, type Warnings in the
+/// warning colour). The two are distinguishable by each view's
+/// [`code`](DiagnosticView::code)
+/// [`source`](ron_core::DiagnosticCode::source) tag, but render uniformly by
+/// severity so existing structural rendering is unchanged.
 fn draw_squiggles(ui: &Ui, galley: &Galley, galley_pos: Pos2, diagnostics: &[DiagnosticView]) {
     let dark_mode = ui.visuals().dark_mode;
     let painter = ui.painter();

@@ -31,6 +31,10 @@ allow = [
     "CC0-1.0",
     "OFL-1.1",
     "Ubuntu-font-1.0",
+    # Added for the jsonschema tree (E006, ron-validate only):
+    # MIT-0 — borrow-or-share (via fluent-uri → referencing → jsonschema).
+    # MIT No Attribution; OSI-approved, strictly more permissive than MIT.
+    "MIT-0",
 ]
 confidence-threshold = 0.8
 
@@ -39,7 +43,25 @@ multiple-versions = "warn"
 wildcards = "deny"
 # ron-core must stay WASM-clean: no native/cc-built or platform-specific runtime
 # deps. These bans document the intent; the wasm32 build gate (T030) is the proof.
-deny = []
+#
+# ron-validate (E006) must stay WASM-clean AND fully offline (ADR-0006, FR-023):
+# it takes `jsonschema` with `default-features = false`, which keeps the default
+# `resolve-http`/TLS resolver — and therefore `reqwest`/`rustls` — out of the
+# tree. The bans below assert those network-transport crates never appear
+# anywhere in the workspace; their presence would mean a `default-features=false`
+# regression and would re-introduce network access. (cargo-tree confirms both are
+# currently ABSENT from the ron-validate tree on native and wasm32.)
+#
+# NOTE: cargo-deny bans are workspace-wide and cannot be scoped per-crate, so the
+# complementary invariant — `jsonschema`/`serde_json` must stay OUT of `ron-core`
+# (it stays rowan-only; HINT-002, AD-007) — is NOT expressed here (those crates
+# are legitimately present in ron-validate/ronin-app). That boundary is enforced
+# instead by ron-core's own manifest plus the T036 dependency-invariant test and
+# the ron-core wasm32 build gate.
+deny = [
+    { name = "reqwest" },
+    { name = "rustls" },
+]
 
 [sources]
 unknown-registry = "deny"

@@ -107,7 +107,7 @@ fn stale_results_are_discarded() {
     // Request only the *stale* generation-1 text directly. The doc's current
     // generation is 2, so whatever the worker delivers for gen 1 must be
     // discarded by `poll_parse` — it can never install.
-    worker.request(1, "(a: 1)".to_string());
+    worker.request(1, "(a: 1)".to_string(), None);
 
     // Poll across a bounded window; a stale result must never install, regardless
     // of when (or whether) the worker has delivered it yet.

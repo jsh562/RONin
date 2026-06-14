@@ -14,14 +14,18 @@ use ron_core::Severity;
 
 use crate::diagnostics_map::DiagnosticView;
 
-/// Render the Problems panel and report a clicked row (FR-009).
+/// Render the Problems panel and report a clicked row (FR-009, E006/FR-004).
 ///
 /// Rows are presented ordered by source location — line ascending, then column
 /// ascending — by sorting a copy of the diagnostic indices (the input slice is
-/// never reordered). Each row shows a severity icon, the stable `RON-Pxxxx` code,
-/// the message, and the one-based `line:col`. Returns `Some(i)`, where `i` indexes
-/// the **original** `diagnostics` slice, when the user clicks a row this frame;
-/// otherwise `None`. An empty slice renders a faint "No problems" state.
+/// never reordered). Each row shows a severity icon, the stable `RON-Pxxxx` /
+/// `RON-Vxxxx` code, the message, the one-based `line:col`, and a `source` tag
+/// (`(ron-core)` for structural findings, `(ron-types)` for type findings) so a
+/// reader can tell the two apart. Returns `Some(i)`, where `i` indexes the
+/// **original** `diagnostics` slice, when the user clicks a row this frame;
+/// otherwise `None`. An empty slice renders a faint "No problems" state. Clicking a
+/// row (structural or type) returns its index so the shell can jump the caret to
+/// its precise range.
 pub fn problems_panel(ui: &mut egui::Ui, diagnostics: &[DiagnosticView]) -> Option<usize> {
     if diagnostics.is_empty() {
         ui.weak("No problems");
@@ -40,14 +44,17 @@ pub fn problems_panel(ui: &mut egui::Ui, diagnostics: &[DiagnosticView]) -> Opti
     for &idx in &order {
         let d = &diagnostics[idx];
         let (line, col) = d.line_col.0;
-        // Lines/columns are zero-based internally; present them one-based.
+        // Lines/columns are zero-based internally; present them one-based. The
+        // `source` tag distinguishes type (`ron-types`) from structural
+        // (`ron-core`) findings without disturbing the existing fields.
         let label = format!(
-            "{} {}  {}  [{}:{}]",
+            "{} {}  {}  [{}:{}]  ({})",
             severity_icon(d.severity),
             d.code,
             d.message,
             line + 1,
-            col + 1
+            col + 1,
+            d.code.source(),
         );
         // A selectable, full-width row so the whole entry is the click target.
         if ui.selectable_label(false, label).clicked() {

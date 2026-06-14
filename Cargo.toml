@@ -4,6 +4,7 @@ members = [
     "src/ron-core",
     "src/ron-types",
     "src/ronin-app",
+    "src/ron-validate",
 ]
 # The cargo-fuzz crate depends on `libfuzzer-sys` (nightly + libFuzzer only) and
 # must NOT be part of the stable workspace build/test. It is built solely via

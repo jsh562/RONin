@@ -9,11 +9,19 @@
 //! # Stable public contract (AD-003 / TR-013)
 //!
 //! [`Severity`] and [`DiagnosticCode`] are part of `ron-core`'s 0.x public API.
-//! Each code is a stable, namespaced `RON-Pxxxx` string (the `P` namespace is
-//! reserved for *parse/recovery* diagnostics; later epics may add other
-//! namespaces such as validation). Codes and their severities MUST NOT be
-//! renumbered or repurposed; new recovery situations get new codes appended to
-//! the registry.
+//! Each code is a stable, namespaced string. Two namespaces exist:
+//!
+//! * `RON-Pxxxx` — *parse/recovery* diagnostics emitted by `ron-core`'s
+//!   error-tolerant parser; their [`source`](DiagnosticCode::source) is
+//!   `"ron-core"`.
+//! * `RON-Vxxxx` — *type/validation* diagnostics emitted by the downstream
+//!   `ron-validate` crate (E006) over a bound `TypeModel`; their
+//!   [`source`](DiagnosticCode::source) is `"ron-types"`. `ron-core` itself
+//!   never produces these (it stays `rowan`-only and acquires no schema), but it
+//!   owns the stable code registry so both crates agree on the strings.
+//!
+//! Codes and their severities MUST NOT be renumbered or repurposed; new
+//! situations get new codes appended to the registry within their namespace.
 //!
 //! # One diagnostic per recovery point (TR-013)
 //!
@@ -56,13 +64,17 @@ impl std::fmt::Display for Severity {
     }
 }
 
-/// A stable, namespaced diagnostic code from the `RON-Pxxxx` parse registry
-/// (AD-003 / TR-013).
+/// A stable, namespaced diagnostic code from the `RON-Pxxxx` parse registry or
+/// the `RON-Vxxxx` type/validation registry (AD-003 / TR-013, E006/FR-007).
 ///
-/// Every variant maps 1:1 to a fixed `RON-Pxxxx` string via [`DiagnosticCode::code`].
-/// The enum is `#[non_exhaustive]` so new recovery codes can be appended without
-/// a breaking change, but **existing** variants, their code strings, and their
-/// default severities are stable across 0.x.
+/// Every variant maps 1:1 to a fixed `RON-Pxxxx` / `RON-Vxxxx` string via
+/// [`DiagnosticCode::code`], and to a producing crate via
+/// [`DiagnosticCode::source`] (`"ron-core"` for `RON-P`, `"ron-types"` for
+/// `RON-V`). The enum is `#[non_exhaustive]` so new codes can be appended
+/// without a breaking change, but **existing** variants, their code strings, and
+/// their default severities are stable across 0.x. The `RON-V` validation codes
+/// are owned here as a shared registry; `ron-core` never emits them (it stays
+/// `rowan`-only) — the downstream `ron-validate` crate does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 pub enum DiagnosticCode {
@@ -82,10 +94,34 @@ pub enum DiagnosticCode {
     /// `RON-P0005` — a struct field or map entry was missing its value after a
     /// separator; an empty/missing value node was recorded.
     MissingValue,
+    /// `RON-V0001` — a value's type does not match the bound type model (e.g. a
+    /// string where an integer is expected). Emitted by `ron-validate`
+    /// (FR-002); [`Severity::Error`].
+    TypeMismatch,
+    /// `RON-V0002` — a field required by the bound type model is absent from a
+    /// struct/map. Emitted by `ron-validate` (FR-002); [`Severity::Error`].
+    MissingRequiredField,
+    /// `RON-V0003` — an enum variant is not one of the variants the bound type
+    /// model allows (invalid/unknown variant). Emitted by `ron-validate`
+    /// (FR-002); [`Severity::Error`].
+    InvalidEnumVariant,
+    /// `RON-V0004` — a tuple (or tuple-struct/tuple-variant) has the wrong
+    /// arity for the bound type model. Emitted by `ron-validate` (FR-002);
+    /// [`Severity::Error`].
+    WrongTupleArity,
+    /// `RON-V0005` — a value violates a value constraint the bound type model
+    /// expresses (out-of-range numeric, length/pattern bound, etc.). Emitted by
+    /// `ron-validate` (FR-002); [`Severity::Error`].
+    ValueConstraintViolation,
+    /// `RON-V0006` — an extra/unknown field is present on a struct/map the bound
+    /// type model marks `deny_unknown_fields`. Serde-faithful: only flagged for
+    /// strict types (FR-018). Emitted by `ron-validate`; [`Severity::Warning`].
+    UnknownField,
 }
 
 impl DiagnosticCode {
-    /// The stable `RON-Pxxxx` string for this code (part of the public API).
+    /// The stable `RON-Pxxxx` / `RON-Vxxxx` string for this code (part of the
+    /// public API).
     #[inline]
     #[must_use]
     pub fn code(self) -> &'static str {
@@ -95,11 +131,21 @@ impl DiagnosticCode {
             DiagnosticCode::NestingDepthExceeded => "RON-P0003",
             DiagnosticCode::MissingSeparator => "RON-P0004",
             DiagnosticCode::MissingValue => "RON-P0005",
+            DiagnosticCode::TypeMismatch => "RON-V0001",
+            DiagnosticCode::MissingRequiredField => "RON-V0002",
+            DiagnosticCode::InvalidEnumVariant => "RON-V0003",
+            DiagnosticCode::WrongTupleArity => "RON-V0004",
+            DiagnosticCode::ValueConstraintViolation => "RON-V0005",
+            DiagnosticCode::UnknownField => "RON-V0006",
         }
     }
 
-    /// The default [`Severity`] for this code. All current parse-recovery codes
-    /// are [`Severity::Error`]; the mapping is part of the stable contract.
+    /// The default [`Severity`] for this code. All parse-recovery (`RON-P`)
+    /// codes are [`Severity::Error`]. Among the type/validation (`RON-V`) codes,
+    /// the hard-mismatch classes — type mismatch, missing-required, invalid
+    /// variant, wrong arity, value-constraint — are [`Severity::Error`], while
+    /// an extra/unknown field is a [`Severity::Warning`] (FR-005, FR-018). The
+    /// mapping is part of the stable contract.
     #[inline]
     #[must_use]
     pub fn default_severity(self) -> Severity {
@@ -108,7 +154,29 @@ impl DiagnosticCode {
             | DiagnosticCode::UnclosedDelimiter
             | DiagnosticCode::NestingDepthExceeded
             | DiagnosticCode::MissingSeparator
-            | DiagnosticCode::MissingValue => Severity::Error,
+            | DiagnosticCode::MissingValue
+            | DiagnosticCode::TypeMismatch
+            | DiagnosticCode::MissingRequiredField
+            | DiagnosticCode::InvalidEnumVariant
+            | DiagnosticCode::WrongTupleArity
+            | DiagnosticCode::ValueConstraintViolation => Severity::Error,
+            DiagnosticCode::UnknownField => Severity::Warning,
+        }
+    }
+
+    /// The stable `source` tag identifying which crate produces this code
+    /// (E006/FR-007). It is derived from the code-string namespace prefix:
+    /// `"ron-types"` for any `RON-V` validation code and `"ron-core"` for any
+    /// `RON-P` parse/recovery code. This tag lets a surface distinguish
+    /// type findings from structural ones when rendering or deduping. Total and
+    /// stable across 0.x.
+    #[inline]
+    #[must_use]
+    pub fn source(self) -> &'static str {
+        if self.code().starts_with("RON-V") {
+            "ron-types"
+        } else {
+            "ron-core"
         }
     }
 }
@@ -233,6 +301,130 @@ mod tests {
         assert_eq!(DiagnosticCode::NestingDepthExceeded.code(), "RON-P0003");
         assert_eq!(DiagnosticCode::MissingSeparator.code(), "RON-P0004");
         assert_eq!(DiagnosticCode::MissingValue.code(), "RON-P0005");
+    }
+
+    /// The full set of `RON-P` parse codes (used by the cross-namespace tests).
+    const PARSE_CODES: [DiagnosticCode; 5] = [
+        DiagnosticCode::UnexpectedToken,
+        DiagnosticCode::UnclosedDelimiter,
+        DiagnosticCode::NestingDepthExceeded,
+        DiagnosticCode::MissingSeparator,
+        DiagnosticCode::MissingValue,
+    ];
+
+    /// The full set of `RON-V` type/validation codes (E006).
+    const VALIDATION_CODES: [DiagnosticCode; 6] = [
+        DiagnosticCode::TypeMismatch,
+        DiagnosticCode::MissingRequiredField,
+        DiagnosticCode::InvalidEnumVariant,
+        DiagnosticCode::WrongTupleArity,
+        DiagnosticCode::ValueConstraintViolation,
+        DiagnosticCode::UnknownField,
+    ];
+
+    /// E006/FR-007: every `RON-V` code is in the `RON-V` namespace, is 4-digit,
+    /// unique, and never collides with a `RON-P` parse code.
+    #[test]
+    fn validation_codes_are_namespaced_unique_and_disjoint_from_parse() {
+        let mut seen = std::collections::BTreeSet::new();
+        for c in VALIDATION_CODES {
+            let s = c.code();
+            assert!(
+                s.starts_with("RON-V"),
+                "code {s:?} must be in the RON-V validation namespace"
+            );
+            assert_eq!(s.len(), "RON-V0000".len(), "codes are RON-Vxxxx (4 digits)");
+            assert!(
+                s["RON-V".len()..].chars().all(|ch| ch.is_ascii_digit()),
+                "code {s:?} must end in 4 decimal digits"
+            );
+            assert!(seen.insert(s), "duplicate validation code string {s:?}");
+            // default_severity must be total (no panic).
+            let _ = c.default_severity();
+            assert_eq!(c.to_string(), s);
+        }
+    }
+
+    /// E006/FR-007: the combined P+V code set has no duplicates — the two
+    /// namespaces are globally unique across the registry.
+    #[test]
+    fn all_codes_are_globally_unique() {
+        let mut seen = std::collections::BTreeSet::new();
+        for c in PARSE_CODES.into_iter().chain(VALIDATION_CODES) {
+            assert!(
+                seen.insert(c.code()),
+                "duplicate code string {:?} across P+V namespaces",
+                c.code()
+            );
+        }
+        assert_eq!(
+            seen.len(),
+            PARSE_CODES.len() + VALIDATION_CODES.len(),
+            "combined registry size must equal P + V counts"
+        );
+    }
+
+    /// E006/FR-007: `source()` is `"ron-types"` for every V code and
+    /// `"ron-core"` for every P code, consistent with the namespace prefix.
+    #[test]
+    fn source_tag_matches_namespace() {
+        for c in PARSE_CODES {
+            assert_eq!(
+                c.source(),
+                "ron-core",
+                "parse code {} must be ron-core",
+                c.code()
+            );
+        }
+        for c in VALIDATION_CODES {
+            assert_eq!(
+                c.source(),
+                "ron-types",
+                "validation code {} must be ron-types",
+                c.code()
+            );
+        }
+    }
+
+    /// E006: the new validation code strings are a public contract — pin them.
+    #[test]
+    fn validation_code_strings_are_pinned() {
+        assert_eq!(DiagnosticCode::TypeMismatch.code(), "RON-V0001");
+        assert_eq!(DiagnosticCode::MissingRequiredField.code(), "RON-V0002");
+        assert_eq!(DiagnosticCode::InvalidEnumVariant.code(), "RON-V0003");
+        assert_eq!(DiagnosticCode::WrongTupleArity.code(), "RON-V0004");
+        assert_eq!(DiagnosticCode::ValueConstraintViolation.code(), "RON-V0005");
+        assert_eq!(DiagnosticCode::UnknownField.code(), "RON-V0006");
+    }
+
+    /// E006/FR-005/FR-018: the V severities follow the policy — the five
+    /// hard-mismatch classes are Error, the extra/unknown field is Warning.
+    #[test]
+    fn validation_default_severities_match_policy() {
+        assert_eq!(
+            DiagnosticCode::TypeMismatch.default_severity(),
+            Severity::Error
+        );
+        assert_eq!(
+            DiagnosticCode::MissingRequiredField.default_severity(),
+            Severity::Error
+        );
+        assert_eq!(
+            DiagnosticCode::InvalidEnumVariant.default_severity(),
+            Severity::Error
+        );
+        assert_eq!(
+            DiagnosticCode::WrongTupleArity.default_severity(),
+            Severity::Error
+        );
+        assert_eq!(
+            DiagnosticCode::ValueConstraintViolation.default_severity(),
+            Severity::Error
+        );
+        assert_eq!(
+            DiagnosticCode::UnknownField.default_severity(),
+            Severity::Warning
+        );
     }
 
     /// `Diagnostic::new` adopts the code's default severity and stores the range.

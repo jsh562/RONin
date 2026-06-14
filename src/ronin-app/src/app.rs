@@ -45,6 +45,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use crate::binding::{BindingConfig, BindingRule, DocumentOverride, TypeSourceLocator};
 use crate::document::{ByteFidelityProfile, EditorDocument};
 use crate::editor_view::editor_view;
 use crate::fileio::{open_path, save_bytes, save_document, OpenError, SaveError};
@@ -53,6 +54,7 @@ use crate::problems_panel::problems_panel;
 use crate::reparse::ReparseWorker;
 use crate::settings::{AppSettings, BlankLinePolicy, FormattingConfig, WindowGeometry};
 use crate::snippets::{SnippetSet, UserSnippetFile, USER_SNIPPET_TEMPLATE};
+use crate::type_acquire::resolve_and_acquire;
 use crate::workspace::{ClosedDocumentRecord, EditorWorkspace};
 use ron_core::{FormatResult, SyntaxKind, SyntaxNode};
 
@@ -218,6 +220,43 @@ pub struct App {
     /// Whether the Snippets browser window is open (FR-025). Lists each effective
     /// snippet's prefix + description and offers the open-user-file command.
     show_snippets: bool,
+    /// The project-scoped binding configuration (glob → type + source) loaded from
+    /// the active project's `.ronin/bindings.json` (E006 US2 — FR-008/FR-013).
+    ///
+    /// This is the **per-project** config — distinct from the OS-global
+    /// [`AppSettings`]. It is loaded from / written to
+    /// [`binding_root`](Self::binding_root)`/.ronin/bindings.json`; an absent or
+    /// corrupt file degrades to an empty config (no rules → no-binding,
+    /// structural-only) per [`BindingConfig::load_from`] (FR-013).
+    binding_config: BindingConfig,
+    /// The project root the [`binding_config`](Self::binding_config) was loaded from
+    /// and is written back to (E006 US2 — FR-013).
+    ///
+    /// **Derivation choice (pragmatic):** RONin's shell has no explicit "open
+    /// project" concept yet, so the project root is derived as the parent directory
+    /// of the *first opened document with a path*, falling back to the current
+    /// working directory when no such document exists (e.g. only untitled buffers).
+    /// This keeps the binding config alongside the file the user is actually editing
+    /// — the common single-folder-of-`.ron`-files case — without inventing a
+    /// project-picker UI. A future "workspace root" concept (E008) can refine this;
+    /// the binding core ([`crate::binding`]) is already root-agnostic. Once set from
+    /// a document path it is **not** moved by later opens, so the config stays
+    /// stable for the session.
+    binding_root: PathBuf,
+    /// Whether the binding-config window is open (E006 US2 — FR-009/FR-011). Hosts
+    /// the per-document override control and the project rule editor.
+    show_bindings: bool,
+    /// Editable draft for the per-document override form (E006 US2 — FR-009). Pure
+    /// UI input; committed into the active doc's `override_` via the override
+    /// control. Never persisted.
+    override_draft: crate::settings::BindingFormDraft,
+    /// Editable draft for the project rule add/edit form (E006 US2 — FR-008). Pure
+    /// UI input; committed into [`binding_config`](Self::binding_config). Never
+    /// persisted (only the resulting config is).
+    rule_draft: crate::settings::BindingFormDraft,
+    /// The index of the rule currently being edited in-place, or `None` when the
+    /// rule form is adding a new rule (E006 US2 — FR-008).
+    editing_rule: Option<usize>,
 }
 
 impl App {
@@ -232,6 +271,16 @@ impl App {
         // Load the effective snippet set from the OS config dir; a missing/malformed
         // user file degrades to built-ins and surfaces a notice below (FR-017).
         let snippets = SnippetSet::load();
+        // Derive the initial project root from the CLI path's parent when given,
+        // else the CWD; the binding config is loaded from `<root>/.ronin/bindings.json`
+        // (FR-013). `open_file` below re-derives + reloads from the opened doc.
+        let binding_root = cli_path
+            .as_deref()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let binding_config =
+            BindingConfig::load_from(&BindingConfig::project_config_path(&binding_root));
         let mut app = Self {
             workspace: EditorWorkspace::new(),
             worker: ReparseWorker::new(),
@@ -243,6 +292,12 @@ impl App {
             show_settings: false,
             snippets,
             show_snippets: false,
+            binding_config,
+            binding_root,
+            show_bindings: false,
+            override_draft: crate::settings::BindingFormDraft::default(),
+            rule_draft: crate::settings::BindingFormDraft::default(),
+            editing_rule: None,
         };
         // Surface any snippet-file degrade notice once at startup (FR-017/FR-034).
         app.surface_snippet_notice();
@@ -345,6 +400,283 @@ impl App {
     #[must_use]
     pub fn recently_closed_count(&self) -> usize {
         self.workspace.recently_closed().len()
+    }
+
+    /// The project-scoped binding configuration, read-only (E006 US2 — FR-008).
+    ///
+    /// This is the per-project glob→type+source mapping (NOT the OS-global
+    /// [`AppSettings`]). Loaded from / written to
+    /// [`binding_root`](Self::binding_root)`/.ronin/bindings.json` (FR-013).
+    #[must_use]
+    pub fn binding_config(&self) -> &BindingConfig {
+        &self.binding_config
+    }
+
+    /// The project root the binding config is loaded from / written to (FR-013).
+    #[must_use]
+    pub fn binding_root(&self) -> &Path {
+        &self.binding_root
+    }
+
+    /// Whether the binding-config / override window is open (for tests/hosts).
+    #[must_use]
+    pub fn bindings_open(&self) -> bool {
+        self.show_bindings
+    }
+
+    /// Open or close the binding-config / override window (E006 US2 — FR-009/FR-011).
+    pub fn set_bindings_open(&mut self, open: bool) {
+        self.show_bindings = open;
+    }
+
+    /// Resolve + acquire the active document's binding and (re-)apply it (E006 US2 —
+    /// FR-011/FR-014).
+    ///
+    /// Takes the active document's path + its per-document override + the project
+    /// [`binding_config`](Self::binding_config), runs [`resolve_and_acquire`], and:
+    ///
+    /// 1. stores the resolved [`TypeBinding`](crate::binding::TypeBinding) on the doc
+    ///    for **display** (the active-binding indicator reads this — FR-011), and
+    /// 2. installs the acquired [`Option<BoundType>`](crate::reparse::BoundType) into
+    ///    `doc.bound_type` so the off-frame worker validates against it, then
+    /// 3. bumps the edit generation and requests an off-frame reparse so type
+    ///    validation re-runs against the new (or absent) binding immediately.
+    ///
+    /// This is invoked when a document becomes active / is opened and on the explicit
+    /// override / config edits below. It is the single re-resolve + re-acquire +
+    /// re-validate primitive shared by the FR-021 trigger set (T037): a binding
+    /// change (becomes-active / open), a per-document override change
+    /// ([`set_active_override`](Self::set_active_override) /
+    /// [`clear_active_override`](Self::clear_active_override)), and the explicit
+    /// type-info re-acquire ([`reacquire_active_binding`](Self::reacquire_active_binding))
+    /// all route through here so recomputation is **immediate** — never deferred to
+    /// the next edit — and no stale type finding survives (the worker's full-set
+    /// replace on the next landed result, driven by the reparse requested here,
+    /// guarantees this). The `BindingConfig`-change trigger walks every open doc via
+    /// [`reapply_bindings_to_all_docs`](Self::reapply_bindings_to_all_docs); the
+    /// document-edit trigger is the editor's own `on_edit` → `request_reparse` (the
+    /// bound model travels with each request via
+    /// [`EditorDocument::request_reparse`](crate::document::EditorDocument::request_reparse)).
+    /// A no-op when no tab is open.
+    pub fn apply_binding_to_active(&mut self) {
+        let Some(idx) = self.workspace.active_index() else {
+            return;
+        };
+        // Snapshot the inputs `resolve_and_acquire` needs (path + override) so the
+        // borrow of `self.binding_config` does not collide with the later mut borrow
+        // of the document.
+        let Some(doc) = self.workspace.get(idx) else {
+            return;
+        };
+        let path = doc.path.clone();
+        let override_ = doc.override_.clone();
+        // Thread the project root so an out-of-project / path-traversal type_source
+        // degrades that binding to structural-only and is never read (FR-025).
+        let (binding, bound) = resolve_and_acquire(
+            &self.binding_config,
+            path.as_deref(),
+            override_.as_ref(),
+            &self.binding_root,
+        );
+        let threshold = self.settings.effective_large_file_threshold();
+        let Some(doc) = self.workspace.get_mut(idx) else {
+            return;
+        };
+        doc.binding = binding;
+        doc.bound_type = bound;
+        // Degrade type validation on E003's oversize signal, exactly like
+        // highlighting/squiggles (T040 — FR-015/FR-024): an oversize document ships
+        // no bound type to the worker, so it produces zero type diagnostics. Set the
+        // flag here so the immediate reparse below already honors it (the per-frame
+        // pump also keeps it reconciled as the buffer changes).
+        doc.validation_suppressed = doc.oversize(threshold);
+        // Re-run validation against the (possibly changed) binding immediately.
+        doc.on_edit();
+        doc.request_reparse(&self.worker);
+    }
+
+    /// Explicitly re-acquire the active document's bound `TypeModel` from its source
+    /// and re-validate — the **type-info change** trigger of FR-021 (b) / FR-014
+    /// (T037).
+    ///
+    /// FR-021 (b) requires that when the bound `type_source` is re-acquired and
+    /// yields a different [`TypeModel`](ron_types::TypeModel) the document
+    /// re-validates against it. RONin does **not** auto-watch the filesystem for an
+    /// externally edited source file in this MVP (filesystem-watch auto-detection is
+    /// out of scope); instead this is the explicit, on-demand re-acquire the user (or
+    /// host) invokes to pick up a changed source/mapping. It re-runs
+    /// [`resolve_and_acquire`] for the active document (re-reading the `type_source`
+    /// from disk through E004) and drives an immediate off-frame reparse, so a source
+    /// that changed since it was last acquired is picked up and re-validated now —
+    /// not deferred to the next edit.
+    ///
+    /// Mechanically this is [`apply_binding_to_active`](Self::apply_binding_to_active)
+    /// (the shared re-resolve + re-acquire + re-validate primitive); it is exposed
+    /// under an intent-revealing name so the type-info re-acquire trigger is a
+    /// first-class, callable action. A no-op when no tab is open.
+    pub fn reacquire_active_binding(&mut self) {
+        self.apply_binding_to_active();
+    }
+
+    /// Re-acquire **every** open document's bound `TypeModel` from its source and
+    /// re-validate (E006 US3 — FR-014/FR-021 (b)).
+    ///
+    /// The all-documents companion to
+    /// [`reacquire_active_binding`](Self::reacquire_active_binding): when the user
+    /// asks to reload types after editing a shared source/schema, every open doc
+    /// re-runs acquisition and re-validates immediately. Delegates to
+    /// [`reapply_bindings_to_all_docs`](Self::reapply_bindings_to_all_docs).
+    pub fn reload_types(&mut self) {
+        self.reapply_bindings_to_all_docs();
+    }
+
+    /// Set the active document's per-document override and re-apply its binding
+    /// (E006 US2 — FR-009).
+    ///
+    /// The override binds the active document to `type_name` from `type_source` for
+    /// the session, taking precedence over any project rule (override > config). It
+    /// is never persisted. After setting it, [`apply_binding_to_active`](Self::apply_binding_to_active)
+    /// re-resolves so the override takes effect immediately. A no-op when no tab is
+    /// open.
+    pub fn set_active_override(&mut self, type_name: String, type_source: TypeSourceLocator) {
+        let Some(doc) = self.workspace.active_document_mut() else {
+            return;
+        };
+        doc.override_ = Some(DocumentOverride {
+            type_name,
+            type_source,
+        });
+        self.apply_binding_to_active();
+    }
+
+    /// Clear the active document's per-document override and re-apply its binding
+    /// (E006 US2 — FR-009).
+    ///
+    /// After clearing, resolution falls back to the project config (or no binding),
+    /// applied immediately via [`apply_binding_to_active`](Self::apply_binding_to_active).
+    /// A no-op when no tab is open or no override was set.
+    pub fn clear_active_override(&mut self) {
+        let Some(doc) = self.workspace.active_document_mut() else {
+            return;
+        };
+        if doc.override_.is_none() {
+            return;
+        }
+        doc.override_ = None;
+        self.apply_binding_to_active();
+    }
+
+    /// Replace the whole project binding config, persist it, and re-apply bindings
+    /// to every open document (E006 US2 — FR-008/FR-013).
+    ///
+    /// Used by the rule editor's add / edit / remove operations. The new config is
+    /// written best-effort to `<root>/.ronin/bindings.json` (an IO error is logged
+    /// and swallowed, mirroring [`persist_settings`](Self::persist_settings) — a
+    /// failed write must never crash the editor), then bindings are re-resolved for
+    /// all open docs so a rule change takes effect immediately (FR-014).
+    pub fn set_binding_config(&mut self, config: BindingConfig) {
+        self.binding_config = config;
+        self.persist_binding_config();
+        self.reapply_bindings_to_all_docs();
+    }
+
+    /// Add a rule to the project binding config (E006 US2 — FR-008).
+    pub fn add_binding_rule(&mut self, rule: BindingRule) {
+        let mut config = self.binding_config.clone();
+        config.rules.push(rule);
+        self.set_binding_config(config);
+    }
+
+    /// Remove the binding rule at `idx`, if in range (E006 US2 — FR-008).
+    pub fn remove_binding_rule(&mut self, idx: usize) {
+        if idx >= self.binding_config.rules.len() {
+            return;
+        }
+        let mut config = self.binding_config.clone();
+        config.rules.remove(idx);
+        self.set_binding_config(config);
+    }
+
+    /// Replace the binding rule at `idx` with `rule`, if in range (E006 US2 —
+    /// FR-008).
+    pub fn replace_binding_rule(&mut self, idx: usize, rule: BindingRule) {
+        if idx >= self.binding_config.rules.len() {
+            return;
+        }
+        let mut config = self.binding_config.clone();
+        config.rules[idx] = rule;
+        self.set_binding_config(config);
+    }
+
+    /// Persist the project binding config to `<root>/.ronin/bindings.json`,
+    /// swallowing any IO error (E006 US2 — FR-013).
+    ///
+    /// Best-effort, exactly like [`persist_settings`](Self::persist_settings): a
+    /// failed write is logged and ignored so binding persistence can never crash the
+    /// editor or block editing.
+    fn persist_binding_config(&self) {
+        let path = BindingConfig::project_config_path(&self.binding_root);
+        if let Err(e) = self.binding_config.save_to(&path) {
+            tracing::warn!(error = %e, "failed to persist project binding config");
+        }
+    }
+
+    /// Re-resolve + re-acquire bindings for every open document (E006 US2 —
+    /// FR-014).
+    ///
+    /// Walks all open tabs, recomputes each document's display binding and bound
+    /// type from the current project config + that document's override, and requests
+    /// an off-frame reparse so a config change re-validates open docs immediately.
+    fn reapply_bindings_to_all_docs(&mut self) {
+        let threshold = self.settings.effective_large_file_threshold();
+        for idx in 0..self.workspace.len() {
+            let Some(doc) = self.workspace.get(idx) else {
+                continue;
+            };
+            let path = doc.path.clone();
+            let override_ = doc.override_.clone();
+            // Thread the project root for FR-025 containment (see
+            // `apply_binding_to_active`): an unsafe type_source degrades that rule.
+            let (binding, bound) = resolve_and_acquire(
+                &self.binding_config,
+                path.as_deref(),
+                override_.as_ref(),
+                &self.binding_root,
+            );
+            if let Some(doc) = self.workspace.get_mut(idx) {
+                doc.binding = binding;
+                doc.bound_type = bound;
+                // Same E003-consistent oversize degrade as `apply_binding_to_active`
+                // (T040): suppress type validation for an oversize document.
+                doc.validation_suppressed = doc.oversize(threshold);
+                doc.on_edit();
+                doc.request_reparse(&self.worker);
+            }
+        }
+    }
+
+    /// Re-derive the project root from a newly opened document's path when the root
+    /// has not yet been pinned to a real file (E006 US2 — FR-013).
+    ///
+    /// The shell has no explicit project picker, so the first opened *on-disk*
+    /// document's parent directory becomes the project root and its
+    /// `.ronin/bindings.json` is loaded. Subsequent opens do not move an
+    /// already-file-derived root (the config stays stable for the session). When the
+    /// root changes, the config is reloaded from the new location.
+    fn maybe_adopt_project_root(&mut self, doc_path: &Path) {
+        // Only adopt a root from a document that lives under a parent directory.
+        let Some(parent) = doc_path.parent() else {
+            return;
+        };
+        // If we already point at this parent, nothing to do.
+        if self.binding_root == parent {
+            return;
+        }
+        // Pin the root to the opened document's directory and reload the config from
+        // that location (absent/corrupt → empty, no crash — FR-013).
+        self.binding_root = parent.to_path_buf();
+        self.binding_config =
+            BindingConfig::load_from(&BindingConfig::project_config_path(&self.binding_root));
     }
 
     /// The live notices (for tests and host integration).
@@ -759,6 +1091,9 @@ impl App {
         // path), so never-saved buffers stay exempt.
         if let Some(idx) = self.find_open_tab_for(path) {
             self.workspace.switch(idx);
+            // Re-applying the binding for the now-active tab keeps the indicator
+            // accurate after a focus-existing switch (FR-011).
+            self.apply_binding_to_active();
             return;
         }
         match open_path(path) {
@@ -769,6 +1104,12 @@ impl App {
                 doc.on_edit();
                 doc.request_reparse(&self.worker);
                 self.workspace.open(doc);
+                // Adopt a project root from this on-disk document (reloading the
+                // config if the root moved), then resolve + apply the binding so the
+                // freshly opened doc validates against its mapped type and the
+                // active-binding indicator is populated (E006 US2 — FR-011/FR-013).
+                self.maybe_adopt_project_root(path);
+                self.apply_binding_to_active();
             }
             Err(e) => {
                 self.push_open_error(&e, path);
@@ -804,6 +1145,9 @@ impl App {
     /// Create a fresh, empty untitled document and make it the active tab.
     pub fn new_untitled(&mut self) {
         self.workspace.push_untitled();
+        // A path-less untitled buffer resolves to NoBinding; applying it populates
+        // the active-binding indicator ("no type bound") for the new tab (FR-011).
+        self.apply_binding_to_active();
     }
 
     /// The live unsaved-changes prompt, if one is open (for tests/hosts).
@@ -1227,6 +1571,7 @@ impl App {
                     existing
                 };
                 self.workspace.switch(focus);
+                self.apply_binding_to_active();
                 return true;
             }
         }
@@ -1235,6 +1580,9 @@ impl App {
             doc.on_edit();
             doc.request_reparse(&self.worker);
         }
+        // Resolve + apply the binding for the reopened (now-active) doc so its
+        // active-binding indicator is populated (E006 US2 — FR-011).
+        self.apply_binding_to_active();
         true
     }
 
@@ -1303,6 +1651,53 @@ impl App {
         }
     }
 
+    /// Replace the active document's buffer and trigger an off-frame reparse, as a
+    /// real edit would (test / host integration helper for the FR-021 (a) trigger).
+    ///
+    /// Mirrors the editor's own edit path exactly: it sets the buffer, bumps the
+    /// edit generation via [`EditorDocument::on_edit`], and requests a coalesced
+    /// off-frame reparse via [`EditorDocument::request_reparse`] (which carries the
+    /// document's currently-bound type with the request, so type validation re-runs
+    /// against the bound model — FR-021 (a)). A headless test then drives the App's
+    /// real worker to completion with [`poll_documents`](Self::poll_documents). A
+    /// no-op when no tab is open.
+    pub fn replace_active_buffer_for_test(&mut self, buffer: &str) {
+        {
+            let Some(doc) = self.workspace.active_document_mut() else {
+                return;
+            };
+            doc.buffer = buffer.to_string();
+            doc.on_edit();
+        }
+        // Mirror the real per-frame edit path: the frame loop's `pump_documents`
+        // reconciles the oversize type-validation degrade flag against the (now
+        // edited) buffer *before* requesting a reparse, so an edit that crosses the
+        // large-file threshold flips validation on/off correctly (T040). Reconcile
+        // here too so this test/host edit helper exercises the same gate.
+        self.reconcile_validation_degrade();
+        if let Some(doc) = self.workspace.active_document_mut() {
+            doc.request_reparse(&self.worker);
+        }
+    }
+
+    /// Drain ready parse results into every open document, returning whether any
+    /// installed (for tests / host integration of the off-frame pump).
+    ///
+    /// This is the same per-document poll the frame loop runs via
+    /// [`pump_documents`](Self::pump_documents), exposed so a headless test can drive
+    /// the App's *own* off-frame [`ReparseWorker`] to completion (request → poll
+    /// until install) and observe binding-driven type diagnostics land on the active
+    /// document — the real end-to-end path (E006 US2 — FR-013).
+    pub fn poll_documents(&mut self) -> bool {
+        let mut any = false;
+        for doc in self.workspace.documents_mut() {
+            if doc.poll_parse(&self.worker) {
+                any = true;
+            }
+        }
+        any
+    }
+
     /// Drain ready parse results into every document and request reparses for any
     /// document whose buffer advanced (FR-006).
     ///
@@ -1310,7 +1705,13 @@ impl App {
     /// repaint to show it). Runs for all documents — not just the active one — so
     /// background tabs stay current; none of this touches `ron_core::parse`
     /// directly (the worker owns parsing).
+    ///
+    /// Before requesting reparses it reconciles each document's type-validation
+    /// degrade flag against the live buffer size (T040), so type validation degrades
+    /// on E003's oversize threshold exactly like highlighting/squiggles and resumes
+    /// automatically once an oversize document is edited back below the threshold.
     fn pump_documents(&mut self) -> bool {
+        self.reconcile_validation_degrade();
         let mut any_installed = false;
         for doc in self.workspace.documents_mut() {
             doc.request_reparse(&self.worker);
@@ -1319,6 +1720,40 @@ impl App {
             }
         }
         any_installed
+    }
+
+    /// Reconcile every open document's type-validation degrade flag against the live
+    /// buffer size (E006 T040 — FR-015/FR-024).
+    ///
+    /// Type validation degrades on the **same** signal E003 uses to disable
+    /// highlighting and squiggles: the document being
+    /// [`oversize`](EditorDocument::oversize) past
+    /// [`AppSettings::effective_large_file_threshold`](crate::settings::AppSettings::effective_large_file_threshold).
+    /// When a document is oversize its
+    /// [`validation_suppressed`](EditorDocument::validation_suppressed) flag is set so
+    /// the next [`request_reparse`](EditorDocument::request_reparse) ships no bound
+    /// type to the worker (structural-only, zero type diagnostics — FR-015); when it
+    /// drops back below the threshold the flag clears and validation resumes on the
+    /// next reparse. Flipping the flag bumps the edit generation so the reconciled
+    /// state is actually re-requested (otherwise a coalesced reparse would not fire).
+    /// Reconciling here — once per frame, against the live buffer — keeps the type
+    /// degrade boundary byte-for-byte consistent with E003's per-frame squiggle gate
+    /// in [`render_central`](Self::render_central). The display binding
+    /// ([`binding`](EditorDocument::binding)) is left untouched so the active-binding
+    /// indicator still shows the *intended* type even while validation is degraded.
+    fn reconcile_validation_degrade(&mut self) {
+        let threshold = self.settings.effective_large_file_threshold();
+        for doc in self.workspace.documents_mut() {
+            let oversize = doc.oversize(threshold);
+            if doc.validation_suppressed != oversize {
+                doc.validation_suppressed = oversize;
+                // Force the changed degrade decision to be re-requested: without a
+                // generation bump a coalesced reparse for the same text would be
+                // skipped, so a doc edited across the threshold would keep stale
+                // type diagnostics (or none) until the next unrelated edit.
+                doc.on_edit();
+            }
+        }
     }
 
     /// Render the top menu bar (File: New, Open, Save, Save As, Quit).
@@ -1378,6 +1813,12 @@ impl App {
                     ui.separator();
                     if ui.button("Settings\u{2026}").clicked() {
                         self.show_settings = true;
+                        ui.close();
+                    }
+                    // Type bindings window (E006 US2 — FR-009/FR-011): per-document
+                    // override control + the project rule editor.
+                    if ui.button("Type Bindings\u{2026}").clicked() {
+                        self.show_bindings = true;
                         ui.close();
                     }
                     ui.separator();
@@ -1616,6 +2057,9 @@ impl App {
                 self.workspace.reorder(from, to);
             } else if let Some(idx) = switch_to {
                 self.workspace.switch(idx);
+                // Refresh the active-binding indicator for the now-active tab
+                // (E006 US2 — FR-011); cheap (re-resolve + Arc-shared model).
+                self.apply_binding_to_active();
             }
             if let Some(idx) = close_idx {
                 self.request_close_doc(idx);
@@ -1831,6 +2275,187 @@ impl App {
         }
     }
 
+    /// Render the Type Bindings window when open (E006 US2 — FR-009/FR-011).
+    ///
+    /// A non-modal, dismissible window with two surfaces:
+    ///
+    /// * **Per-document override** ("validate against type X") — the active document's
+    ///   binding state, a Set/Update control that commits the override draft, and a
+    ///   Clear control. Setting/clearing re-applies the binding immediately so the
+    ///   override (override > config) takes effect on the next worker pass (FR-009).
+    /// * **Project rules** — the [`BindingConfig`] rule list with remove / edit and an
+    ///   add/edit form (pattern, optional excludes, type name, source kind + path).
+    ///   Any change persists best-effort to `<root>/.ronin/bindings.json` and
+    ///   re-applies bindings to open docs (FR-008/FR-013).
+    ///
+    /// Mutations are collected into local variables during the closure (which borrows
+    /// `self` fields for the form drafts) and applied after the window closes, so the
+    /// borrow checker stays happy and the render does not reshape the config
+    /// mid-iteration.
+    fn render_bindings_window(&mut self, ui: &mut egui::Ui) {
+        if !self.show_bindings {
+            return;
+        }
+        let mut open = self.show_bindings;
+
+        // Snapshot read-only display state the closure needs.
+        let has_active = self.active_document().is_some();
+        let binding_label = self.active_document().map_or_else(
+            || "no document open".to_string(),
+            EditorDocument::binding_label,
+        );
+        let binding_source = self
+            .active_document()
+            .and_then(EditorDocument::binding_source_label);
+        let has_override = self
+            .active_document()
+            .is_some_and(|d| d.override_.is_some());
+        let rules: Vec<BindingRule> = self.binding_config.rules.clone();
+
+        // Deferred actions decided inside the closure, applied after it returns.
+        let mut set_override = false;
+        let mut clear_override = false;
+        let mut remove_rule: Option<usize> = None;
+        let mut load_rule_for_edit: Option<usize> = None;
+        let mut commit_rule = false;
+
+        egui::Window::new("Type Bindings")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ui.ctx(), |ui| {
+                // ---- Per-document override (FR-009/FR-011) ----
+                ui.heading("Active document");
+                ui.add_space(2.0);
+                ui.label(format!("Active binding: {binding_label}"));
+                if let Some(source) = &binding_source {
+                    ui.weak(source);
+                }
+                ui.add_space(4.0);
+                ui.label("Override (validate against type X):");
+                binding_source_form(ui, &mut self.override_draft, false);
+                ui.horizontal(|ui| {
+                    let can_set = has_active && self.override_draft.to_override().is_some();
+                    ui.add_enabled_ui(can_set, |ui| {
+                        if ui.button("Set Override").clicked() {
+                            set_override = true;
+                        }
+                    });
+                    ui.add_enabled_ui(has_active && has_override, |ui| {
+                        if ui.button("Clear Override").clicked() {
+                            clear_override = true;
+                        }
+                    });
+                });
+
+                ui.separator();
+
+                // ---- Project rules (FR-008/FR-013) ----
+                ui.heading("Project rules");
+                ui.weak(format!(
+                    "Stored at {}",
+                    BindingConfig::project_config_path(&self.binding_root).display()
+                ));
+                ui.add_space(2.0);
+                if rules.is_empty() {
+                    ui.weak("(no rules — documents resolve to \"no type bound\")");
+                }
+                egui::ScrollArea::vertical()
+                    .max_height(200.0)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        for (i, rule) in rules.iter().enumerate() {
+                            ui.horizontal(|ui| {
+                                let src = match &rule.type_source {
+                                    TypeSourceLocator::SchemaFile(p) => {
+                                        format!("schema: {}", p.display())
+                                    }
+                                    TypeSourceLocator::RustSource(p) => {
+                                        format!("rust: {}", p.display())
+                                    }
+                                };
+                                ui.monospace(&rule.pattern);
+                                ui.label(format!("\u{2192} {} ({src})", rule.type_name));
+                                if ui.small_button("Edit").clicked() {
+                                    load_rule_for_edit = Some(i);
+                                }
+                                if ui.small_button("Remove").clicked() {
+                                    remove_rule = Some(i);
+                                }
+                            });
+                        }
+                    });
+
+                ui.add_space(4.0);
+                let editing = self.editing_rule;
+                ui.label(match editing {
+                    Some(i) => format!("Edit rule #{i}"),
+                    None => "Add rule".to_string(),
+                });
+                binding_source_form(ui, &mut self.rule_draft, true);
+                ui.horizontal(|ui| {
+                    let can_commit = self.rule_draft.to_rule().is_some();
+                    ui.add_enabled_ui(can_commit, |ui| {
+                        let label = if editing.is_some() { "Update" } else { "Add" };
+                        if ui.button(label).clicked() {
+                            commit_rule = true;
+                        }
+                    });
+                    if editing.is_some() && ui.button("Cancel Edit").clicked() {
+                        load_rule_for_edit = None;
+                        self.editing_rule = None;
+                        self.rule_draft = crate::settings::BindingFormDraft::default();
+                    }
+                });
+            });
+        self.show_bindings = open;
+
+        // ---- Apply deferred actions ----
+        if set_override {
+            if let Some(ov) = self.override_draft.to_override() {
+                self.set_active_override(ov.type_name, ov.type_source);
+            }
+        }
+        if clear_override {
+            self.clear_active_override();
+        }
+        if let Some(i) = remove_rule {
+            // If we were editing the removed rule, drop the edit context.
+            if self.editing_rule == Some(i) {
+                self.editing_rule = None;
+                self.rule_draft = crate::settings::BindingFormDraft::default();
+            }
+            self.remove_binding_rule(i);
+        }
+        if let Some(i) = load_rule_for_edit {
+            if let Some(rule) = self.binding_config.rules.get(i) {
+                self.rule_draft = crate::settings::BindingFormDraft {
+                    pattern: rule.pattern.clone(),
+                    exclude: rule
+                        .exclude
+                        .as_ref()
+                        .map(|e| e.join(", "))
+                        .unwrap_or_default(),
+                    type_name: rule.type_name.clone(),
+                    source_path: rule.type_source.path().display().to_string(),
+                    source_kind: crate::settings::SourceKind::of(&rule.type_source),
+                };
+                self.editing_rule = Some(i);
+            }
+        }
+        if commit_rule {
+            if let Some(rule) = self.rule_draft.to_rule() {
+                match self.editing_rule {
+                    Some(i) => self.replace_binding_rule(i, rule),
+                    None => self.add_binding_rule(rule),
+                }
+                self.editing_rule = None;
+                self.rule_draft = crate::settings::BindingFormDraft::default();
+            }
+        }
+    }
+
     /// Render the reserved mode-selector seam in the top region (FR-013).
     ///
     /// Mounts [`mode_selector_seam_stub`] (reserved for **E009**) as its own top
@@ -1891,6 +2516,9 @@ impl App {
         self.render_settings_window(ui);
         // The Snippets browser floats above everything when open (FR-025).
         self.render_snippets_window(ui);
+        // The Type Bindings window floats above everything when open (E006 US2 —
+        // FR-009/FR-011).
+        self.render_bindings_window(ui);
     }
 }
 
@@ -1980,6 +2608,57 @@ fn is_ron_path(path: &std::path::Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| e.eq_ignore_ascii_case("ron"))
+}
+
+/// Render the shared type-name + source (kind + path) input rows of a binding form
+/// into `ui`, optionally including the rule-only pattern / exclude rows (E006 US2 —
+/// FR-008/FR-009).
+///
+/// `include_pattern` is `true` for the project-rule form (which needs a glob pattern
+/// and optional excludes) and `false` for the per-document override form (which
+/// targets the active document directly). Mirrors the existing settings-surface
+/// widgets (labelled rows, a `ComboBox` for the enum). The draft is mutated in
+/// place; the caller decides when to commit it.
+fn binding_source_form(
+    ui: &mut egui::Ui,
+    draft: &mut crate::settings::BindingFormDraft,
+    include_pattern: bool,
+) {
+    use crate::settings::SourceKind;
+    if include_pattern {
+        ui.horizontal(|ui| {
+            ui.label("Pattern");
+            ui.text_edit_singleline(&mut draft.pattern);
+        });
+        ui.horizontal(|ui| {
+            ui.label("Exclude");
+            ui.text_edit_singleline(&mut draft.exclude);
+        });
+    }
+    ui.horizontal(|ui| {
+        ui.label("Type name");
+        ui.text_edit_singleline(&mut draft.type_name);
+    });
+    ui.horizontal(|ui| {
+        ui.label("Source kind");
+        egui::ComboBox::from_id_salt(if include_pattern {
+            "rule_source_kind"
+        } else {
+            "override_source_kind"
+        })
+        .selected_text(match draft.source_kind {
+            SourceKind::Schema => "Schema file",
+            SourceKind::Rust => "Rust source",
+        })
+        .show_ui(ui, |ui| {
+            ui.selectable_value(&mut draft.source_kind, SourceKind::Schema, "Schema file");
+            ui.selectable_value(&mut draft.source_kind, SourceKind::Rust, "Rust source");
+        });
+    });
+    ui.horizontal(|ui| {
+        ui.label("Source path");
+        ui.text_edit_singleline(&mut draft.source_path);
+    });
 }
 
 /// A short display name for a path (file/dir name, falling back to the full path).

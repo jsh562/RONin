@@ -29,6 +29,7 @@
 //! and sequential multi-dirty close/quit (FR-012/FR-013/FR-022/FR-025/FR-026).
 
 pub mod app;
+pub mod binding;
 pub mod completion;
 pub mod diagnostics_map;
 pub mod document;
@@ -40,4 +41,5 @@ pub mod problems_panel;
 pub mod reparse;
 pub mod settings;
 pub mod snippets;
+pub mod type_acquire;
 pub mod workspace;

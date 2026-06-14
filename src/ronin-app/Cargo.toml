@@ -22,9 +22,18 @@ eframe = { version = "0.34", default-features = false, features = [
     "x11",
 ] }
 egui = "0.34"
+# Glob matching for binding resolution (E006 US2 — FR-008/FR-012). `globset`
+# gives path-aware glob matching with deterministic, robust parsing; specificity
+# is computed from the pattern string independently of the matcher.
+globset = "0.4.16"
 egui_extras = "0.34"
 rfd = "0.17.2"
 ron-core = { version = "0.1.0", path = "../ron-core" }
+# Type-model acquisition (E006 US2 Phase 4b — FR-014/FR-024). ronin-app is the
+# native app, so it may depend on the native-gated `ron-types`; only the
+# WASM-clean `ron-core`/`ron-validate` must stay free of it.
+ron-types = { version = "0.1.0", path = "../ron-types" }
+ron-validate = { version = "0.1.0", path = "../ron-validate" }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 tracing = "0.1.44"
