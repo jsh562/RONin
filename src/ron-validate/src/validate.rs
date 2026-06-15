@@ -140,6 +140,96 @@ pub fn validate_against(
     validate_node(target, defs, doc)
 }
 
+/// Validate ONE CST value sub-tree against ONE named model type (E009/IP-002,
+/// FR-005). Generic and **Bevy-agnostic** — it references no scene/registry/Bevy
+/// symbols and carries no `bevy` dependency; this is the engine the native scene
+/// interpreter ([`ronin-app`]) drives per component, while the `.scn.ron`
+/// interpretation (resources/entities/components) lives entirely there (AD-001).
+///
+/// `subtree` is a value-position [`ron_core::SyntaxNode`] (e.g. the value node of
+/// one component) and `type_name` selects a def from `model.$defs`. The sub-node
+/// is projected to JSON and run through the same standard-keyword + `x-ron-variant`
+/// enum-dispatch passes as [`validate_against`], so field name / type /
+/// enum-variant / tuple-arity mismatches are each reported at the offending
+/// construct's precise span (FR-005). Because rowan nodes carry **absolute** byte
+/// offsets, the returned ranges are already in **full-document** coordinates (no
+/// offset translation needed) when `subtree` is a node of the parsed document.
+///
+/// Fail-soft, identical to [`validate_against`] (FR-006/FR-015/FR-016): an
+/// empty/`null` model, an absent or `unknown` def, or an uncompilable schema all
+/// yield an empty `Vec` with no panic — a type path not in the registry is
+/// unconstrained (no false positive). Read-only over every input (FR-020): the
+/// CST and the model are borrowed and only owned `Vec`s are returned.
+///
+/// # Examples
+///
+/// ```
+/// use serde_json::json;
+/// let model = json!({
+///     "$defs": { "Health": { "type": "object",
+///         "properties": { "hp": { "type": "integer" } } } }
+/// });
+/// let doc = ron_core::parse("Health(hp: \"oops\")");
+/// // Reach the component value sub-tree (here, the whole document's value).
+/// let value = doc.root().children().next().expect("value node");
+/// let diags = ron_validate::validate::validate_subtree_against_type(
+///     &model, "Health", &value,
+/// );
+/// assert!(diags.iter().any(|d| d.code()
+///     == ron_core::DiagnosticCode::TypeMismatch));
+/// ```
+#[must_use]
+pub fn validate_subtree_against_type(
+    model: &Value,
+    type_name: &str,
+    subtree: &ron_core::SyntaxNode,
+) -> Vec<Diagnostic> {
+    if is_empty_model(model) {
+        return Vec::new();
+    }
+    let Some(defs) = model.get("$defs") else {
+        return Vec::new();
+    };
+    let Some(target) = defs.get(type_name) else {
+        // Unresolved bound type -> unconstrained (no false positives, FR-016).
+        return Vec::new();
+    };
+    validate_subtree_node(target, defs, subtree)
+}
+
+/// Validate one CST sub-tree against one schema node, given the `$defs` map for
+/// `$ref` resolution. The sub-tree analogue of [`validate_node`]: it builds a
+/// schema-guided projection from the SUB-NODE (not a whole document) and runs the
+/// identical standard-keyword + enum-dispatch passes. Parse-error spans are
+/// collected from the sub-tree itself so an unparseable region inside it stays
+/// unconstrained (FR-019) while the parseable remainder is still validated.
+fn validate_subtree_node(target: &Value, defs: &Value, subtree: &SyntaxNode) -> Vec<Diagnostic> {
+    let resolved = resolve_ref(target, defs);
+    let projection = CstJsonProjection::from_subtree_guided(subtree, resolved, defs);
+
+    let mut out = Vec::new();
+
+    let effective = build_effective_schema(target, defs);
+    out.extend(validate_with_schema(&effective, &projection));
+
+    walk_enums(
+        resolved,
+        defs,
+        &projection.instance,
+        "",
+        &projection.index,
+        0,
+        &mut out,
+    );
+
+    // Skip-unparseable (FR-019), scoped to the sub-tree under validation.
+    let mut error_spans = Vec::new();
+    collect_error_spans(subtree, &mut error_spans);
+    let out = drop_in_error_spans(out, &error_spans);
+
+    dedup_by_pointer(out)
+}
+
 /// Validate a document against one schema node, given the `$defs` map for `$ref`
 /// resolution. Builds a schema-guided projection (so RON's ambiguous surface
 /// forms project to exactly what each location expects), runs the main

@@ -49,3 +49,7 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
 [dev-dependencies]
 egui_kittest = "0.34.3"
+# Property tests for the defaults-elision core (E009 US3, T030/T031): the
+# bit-for-bit float-equality rule and the shrink->expand->shrink byte-identical
+# stability invariant. Already in the workspace lock via `ron-core`.
+proptest = "1.11.0"

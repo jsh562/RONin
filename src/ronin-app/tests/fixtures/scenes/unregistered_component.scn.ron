@@ -1,0 +1,19 @@
+// A scene whose component path is NOT present in the registry export. The type
+// path is well-formed but unregistered (renamed/moved/unknown type) — it must
+// project as a normal component ref so validation can mark it "unconstrained"
+// (info/hint), never a hard error (FR-006).
+(
+    resources: {},
+    entities: {
+        0: (
+            components: {
+                "my_game::components::Health": (current: 80, max: 100),
+                "bevy_transform::components::transform::Transform": (
+                    translation: (x: 0.0, y: 0.0, z: 0.0),
+                    rotation: (0.0, 0.0, 0.0, 1.0),
+                    scale: (x: 1.0, y: 1.0, z: 1.0),
+                ),
+            },
+        ),
+    },
+)

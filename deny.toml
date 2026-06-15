@@ -63,9 +63,18 @@ wildcards = "deny"
 # are legitimately present in ron-validate/ronin-app). That boundary is enforced
 # instead by ron-core's own manifest plus the T036 dependency-invariant test and
 # the ron-core wasm32 build gate.
+# E009 Bevy mode (registry-as-data): RONin consumes an exported Bevy type
+# registry as DATA and MUST NOT depend on or embed any `bevy` crate anywhere in
+# the workspace (FR-003/FR-017, SC-007). cargo-deny matches `deny` entries by
+# EXACT crate name (no name globs), so the umbrella `bevy` crate is banned here;
+# the family-wide `bevy*` prefix ban (bevy_reflect/bevy_ecs/bevy_remote/...) is
+# enforced comprehensively by the ronin-app dependency-invariant test (cargo-
+# metadata closure BFS), which also proves ron-core/ron-validate build for
+# wasm32. (cargo-tree confirms no `bevy*` crate is present in the tree today.)
 deny = [
     { name = "reqwest" },
     { name = "rustls" },
+    { name = "bevy" },
 ]
 
 [sources]

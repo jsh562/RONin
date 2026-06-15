@@ -24,29 +24,37 @@
 use crate::diagnostics::AcquisitionDiagnostic;
 use crate::model::TypeModel;
 
+mod bevy_source;
 mod json_schema_ingest;
 mod json_schema_source;
 mod schemars_source;
 mod syn_source;
 
+pub use bevy_source::{BevyRegistry, BevySource, ReflectKind, ReflectSchema};
 pub use json_schema_source::JsonSchemaSource;
 pub use schemars_source::SchemarsSource;
 pub use syn_source::SynSource;
 
 /// The deterministic merge rank of a [`TypeSource`] (TR-010).
 ///
-/// Ordering is a **total order**: `Syn < Schemars < UserSchema`. Higher ranks
-/// win on conflict. Derived `Ord` follows declaration order, so comparisons and
-/// sorts reflect precedence directly. A future Bevy source slots in as a new
-/// variant without disturbing the existing ranks' relative order.
+/// Ordering is a **total order**: `Syn < Schemars < UserSchema < Bevy`. Higher
+/// ranks win on conflict. Derived `Ord` follows declaration order, so
+/// comparisons and sorts reflect precedence directly. The Bevy registry source
+/// (E009) slots in as the highest-ranked variant without disturbing the existing
+/// ranks' relative order: in Bevy mode the registry is the authoritative type
+/// source and *replaces* the serde sources rather than merging with them
+/// (FR-013), so its rank only needs to be well-defined and total.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SourcePrecedence {
     /// Static Rust source analysis via `syn` (lowest precedence).
     Syn,
     /// `schemars`-derived JSON Schema (middle precedence).
     Schemars,
-    /// User-supplied JSON Schema 2020-12 (highest precedence).
+    /// User-supplied JSON Schema 2020-12 (higher precedence).
     UserSchema,
+    /// Exported Bevy type registry consumed as data (E009; highest precedence —
+    /// authoritative for `.scn.ron` scenes in Bevy mode).
+    Bevy,
 }
 
 impl SourcePrecedence {
@@ -58,6 +66,7 @@ impl SourcePrecedence {
             SourcePrecedence::Syn => "syn",
             SourcePrecedence::Schemars => "schemars",
             SourcePrecedence::UserSchema => "user-schema",
+            SourcePrecedence::Bevy => "bevy-registry",
         }
     }
 }
@@ -162,6 +171,9 @@ mod tests {
         assert!(SourcePrecedence::Syn < SourcePrecedence::Schemars);
         assert!(SourcePrecedence::Schemars < SourcePrecedence::UserSchema);
         assert!(SourcePrecedence::Syn < SourcePrecedence::UserSchema);
+        // E009: the Bevy registry source is the highest-ranked variant.
+        assert!(SourcePrecedence::UserSchema < SourcePrecedence::Bevy);
+        assert_eq!(SourcePrecedence::Bevy.as_str(), "bevy-registry");
 
         // Sorting a shuffled list yields the canonical low→high precedence order.
         let mut ranks = [

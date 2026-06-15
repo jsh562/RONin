@@ -96,8 +96,20 @@ impl BindingRule {
     /// not counted. Computed from the pattern STRING, independent of the matcher.
     #[must_use]
     pub fn specificity(&self) -> usize {
-        literal_char_count(&self.pattern)
+        pattern_specificity(&self.pattern)
     }
+}
+
+/// The specificity score of a glob `pattern` — the count of its **literal**
+/// (non-wildcard) characters (FR-012).
+///
+/// This is the shared specificity primitive E006 ([`BindingRule::specificity`])
+/// and E009's `RegistryBindingRule` both rank patterns by ("most-specific wins").
+/// Exposed (rather than re-implemented in `bevy/mode.rs`) so the two configs use
+/// **identical** specificity scoring — see [`crate::bevy::mode`] (HINT-004).
+#[must_use]
+pub fn pattern_specificity(pattern: &str) -> usize {
+    literal_char_count(pattern)
 }
 
 /// Counts literal (non-wildcard) characters in a glob pattern string (FR-012).
@@ -385,7 +397,12 @@ fn compile_glob(pattern: &str) -> Option<GlobMatcher> {
 ///
 /// Matching is attempted against the path as given; on Windows the matcher also
 /// normalizes separators, so forward-slash patterns match backslash paths.
-fn glob_matches(pattern: &str, doc_path: &Path) -> bool {
+///
+/// Shared with E009's `RegistryBindingConfig` resolution (rather than
+/// re-implemented) so both configs glob-match identically — see
+/// [`crate::bevy::mode`] (HINT-004).
+#[must_use]
+pub fn glob_matches(pattern: &str, doc_path: &Path) -> bool {
     compile_glob(pattern).is_some_and(|m| m.is_match(doc_path))
 }
 

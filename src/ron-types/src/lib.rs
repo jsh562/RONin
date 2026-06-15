@@ -45,10 +45,14 @@
 //!   validation. This is also where on-device `wasm32` deserialization of the
 //!   interchange is exercised end-to-end (see `tests/wasm32_deser.rs` for the
 //!   native-side proof that the wire form is pure, WASM-consumable JSON).
-//! - **Bevy type-registry [`TypeSource`] → E009.** A `TypeSource` adapter that
-//!   reads Bevy's runtime reflection / `TypeRegistry` to acquire types for scene
-//!   files. It plugs into the existing [`source`] adapter contract and
-//!   [`normalize`] precedence ranking; no model changes are required.
+//! - **Bevy type-registry [`TypeSource`] → E009 (landed).** [`BevySource`] reads a
+//!   Bevy registry-schema-format JSON export (the BRP `bevy/registry/schema`
+//!   shape) **as data** — no `bevy` crate — and maps each type into the
+//!   [`TypeModel`]. It plugs into the existing [`source`] adapter contract and
+//!   [`normalize`] precedence ranking ([`source::SourcePrecedence::Bevy`]) with no
+//!   model changes. Live BRP acquisition (FR-002) is deferred; because BRP returns
+//!   the same registry-schema format, it slots in later as **another constructor**
+//!   on [`BevySource`] (producing the same [`BevyRegistry`]) with no core change.
 //! - **Derive-from-types / RON⇄JSON interop → E010.** Generating RON skeletons
 //!   from the model and the bidirectional RON⇄JSON bridge (via the `ron` crate,
 //!   used for interop only — never as the editing model) build on the normalized
@@ -68,4 +72,6 @@ pub use extension::RonTypeExtension;
 pub use model::{TypeModel, TypeNode, TypeRef};
 pub use normalize::normalize;
 pub use serialize::{from_json, from_json_str, to_json, to_json_string, InterchangeError};
-pub use source::{JsonSchemaSource, SchemarsSource, SynSource, TypeSource};
+pub use source::{
+    BevyRegistry, BevySource, JsonSchemaSource, SchemarsSource, SynSource, TypeSource,
+};

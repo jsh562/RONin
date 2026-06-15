@@ -613,6 +613,116 @@ impl BindingFormDraft {
     }
 }
 
+// ===========================================================================
+// E009 registry-binding project config wiring (T019 — FR-010)
+// ===========================================================================
+//
+// The Bevy registry binding (glob → registry-export-path) is persisted exactly
+// like E006's `BindingConfig`: a single small project-scoped local file under the
+// project's `.ronin/` dir (NOT the OS config dir, which holds only `AppSettings`).
+// `RegistryBindingConfig` owns its own `load_from`/`save_to`/`project_config_path`
+// (mirroring `binding::BindingConfig`); these thin wrappers route the project-open
+// load and the on-edit save through that exact mechanism so there is no new
+// storage system — only the one small local file.
+
+use crate::bevy::mode::{Mode, RegistryBindingConfig, RegistryBindingRule};
+
+/// Load the project's [`RegistryBindingConfig`] when a project opens, defaulting to
+/// an **empty** config when the file is absent or corrupt (T019, FR-010).
+///
+/// Reads `<project_root>/.ronin/bevy-registries.json` via
+/// [`RegistryBindingConfig::load_from`] — the same project-scoped local file
+/// mechanism E006 uses for `bindings.json`. Never panics and never errors: a
+/// missing/corrupt/unknown-version file degrades to
+/// [`RegistryBindingConfig::default`] (zero rules ⇒ auto-detect mode, no registry)
+/// rather than blocking the project (FR-010, SC-002, project-instructions §I).
+#[must_use]
+pub fn load_registry_binding_config(project_root: &Path) -> RegistryBindingConfig {
+    let path = RegistryBindingConfig::project_config_path(project_root);
+    RegistryBindingConfig::load_from(&path)
+}
+
+/// Persist the project's [`RegistryBindingConfig`] on edit as the one small
+/// project-scoped local file (T019, FR-010).
+///
+/// Writes `<project_root>/.ronin/bevy-registries.json` via
+/// [`RegistryBindingConfig::save_to`] (pretty JSON, auto-creating `.ronin/`) — the
+/// same E006-style mechanism, no new storage. Call this after any edit to the
+/// registry-binding rules / project default mode.
+///
+/// # Errors
+///
+/// Returns an [`std::io::Error`] if the `.ronin/` directory cannot be created or
+/// the file cannot be written.
+pub fn save_registry_binding_config(
+    config: &RegistryBindingConfig,
+    project_root: &Path,
+) -> std::io::Result<()> {
+    let path = RegistryBindingConfig::project_config_path(project_root);
+    config.save_to(&path)
+}
+
+/// Editable form state backing the registry-binding-config window's add/edit
+/// controls (E009 T019 — FR-010), mirroring [`BindingFormDraft`].
+///
+/// Pure UI-input state — **not** persisted (only [`RegistryBindingConfig`]
+/// persists). On commit it validates into a [`RegistryBindingRule`]: a blank
+/// `pattern` or `registry_export_path` is rejected (the commit button is disabled)
+/// so a blank rule is never created. `mode` and `expected_bevy_version` are
+/// optional.
+#[derive(Debug, Clone, Default)]
+pub struct RegistryBindingFormDraft {
+    /// The glob pattern for the rule.
+    pub pattern: String,
+    /// Comma-separated exclude globs for the rule.
+    pub exclude: String,
+    /// The registry-export path (read-only data; may be absolute / out-of-tree).
+    pub registry_export_path: String,
+    /// An optional per-pattern mode hint (`None` ⇒ no hint).
+    pub mode: Option<Mode>,
+    /// An optional expected Bevy version (blank ⇒ no staleness advisory).
+    pub expected_bevy_version: String,
+}
+
+impl RegistryBindingFormDraft {
+    /// Build a [`RegistryBindingRule`] from this draft, or `None` when the
+    /// `pattern` or `registry_export_path` are blank (FR-010).
+    ///
+    /// `exclude` is split on commas (empty entries dropped; an empty list ⇒
+    /// `None`); a blank `expected_bevy_version` ⇒ `None`.
+    #[must_use]
+    pub fn to_rule(&self) -> Option<RegistryBindingRule> {
+        let pattern = self.pattern.trim();
+        let export = self.registry_export_path.trim();
+        if pattern.is_empty() || export.is_empty() {
+            return None;
+        }
+        let excludes: Vec<String> = self
+            .exclude
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect();
+        let expected = self.expected_bevy_version.trim();
+        Some(RegistryBindingRule {
+            pattern: pattern.to_string(),
+            exclude: if excludes.is_empty() {
+                None
+            } else {
+                Some(excludes)
+            },
+            registry_export_path: PathBuf::from(export),
+            mode: self.mode,
+            expected_bevy_version: if expected.is_empty() {
+                None
+            } else {
+                Some(expected.to_string())
+            },
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -888,6 +998,75 @@ mod tests {
         assert_eq!(loaded.undo, s.undo);
         assert_eq!(loaded.autosave, s.autosave);
         let _ = std::fs::remove_file(&path);
+    }
+
+    // --- E009 T019: registry-binding project config wiring (FR-010) --------
+
+    #[test]
+    fn registry_binding_config_absent_loads_empty_default() {
+        // A project with no `.ronin/bevy-registries.json` loads an empty config
+        // (auto-detect mode, no registry) — never a crash (FR-010, SC-002).
+        let root = std::env::temp_dir().join("ronin_regbind_absent");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let loaded = load_registry_binding_config(&root);
+        assert_eq!(loaded, RegistryBindingConfig::default());
+        assert!(loaded.rules.is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn registry_binding_config_round_trips_through_project_file() {
+        // Save → load via the project-scoped local file (the one small artifact).
+        let root = std::env::temp_dir().join("ronin_regbind_roundtrip");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let config = RegistryBindingConfig {
+            rules: vec![RegistryBindingRule {
+                pattern: "levels/*.scn.ron".to_string(),
+                exclude: None,
+                registry_export_path: PathBuf::from("registries/world.json"),
+                mode: Some(Mode::Bevy),
+                expected_bevy_version: Some("0.16.0".to_string()),
+            }],
+            project_default_mode: None,
+            version: crate::bevy::mode::REGISTRY_BINDING_CONFIG_VERSION,
+        };
+        save_registry_binding_config(&config, &root).unwrap();
+        // The file lands under the project-local `.ronin/`, not the OS config dir.
+        assert!(root.join(".ronin").join("bevy-registries.json").exists());
+        let loaded = load_registry_binding_config(&root);
+        assert_eq!(loaded, config);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn registry_binding_form_draft_rejects_blank_and_builds_rule() {
+        let mut draft = RegistryBindingFormDraft::default();
+        assert!(draft.to_rule().is_none(), "blank draft ⇒ no rule");
+        draft.pattern = "  ".to_string();
+        draft.registry_export_path = "r.json".to_string();
+        assert!(draft.to_rule().is_none(), "blank pattern ⇒ no rule");
+        draft.pattern = "**/*.scn.ron".to_string();
+        draft.registry_export_path = "  ".to_string();
+        assert!(draft.to_rule().is_none(), "blank export path ⇒ no rule");
+
+        draft.registry_export_path = "registries/r.json".to_string();
+        draft.exclude = "wip/** , , tmp/**".to_string();
+        draft.mode = Some(Mode::Bevy);
+        draft.expected_bevy_version = " 0.16.0 ".to_string();
+        let rule = draft.to_rule().expect("a valid rule");
+        assert_eq!(rule.pattern, "**/*.scn.ron");
+        assert_eq!(
+            rule.exclude,
+            Some(vec!["wip/**".to_string(), "tmp/**".to_string()])
+        );
+        assert_eq!(
+            rule.registry_export_path,
+            PathBuf::from("registries/r.json")
+        );
+        assert_eq!(rule.mode, Some(Mode::Bevy));
+        assert_eq!(rule.expected_bevy_version, Some("0.16.0".to_string()));
     }
 
     #[test]

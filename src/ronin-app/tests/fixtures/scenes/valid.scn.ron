@@ -1,0 +1,31 @@
+// A valid Bevy DynamicScene `.scn.ron`: a top-level struct with a `resources`
+// map and an `entities` map. Type paths align with `bevy_registry_schema.json`
+// (Transform / Vec3 / Quat / Visibility) so a registered match is available.
+(
+    resources: {
+        "bevy_utils::label::LabelMap": {
+            "origin": (x: 0.0, y: 0.0, z: 0.0),
+        },
+    },
+    entities: {
+        0: (
+            components: {
+                "bevy_transform::components::transform::Transform": (
+                    translation: (x: 1.0, y: 2.0, z: 3.0),
+                    rotation: (0.0, 0.0, 0.0, 1.0),
+                    scale: (x: 1.0, y: 1.0, z: 1.0),
+                ),
+                "bevy_pbr::light::Visibility": Inherited,
+            },
+        ),
+        1: (
+            components: {
+                "bevy_transform::components::transform::Transform": (
+                    translation: (x: 4.0, y: 5.0, z: 6.0),
+                    rotation: (0.0, 0.0, 0.0, 1.0),
+                    scale: (x: 1.0, y: 1.0, z: 1.0),
+                ),
+            },
+        ),
+    },
+)

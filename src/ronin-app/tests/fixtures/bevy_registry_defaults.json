@@ -1,0 +1,100 @@
+{
+  "bevyVersion": "0.16.0",
+  "registryFormat": "bevy/registry/schema+defaults",
+  "_note": "A DEFAULTS-CARRYING registry export for E009 US3 cluster 5A (T025). Each default-bearing struct carries a concrete per-field `default` object whose shape matches the scene's field representation, so the defaults-elision core can compare a scene field value against `default[field]` exactly (FR-014). A future/unknown metadata field is included to prove version-tolerance.",
+  "$defs": {
+    "demo::Transform": {
+      "typePath": "demo::Transform",
+      "shortPath": "Transform",
+      "kind": "Struct",
+      "additionalProperties": false,
+      "properties": {
+        "translation": { "$ref": "#/$defs/demo::Vec3" },
+        "scale": { "$ref": "#/$defs/demo::Vec3" },
+        "weight": { "type": "number" }
+      },
+      "required": ["translation", "scale", "weight"],
+      "reflectTypes": ["Default", "Component", "Serialize", "Deserialize"],
+      "default": {
+        "translation": { "x": 0.0, "y": 0.0, "z": 0.0 },
+        "scale": { "x": 1.0, "y": 1.0, "z": 1.0 },
+        "weight": 1.0
+      }
+    },
+    "demo::Vec3": {
+      "typePath": "demo::Vec3",
+      "shortPath": "Vec3",
+      "kind": "Struct",
+      "additionalProperties": false,
+      "properties": {
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "z": { "type": "number" }
+      },
+      "required": ["x", "y", "z"],
+      "reflectTypes": ["Default", "Serialize", "Deserialize"],
+      "default": { "x": 0.0, "y": 0.0, "z": 0.0 }
+    },
+    "demo::Health": {
+      "typePath": "demo::Health",
+      "shortPath": "Health",
+      "kind": "Struct",
+      "additionalProperties": false,
+      "properties": {
+        "current": { "type": "integer" },
+        "max": { "type": "integer" },
+        "label": { "type": "string" },
+        "regen": { "type": "boolean" }
+      },
+      "required": ["current", "max", "label", "regen"],
+      "reflectTypes": ["Default", "Component", "Serialize", "Deserialize"],
+      "default": {
+        "current": 100,
+        "max": 100,
+        "label": "player",
+        "regen": false
+      },
+      "x_future_field_for_tolerance": { "ignored": true }
+    },
+    "demo::Tags": {
+      "typePath": "demo::Tags",
+      "shortPath": "Tags",
+      "kind": "Struct",
+      "additionalProperties": false,
+      "properties": {
+        "names": { "type": "array", "items": { "type": "string" } }
+      },
+      "required": ["names"],
+      "reflectTypes": ["Default", "Resource", "Serialize", "Deserialize"],
+      "default": {
+        "names": []
+      }
+    },
+    "demo::PartialDefaults": {
+      "typePath": "demo::PartialDefaults",
+      "shortPath": "PartialDefaults",
+      "kind": "Struct",
+      "additionalProperties": false,
+      "properties": {
+        "known": { "type": "number" },
+        "mystery": { "type": "number" }
+      },
+      "required": ["known", "mystery"],
+      "reflectTypes": ["Default", "Component", "Serialize", "Deserialize"],
+      "default": {
+        "known": 1.0
+      }
+    },
+    "demo::NoDefaultComponent": {
+      "typePath": "demo::NoDefaultComponent",
+      "shortPath": "NoDefaultComponent",
+      "kind": "Struct",
+      "additionalProperties": false,
+      "properties": {
+        "value": { "type": "number" }
+      },
+      "required": ["value"],
+      "reflectTypes": ["Component", "Serialize", "Deserialize"]
+    }
+  }
+}

@@ -45,6 +45,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use crate::bevy::mode::{Mode, ModeState, RegistryBindingConfig, RegistryBindingRule};
 use crate::binding::{BindingConfig, BindingRule, DocumentOverride, TypeSourceLocator};
 use crate::document::{ByteFidelityProfile, EditorDocument};
 use crate::editor_view::{editor_view, structural_form_view};
@@ -147,6 +148,77 @@ pub enum BatchKind {
     CloseAll,
     /// Close every tab except the one to keep.
     CloseOthers,
+}
+
+/// Which defaults-elision direction an explicit user command runs (E009 US3 —
+/// FR-014/FR-015).
+///
+/// Both directions share the [`run_elision`](App::run_elision) pipeline; this
+/// distinguishes the pure entry point called and the user-facing wording for the
+/// command's notices (the no-op status + the per-field skip advisory).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ElisionKind {
+    /// Reduce verbosity (shrink): elide fields whose value equals the default.
+    Reduce,
+    /// Expand to explicit: materialize absent default-bearing fields.
+    Expand,
+}
+
+impl ElisionKind {
+    /// The user-facing command label.
+    fn label(self) -> &'static str {
+        match self {
+            ElisionKind::Reduce => "Reduce verbosity",
+            ElisionKind::Expand => "Expand to explicit",
+        }
+    }
+
+    /// The informational status when nothing in scope was elidable/expandable
+    /// (a zero-byte no-op, no undo unit — FR-014).
+    fn noop_message(self) -> &'static str {
+        match self {
+            ElisionKind::Reduce => "Nothing to reduce: no field provably equals its default.",
+            ElisionKind::Expand => "Nothing to expand: every default-bearing field is explicit.",
+        }
+    }
+
+    /// The per-field skip advisory for this direction, or `None` when there is
+    /// nothing to advise (FR-014/FR-015).
+    ///
+    /// On **expand** the relevant skips are `DefaultUnknownOnExpand` — a registry
+    /// drift partial expand (a previously-elided field's default is no longer
+    /// carried), which the user must be told about because exact recovery is then
+    /// only via undo (FR-015). On **shrink** the relevant skips are
+    /// `ValueDiffersFromDefault` — fields left explicit because their value did not
+    /// equal the default (informational; FR-014).
+    fn advisory_message(self, skipped: &[crate::bevy::SkippedField]) -> Option<String> {
+        use crate::bevy::SkipReason;
+        let reason = match self {
+            ElisionKind::Reduce => SkipReason::ValueDiffersFromDefault,
+            ElisionKind::Expand => SkipReason::DefaultUnknownOnExpand,
+        };
+        let names: Vec<String> = skipped
+            .iter()
+            .filter(|s| s.reason == reason)
+            .map(|s| format!("{}.{}", s.type_path, s.field))
+            .collect();
+        if names.is_empty() {
+            return None;
+        }
+        match self {
+            ElisionKind::Expand => Some(format!(
+                "Partial expand: {} field(s) left absent (registry default no longer known): {}. \
+                 Exact pre-drift recovery is available via Undo.",
+                names.len(),
+                names.join(", ")
+            )),
+            ElisionKind::Reduce => Some(format!(
+                "Left explicit (value differs from default): {} field(s): {}.",
+                names.len(),
+                names.join(", ")
+            )),
+        }
+    }
 }
 
 /// State for a sequential multi-dirty close/quit operation (FR-026).
@@ -296,6 +368,28 @@ pub struct App {
     /// Raised on reopen when a live, divergent recovery sidecar is detected; the
     /// user accepts (restore in-progress work) or declines (open on-disk file).
     recovery_offer: Option<RecoveryOffer>,
+    /// The project-scoped Bevy registry-binding configuration (glob →
+    /// registry-export-path) loaded from the active project's
+    /// `.ronin/bevy-registries.json` (E009 — FR-009/FR-010/FR-012).
+    ///
+    /// A **parallel** config to E006's [`binding_config`](Self::binding_config)
+    /// (HINT-004): it maps scenes to a *registry export*, not a type + source. Loaded
+    /// from / written to [`binding_root`](Self::binding_root) — the same project root
+    /// E006 uses — but a **separate file**. An absent/corrupt file degrades to an empty
+    /// config (no rules → auto-detect mode, no registry) per
+    /// [`RegistryBindingConfig::load_from`] (FR-010, SC-002).
+    registry_binding_config: RegistryBindingConfig,
+    /// Whether the registry-binding-config window is open (E009 — FR-009/FR-011).
+    /// Hosts the per-document mode toggle, the active-mode/registry indicator, and the
+    /// project registry-rule editor.
+    show_registries: bool,
+    /// Editable draft for the registry-rule add/edit form (E009 — FR-010). Pure UI
+    /// input; committed into [`registry_binding_config`](Self::registry_binding_config).
+    /// Never persisted (only the resulting config is).
+    registry_rule_draft: crate::settings::RegistryBindingFormDraft,
+    /// The index of the registry rule currently being edited in-place, or `None` when
+    /// the rule form is adding a new rule (E009 — FR-010).
+    editing_registry_rule: Option<usize>,
 }
 
 impl App {
@@ -320,6 +414,9 @@ impl App {
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
         let binding_config =
             BindingConfig::load_from(&BindingConfig::project_config_path(&binding_root));
+        // The parallel E009 registry-binding config (glob → registry-export) lives in
+        // the SAME project root but a separate file; absent/corrupt → empty (FR-010).
+        let registry_binding_config = crate::settings::load_registry_binding_config(&binding_root);
         let mut app = Self {
             workspace: EditorWorkspace::new(),
             worker: ReparseWorker::new(),
@@ -339,6 +436,10 @@ impl App {
             editing_rule: None,
             autosave_worker: crate::recovery::AutosaveWorker::new(),
             recovery_offer: None,
+            registry_binding_config,
+            show_registries: false,
+            registry_rule_draft: crate::settings::RegistryBindingFormDraft::default(),
+            editing_registry_rule: None,
         };
         // Surface any snippet-file degrade notice once at startup (FR-017/FR-034).
         app.surface_snippet_notice();
@@ -429,6 +530,14 @@ impl App {
     #[must_use]
     pub fn active_document_mut(&mut self) -> Option<&mut EditorDocument> {
         self.workspace.active_document_mut()
+    }
+
+    /// The open document at tab index `idx`, if it exists (read-only; for tests and
+    /// host integration of per-tab state such as the per-document
+    /// [`ModeState`](crate::bevy::mode::ModeState) — FR-012).
+    #[must_use]
+    pub fn document_at(&self, idx: usize) -> Option<&EditorDocument> {
+        self.workspace.documents().get(idx)
     }
 
     /// The active tab index, or `None` when no tab is open (for tests/hosts).
@@ -607,6 +716,355 @@ impl App {
         self.apply_binding_to_active();
     }
 
+    // --- E009: per-document mode + registry binding (FR-009/011/012/013) -------
+
+    /// The project-scoped Bevy registry-binding configuration, read-only (E009 —
+    /// FR-010).
+    ///
+    /// The parallel-to-E006 glob→registry-export mapping (NOT the OS-global
+    /// [`AppSettings`], NOT E006's [`binding_config`](Self::binding_config)). Loaded
+    /// from / written to [`binding_root`](Self::binding_root)`/.ronin/bevy-registries.json`.
+    #[must_use]
+    pub fn registry_binding_config(&self) -> &RegistryBindingConfig {
+        &self.registry_binding_config
+    }
+
+    /// The active document's active [`Mode`] (`{Serde, Bevy}`), or `None` when no tab
+    /// is open (E009 — FR-009/FR-013; for tests/hosts).
+    #[must_use]
+    pub fn active_mode(&self) -> Option<Mode> {
+        self.active_document().map(|d| d.mode_state().active_mode())
+    }
+
+    /// The always-visible active-mode indicator label for the active document, or a
+    /// "no document open" placeholder (E009 — FR-011; for tests/hosts).
+    #[must_use]
+    pub fn mode_indicator_label(&self) -> String {
+        self.active_document().map_or_else(
+            || "no document open".to_string(),
+            EditorDocument::mode_label,
+        )
+    }
+
+    /// The always-visible bound-registry indicator label for the active document, or a
+    /// "no document open" placeholder (E009 — FR-011; for tests/hosts).
+    #[must_use]
+    pub fn registry_indicator_label(&self) -> String {
+        self.active_document().map_or_else(
+            || "no document open".to_string(),
+            EditorDocument::registry_label,
+        )
+    }
+
+    /// Whether the registry-binding-config / mode window is open (for tests/hosts).
+    #[must_use]
+    pub fn registries_open(&self) -> bool {
+        self.show_registries
+    }
+
+    /// Open or close the registry-binding-config / mode window (E009 — FR-009/FR-011).
+    pub fn set_registries_open(&mut self, open: bool) {
+        self.show_registries = open;
+    }
+
+    /// Resolve + load the active document's [`ModeState`] from the project
+    /// [`registry_binding_config`](Self::registry_binding_config) (extension
+    /// auto-detect → per-pattern hint → project default), honoring any explicit
+    /// per-document mode override the document already carries, then re-validate
+    /// (E009 — FR-009/FR-011/FR-012/FR-013).
+    ///
+    /// This is the E009 analogue of
+    /// [`apply_binding_to_active`](Self::apply_binding_to_active): it (1) re-resolves
+    /// the document's mode + registry binding against the current project config,
+    /// (2) loads the bound registry export **read-only as data** (degrading to
+    /// `NoRegistry` on any failure — never a crash, SC-002), and (3) requests an
+    /// off-frame reparse so validation re-runs under the (possibly new) mode's source.
+    ///
+    /// **Preserving an explicit toggle:** when the document's current mode origin is
+    /// [`ModeOrigin::Override`](crate::bevy::mode::ModeOrigin), the user has explicitly
+    /// chosen a mode via the toggle — that choice is carried through so re-resolution
+    /// (e.g. after a becomes-active switch) never silently reverts it. Otherwise the
+    /// mode is re-derived from the extension / config.
+    ///
+    /// Changes **zero** document bytes (mode/registry resolution is a behavior
+    /// selection, not an edit — FR-011). A no-op when no tab is open.
+    pub fn apply_mode_to_active(&mut self) {
+        let Some(idx) = self.workspace.active_index() else {
+            return;
+        };
+        let Some(doc) = self.workspace.get(idx) else {
+            return;
+        };
+        let path = doc.path.clone();
+        // Carry an explicit toggle through a re-resolve so it is never reverted.
+        let mode_override = match doc.mode_state().mode_origin() {
+            crate::bevy::mode::ModeOrigin::Override => Some(doc.mode_state().active_mode()),
+            crate::bevy::mode::ModeOrigin::AutoDetected => None,
+        };
+        let mut state = ModeState::resolve(
+            &self.registry_binding_config,
+            path.as_deref(),
+            mode_override,
+            None,
+        );
+        // Load the bound registry read-only as data (NoRegistry on any failure).
+        state.load_registry(&self.binding_root);
+        let Some(doc) = self.workspace.get_mut(idx) else {
+            return;
+        };
+        doc.set_mode_state(state);
+        // Re-validate under the (possibly new) mode's source without touching bytes.
+        doc.revalidate(&self.worker);
+    }
+
+    /// Toggle the active document's mode serde ⇄ Bevy via an explicit per-document
+    /// override, then re-resolve its registry binding + re-validate (E009 —
+    /// FR-009/FR-011/FR-013, SC-003).
+    ///
+    /// The explicit toggle **overrides** extension auto-detect
+    /// ([`ModeState::set_mode_override`](crate::bevy::mode::ModeState::set_mode_override))
+    /// — a Bevy scene saved as `.ron`, or a non-scene `.scn.ron`, is handled here
+    /// (FR-009). After flipping the mode it re-resolves the bound registry (so a Bevy
+    /// toggle picks up the per-pattern registry / loads it) and re-validates, all
+    /// **without changing a single document byte** (FR-011, SC-003): the toggle only
+    /// flips which validator runs. A no-op when no tab is open.
+    pub fn toggle_active_mode(&mut self) {
+        let Some(doc) = self.active_document() else {
+            return;
+        };
+        let next = match doc.mode_state().active_mode() {
+            Mode::Serde => Mode::Bevy,
+            Mode::Bevy => Mode::Serde,
+        };
+        self.set_active_mode(next);
+    }
+
+    /// Set the active document's mode to `mode` via an explicit per-document override,
+    /// re-resolve its registry binding, and re-validate (E009 — FR-009/FR-011/FR-013,
+    /// SC-003).
+    ///
+    /// Sets the override (which wins over extension auto-detect, FR-009), then routes
+    /// through [`apply_mode_to_active`](Self::apply_mode_to_active) to re-resolve the
+    /// bound registry (loading it for a Bevy toggle) and re-validate. Changes **zero**
+    /// document bytes (FR-011, SC-003). A no-op when no tab is open or the document is
+    /// already in `mode`.
+    pub fn set_active_mode(&mut self, mode: Mode) {
+        let Some(doc) = self.workspace.active_document_mut() else {
+            return;
+        };
+        if doc.mode_state().active_mode() == mode
+            && doc.mode_state().mode_origin() == crate::bevy::mode::ModeOrigin::Override
+        {
+            return;
+        }
+        // Flip the mode via the explicit override (wins over auto-detect, FR-009);
+        // re-resolution below preserves it because the origin is now Override.
+        doc.mode_state_mut().set_mode_override(mode);
+        self.apply_mode_to_active();
+    }
+
+    // --- E009 US3: defaults-elision commands (FR-014/FR-015/FR-016) ------------
+
+    /// `true` iff the active document is in Bevy mode **with a loaded registry** —
+    /// the precondition that gates both elision commands (E009 US3 — FR-014/FR-015).
+    ///
+    /// Both "Reduce verbosity" and "Expand to explicit" are **explicit user
+    /// commands** (never automatic) and are enabled only here: a serde-mode document,
+    /// a Bevy document with no registry resolved, or a Bevy document whose bound
+    /// registry degraded to `NoRegistry` cannot supply the per-type concrete defaults
+    /// the provable-default rule needs, so the commands are disabled (the menu shape
+    /// stays stable). Exposed for tests/hosts to assert the gate.
+    #[must_use]
+    pub fn elision_available(&self) -> bool {
+        self.active_document()
+            .is_some_and(|d| d.is_bevy_mode() && d.mode_state().has_registry())
+    }
+
+    /// **Reduce verbosity** — elide every in-scope field whose value provably equals
+    /// its known registry default, as ONE undo unit (E009 US3 — T029, FR-014/FR-016).
+    ///
+    /// An explicit, never-automatic command (FR-014). It is a no-op unless the active
+    /// document is in Bevy mode with a loaded registry ([`elision_available`](Self::elision_available)).
+    /// `scope` selects whole-document (the default) or a single entity / the current
+    /// selection ([`Scope::Entity`]). See
+    /// [`run_elision`](Self::run_elision) for the shared pipeline.
+    pub fn reduce_verbosity_active(&mut self, scope: crate::bevy::Scope) {
+        self.run_elision(ElisionKind::Reduce, scope);
+    }
+
+    /// **Expand to explicit** — materialize every in-scope registered default-bearing
+    /// field currently absent whose default is known, as ONE undo unit (E009 US3 —
+    /// T029, FR-015/FR-016).
+    ///
+    /// An explicit, never-automatic command (FR-015). No-op unless the active document
+    /// is in Bevy mode with a loaded registry. On **registry drift** (a previously-
+    /// elided field's default no longer carried) it performs a **partial expand** and
+    /// surfaces the skipped fields as an advisory (FR-015). See
+    /// [`run_elision`](Self::run_elision) for the shared pipeline.
+    pub fn expand_to_explicit_active(&mut self, scope: crate::bevy::Scope) {
+        self.run_elision(ElisionKind::Expand, scope);
+    }
+
+    /// The shared shrink/expand command pipeline (E009 US3 — T029, FR-014/015/016).
+    ///
+    /// Mirrors the 4B-2 command idiom: gate on the Bevy-mode + loaded-registry
+    /// precondition, then parse the active document's live buffer → derive the
+    /// [`SceneModel`](crate::bevy::SceneModel) from that same CST → call the pure
+    /// elision entry point against the document's loaded
+    /// [`BevyRegistry`](ron_types::BevyRegistry). On
+    /// [`ElisionOutcome::Applied`](crate::bevy::ElisionOutcome::Applied) the resulting
+    /// CST is committed as exactly **one** E007 undo unit via
+    /// [`EditorDocument::commit_transformed_cst`] (so a single undo restores the exact
+    /// prior bytes — SC-006); any per-field skip advisories (the partial-expand-on-
+    /// drift list, or value-differs notes) are surfaced through the existing transient
+    /// [`push_authoring_notice`](Self::push_authoring_notice) channel. A
+    /// [`NoOp`](crate::bevy::ElisionOutcome::NoOp) changes **zero** bytes and pushes
+    /// no undo unit, only an informational "nothing to do" notice (FR-014).
+    fn run_elision(&mut self, kind: ElisionKind, scope: crate::bevy::Scope) {
+        use crate::bevy::{expand_to_explicit, reduce_verbosity, ElisionOutcome, SceneModel};
+
+        let Some(idx) = self.workspace.active_index() else {
+            return;
+        };
+        let Some(doc) = self.workspace.get(idx) else {
+            return;
+        };
+        // Gate: explicit command, Bevy mode + a loaded registry only (FR-014/FR-015).
+        if !doc.is_bevy_mode() {
+            self.push_authoring_notice(
+                NoticeKind::Error,
+                format!("{} is only available in Bevy mode.", kind.label()),
+            );
+            return;
+        }
+        let Some(registry) = doc.mode_state().registry() else {
+            self.push_authoring_notice(
+                NoticeKind::Error,
+                format!("{} needs a loaded Bevy registry.", kind.label()),
+            );
+            return;
+        };
+
+        // Parse the live buffer once and derive the scene model from that same CST so
+        // every elision target maps to a real, current span (FR-014).
+        let cst = ron_core::parse(&doc.buffer);
+        let model = SceneModel::from_cst(&cst);
+        let outcome: ElisionOutcome = match kind {
+            ElisionKind::Reduce => reduce_verbosity(&cst, &model, registry, scope),
+            ElisionKind::Expand => expand_to_explicit(&cst, &model, registry, scope),
+        };
+
+        // Surface the per-field skip advisories (the partial-expand drift list on
+        // expand; value-differs notes on shrink) before committing — they explain why
+        // a decided-on field was left untouched (FR-015). Never a blocking modal.
+        if let Some(advisory) = kind.advisory_message(outcome.skipped()) {
+            self.push_authoring_notice(NoticeKind::Info, advisory);
+        }
+
+        match outcome {
+            // Applied: commit the whole transformed CST as ONE undo unit (FR-016).
+            ElisionOutcome::Applied { document, .. } => {
+                let Some(doc) = self.workspace.get_mut(idx) else {
+                    return;
+                };
+                doc.commit_transformed_cst(&document, &self.worker, Instant::now());
+            }
+            // No-op: zero bytes, no undo entry — only an informational status (FR-014).
+            ElisionOutcome::NoOp { .. } => {
+                self.push_authoring_notice(NoticeKind::Info, kind.noop_message());
+            }
+        }
+    }
+
+    /// Replace the whole project registry-binding config, persist it, and re-resolve
+    /// modes/registries for every open document (E009 — FR-010/FR-012).
+    ///
+    /// Mirrors [`set_binding_config`](Self::set_binding_config): the new config is
+    /// written best-effort to `<root>/.ronin/bevy-registries.json` (a failed write is
+    /// logged and swallowed — persistence must never crash the editor), then each open
+    /// document re-resolves its mode + registry so a rule change takes effect
+    /// immediately.
+    pub fn set_registry_binding_config(&mut self, config: RegistryBindingConfig) {
+        self.registry_binding_config = config;
+        self.persist_registry_binding_config();
+        self.reapply_modes_to_all_docs();
+    }
+
+    /// Add a registry-binding rule to the project config (E009 — FR-010).
+    pub fn add_registry_rule(&mut self, rule: RegistryBindingRule) {
+        let mut config = self.registry_binding_config.clone();
+        config.rules.push(rule);
+        self.set_registry_binding_config(config);
+    }
+
+    /// Remove the registry-binding rule at `idx`, if in range (E009 — FR-010).
+    pub fn remove_registry_rule(&mut self, idx: usize) {
+        if idx >= self.registry_binding_config.rules.len() {
+            return;
+        }
+        let mut config = self.registry_binding_config.clone();
+        config.rules.remove(idx);
+        self.set_registry_binding_config(config);
+    }
+
+    /// Replace the registry-binding rule at `idx` with `rule`, if in range (E009 —
+    /// FR-010).
+    pub fn replace_registry_rule(&mut self, idx: usize, rule: RegistryBindingRule) {
+        if idx >= self.registry_binding_config.rules.len() {
+            return;
+        }
+        let mut config = self.registry_binding_config.clone();
+        config.rules[idx] = rule;
+        self.set_registry_binding_config(config);
+    }
+
+    /// Persist the project registry-binding config to
+    /// `<root>/.ronin/bevy-registries.json`, swallowing any IO error (E009 — FR-010).
+    ///
+    /// Best-effort, exactly like [`persist_binding_config`](Self::persist_binding_config):
+    /// a failed write is logged and ignored so persistence can never crash the editor.
+    fn persist_registry_binding_config(&self) {
+        if let Err(e) = crate::settings::save_registry_binding_config(
+            &self.registry_binding_config,
+            &self.binding_root,
+        ) {
+            tracing::warn!(error = %e, "failed to persist project registry-binding config");
+        }
+    }
+
+    /// Re-resolve + re-load mode/registry state for every open document (E009 —
+    /// FR-012).
+    ///
+    /// The all-documents companion to
+    /// [`apply_mode_to_active`](Self::apply_mode_to_active): when the project registry
+    /// config changes, every open tab re-resolves its mode + registry from the new
+    /// config (preserving any explicit per-document toggle) and re-validates
+    /// immediately. Each document holds its own [`ModeState`] (no global state), so
+    /// this never cross-contaminates two open documents (FR-012).
+    fn reapply_modes_to_all_docs(&mut self) {
+        for idx in 0..self.workspace.len() {
+            let Some(doc) = self.workspace.get(idx) else {
+                continue;
+            };
+            let path = doc.path.clone();
+            let mode_override = match doc.mode_state().mode_origin() {
+                crate::bevy::mode::ModeOrigin::Override => Some(doc.mode_state().active_mode()),
+                crate::bevy::mode::ModeOrigin::AutoDetected => None,
+            };
+            let mut state = ModeState::resolve(
+                &self.registry_binding_config,
+                path.as_deref(),
+                mode_override,
+                None,
+            );
+            state.load_registry(&self.binding_root);
+            if let Some(doc) = self.workspace.get_mut(idx) {
+                doc.set_mode_state(state);
+                doc.revalidate(&self.worker);
+            }
+        }
+    }
+
     /// Replace the whole project binding config, persist it, and re-apply bindings
     /// to every open document (E006 US2 — FR-008/FR-013).
     ///
@@ -718,6 +1176,10 @@ impl App {
         self.binding_root = parent.to_path_buf();
         self.binding_config =
             BindingConfig::load_from(&BindingConfig::project_config_path(&self.binding_root));
+        // Reload the parallel E009 registry-binding config from the same new root
+        // (separate file; absent/corrupt → empty, no crash — FR-010).
+        self.registry_binding_config =
+            crate::settings::load_registry_binding_config(&self.binding_root);
     }
 
     /// The live notices (for tests and host integration).
@@ -1135,6 +1597,9 @@ impl App {
             // Re-applying the binding for the now-active tab keeps the indicator
             // accurate after a focus-existing switch (FR-011).
             self.apply_binding_to_active();
+            // Re-resolve the mode/registry too so the E009 indicator stays accurate
+            // (FR-011); preserves any explicit per-document toggle.
+            self.apply_mode_to_active();
             return;
         }
         // E007 OBJ2 (TR-008/SC-003): on reopen, detect a live, content-divergent
@@ -1166,6 +1631,11 @@ impl App {
                 // active-binding indicator is populated (E006 US2 — FR-011/FR-013).
                 self.maybe_adopt_project_root(path);
                 self.apply_binding_to_active();
+                // Resolve the per-document mode + bound registry from the project
+                // registry config (extension auto-detect; load read-only) so the
+                // active-mode/registry indicator is populated and a Bevy scene
+                // validates against its registry on open (E009 — FR-009/FR-011).
+                self.apply_mode_to_active();
             }
             Err(e) => {
                 self.push_open_error(&e, path);
@@ -1247,6 +1717,7 @@ impl App {
                 self.workspace.open(doc);
                 self.maybe_adopt_project_root(&offer.path);
                 self.apply_binding_to_active();
+                self.apply_mode_to_active();
             }
             Err(e) => {
                 // The on-disk file vanished/became unreadable since the offer; surface
@@ -1266,6 +1737,7 @@ impl App {
                 self.workspace.open(doc);
                 self.maybe_adopt_project_root(path);
                 self.apply_binding_to_active();
+                self.apply_mode_to_active();
             }
             Err(e) => self.push_open_error(&e, path),
         }
@@ -1277,6 +1749,9 @@ impl App {
         // A path-less untitled buffer resolves to NoBinding; applying it populates
         // the active-binding indicator ("no type bound") for the new tab (FR-011).
         self.apply_binding_to_active();
+        // A path-less buffer resolves to Serde mode, no registry; applying it
+        // populates the active-mode/registry indicator for the new tab (FR-011).
+        self.apply_mode_to_active();
     }
 
     /// The live unsaved-changes prompt, if one is open (for tests/hosts).
@@ -2231,6 +2706,13 @@ impl App {
                         self.show_bindings = true;
                         ui.close();
                     }
+                    // Bevy registries window (E009 — FR-009/FR-010/FR-011): the
+                    // per-document mode toggle + active-mode/registry indicator + the
+                    // project registry-rule editor.
+                    if ui.button("Bevy Registries\u{2026}").clicked() {
+                        self.show_registries = true;
+                        ui.close();
+                    }
                     ui.separator();
                     if ui.button("Quit").clicked() {
                         self.request_quit();
@@ -2275,6 +2757,31 @@ impl App {
                             ui.close();
                         }
                     });
+                });
+                // Bevy menu (E009 US3 — FR-014/FR-015/FR-016): the explicit,
+                // never-automatic defaults-elision commands. Both are enabled ONLY for
+                // a Bevy-mode document with a loaded registry (the provable-default
+                // rule needs the registry's per-type concrete defaults) — a serde
+                // document or a Bevy document with no registry shows them disabled so
+                // the menu shape stays stable. Each commits the whole transform as one
+                // E007 undo unit (SC-006); the partial-expand-on-drift advisory is
+                // surfaced through the dismissible-notice channel.
+                ui.menu_button("Bevy", |ui| {
+                    let can_elide = self.elision_available();
+                    ui.add_enabled_ui(can_elide, |ui| {
+                        if ui.button("Reduce Verbosity").clicked() {
+                            self.reduce_verbosity_active(crate::bevy::Scope::WholeDocument);
+                            ui.close();
+                        }
+                        if ui.button("Expand to Explicit").clicked() {
+                            self.expand_to_explicit_active(crate::bevy::Scope::WholeDocument);
+                            ui.close();
+                        }
+                    });
+                    if !can_elide {
+                        ui.separator();
+                        ui.weak("(Bevy mode + a loaded registry required)");
+                    }
                 });
                 // Snippets menu (FR-015/FR-025): each effective snippet is listed by
                 // its prefix + description (discoverability), insertable into the
@@ -3012,15 +3519,231 @@ impl App {
         }
     }
 
-    /// Render the reserved mode-selector seam in the top region (FR-013).
+    /// Render the Bevy registries window: the per-document mode toggle, the
+    /// active-mode/registry/staleness indicator, and the project registry-rule editor
+    /// (E009 — FR-009/FR-010/FR-011).
     ///
-    /// Mounts [`mode_selector_seam_stub`] (reserved for **E009**) as its own top
-    /// panel so a later epic can populate it without touching shell-core layout.
+    /// Modeled on [`render_bindings_window`](Self::render_bindings_window): mutations
+    /// are collected into local flags inside the closure (which borrows `self` fields
+    /// for the form draft) and applied after the window closes so the borrow checker
+    /// stays happy. The toggle changes **zero** document bytes (FR-011, SC-003).
+    fn render_registries_window(&mut self, ui: &mut egui::Ui) {
+        if !self.show_registries {
+            return;
+        }
+        let mut open = self.show_registries;
+
+        // Snapshot read-only display state the closure needs.
+        let has_active = self.active_document().is_some();
+        let mode_label = self.mode_indicator_label();
+        let registry_label = self.registry_indicator_label();
+        let staleness = self
+            .active_document()
+            .and_then(EditorDocument::staleness_label);
+        let is_bevy = self
+            .active_document()
+            .is_some_and(EditorDocument::is_bevy_mode);
+        let rules: Vec<RegistryBindingRule> = self.registry_binding_config.rules.clone();
+        let config_path = RegistryBindingConfig::project_config_path(&self.binding_root);
+
+        // Deferred actions decided inside the closure, applied after it returns.
+        let mut toggle_to: Option<Mode> = None;
+        let mut remove_rule: Option<usize> = None;
+        let mut load_rule_for_edit: Option<usize> = None;
+        let mut commit_rule = false;
+
+        egui::Window::new("Bevy Registries")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ui.ctx(), |ui| {
+                // ---- Active document mode + registry (FR-009/FR-011) ----
+                ui.heading("Active document");
+                ui.add_space(2.0);
+                ui.label(&mode_label);
+                ui.label(&registry_label);
+                if let Some(stale) = &staleness {
+                    ui.weak(stale);
+                }
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    // The explicit serde ⇄ Bevy toggle (FR-009): zero-byte switch.
+                    let caption = if is_bevy {
+                        "Switch to serde"
+                    } else {
+                        "Switch to Bevy"
+                    };
+                    let target = if is_bevy { Mode::Serde } else { Mode::Bevy };
+                    ui.add_enabled_ui(has_active, |ui| {
+                        if ui.button(caption).clicked() {
+                            toggle_to = Some(target);
+                        }
+                    });
+                });
+
+                ui.separator();
+
+                // ---- Project registry rules (FR-010) ----
+                ui.heading("Project registry rules");
+                ui.weak(format!("Stored at {}", config_path.display()));
+                ui.add_space(2.0);
+                if rules.is_empty() {
+                    ui.weak("(no rules — scenes resolve to \"no registry\")");
+                }
+                egui::ScrollArea::vertical()
+                    .max_height(200.0)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        for (i, rule) in rules.iter().enumerate() {
+                            ui.horizontal(|ui| {
+                                ui.monospace(&rule.pattern);
+                                ui.label(format!(
+                                    "\u{2192} {}",
+                                    rule.registry_export_path.display()
+                                ));
+                                if ui.small_button("Edit").clicked() {
+                                    load_rule_for_edit = Some(i);
+                                }
+                                if ui.small_button("Remove").clicked() {
+                                    remove_rule = Some(i);
+                                }
+                            });
+                        }
+                    });
+
+                ui.add_space(4.0);
+                let editing = self.editing_registry_rule;
+                ui.label(match editing {
+                    Some(i) => format!("Edit rule #{i}"),
+                    None => "Add rule".to_string(),
+                });
+                registry_rule_form(ui, &mut self.registry_rule_draft);
+                ui.horizontal(|ui| {
+                    let can_commit = self.registry_rule_draft.to_rule().is_some();
+                    ui.add_enabled_ui(can_commit, |ui| {
+                        let label = if editing.is_some() { "Update" } else { "Add" };
+                        if ui.button(label).clicked() {
+                            commit_rule = true;
+                        }
+                    });
+                    if editing.is_some() && ui.button("Cancel Edit").clicked() {
+                        load_rule_for_edit = None;
+                        self.editing_registry_rule = None;
+                        self.registry_rule_draft =
+                            crate::settings::RegistryBindingFormDraft::default();
+                    }
+                });
+            });
+        self.show_registries = open;
+
+        // ---- Apply deferred actions ----
+        if let Some(mode) = toggle_to {
+            self.set_active_mode(mode);
+        }
+        if let Some(i) = remove_rule {
+            if self.editing_registry_rule == Some(i) {
+                self.editing_registry_rule = None;
+                self.registry_rule_draft = crate::settings::RegistryBindingFormDraft::default();
+            }
+            self.remove_registry_rule(i);
+        }
+        if let Some(i) = load_rule_for_edit {
+            if let Some(rule) = self.registry_binding_config.rules.get(i) {
+                self.registry_rule_draft = crate::settings::RegistryBindingFormDraft {
+                    pattern: rule.pattern.clone(),
+                    exclude: rule
+                        .exclude
+                        .as_ref()
+                        .map(|e| e.join(", "))
+                        .unwrap_or_default(),
+                    registry_export_path: rule.registry_export_path.display().to_string(),
+                    mode: rule.mode,
+                    expected_bevy_version: rule.expected_bevy_version.clone().unwrap_or_default(),
+                };
+                self.editing_registry_rule = Some(i);
+            }
+        }
+        if commit_rule {
+            if let Some(rule) = self.registry_rule_draft.to_rule() {
+                match self.editing_registry_rule {
+                    Some(i) => self.replace_registry_rule(i, rule),
+                    None => self.add_registry_rule(rule),
+                }
+                self.editing_registry_rule = None;
+                self.registry_rule_draft = crate::settings::RegistryBindingFormDraft::default();
+            }
+        }
+    }
+
+    /// Render the always-visible active-mode/registry indicator + explicit toggle in
+    /// the top mode-selector region (E009 — FR-009/FR-011, SC-003).
+    ///
+    /// This populates the seam E008/E009 reserved (replacing
+    /// [`mode_selector_seam_stub`], kept only when no tab is open so the layout stays
+    /// visible). For the active document it shows, always-on:
+    ///
+    /// * the **active mode** + origin ([`EditorDocument::mode_label`]) — `Mode: bevy
+    ///   (auto)` / `Mode: serde (override)`;
+    /// * the **bound registry** + registry state ([`EditorDocument::registry_label`]) —
+    ///   the NoRegistry-vs-loaded distinction (the three-state model surfaced as
+    ///   `none` / `<name> (no registry loaded)` / `<name> (loaded)`, FR-006);
+    /// * a **staleness** marker when the configured expected version disagrees with the
+    ///   loaded registry's apparent version ([`EditorDocument::staleness_label`],
+    ///   FR-008/FR-011);
+    /// * an explicit **serde ⇄ Bevy toggle** button that flips the per-document mode
+    ///   (overriding extension auto-detect, FR-009) — clicking it changes **zero**
+    ///   document bytes (FR-011, SC-003), it only re-routes which validator runs.
+    ///
+    /// The toggle decision is collected during the closure and applied after it
+    /// returns so the borrow of `self.active_document()` does not collide with the
+    /// `&mut self` toggle call.
     fn render_mode_selector(&mut self, ui: &mut egui::Ui) {
         egui::Panel::top("mode_selector").show_inside(ui, |ui| {
+            // No tab open: keep the reserved seam placeholder so the layout is visible.
+            let Some(doc) = self.active_document() else {
+                ui.horizontal(|ui| {
+                    mode_selector_seam_stub(ui);
+                });
+                return;
+            };
+            let mode_label = doc.mode_label();
+            let registry_label = doc.registry_label();
+            let staleness = doc.staleness_label();
+            let is_bevy = doc.is_bevy_mode();
+            // The toggle's target mode + its button caption.
+            let (target, caption) = if is_bevy {
+                (Mode::Serde, "Switch to serde")
+            } else {
+                (Mode::Bevy, "Switch to Bevy")
+            };
+
+            let mut do_toggle = false;
             ui.horizontal(|ui| {
-                mode_selector_seam_stub(ui);
+                // Always-visible active mode (emphasized) + bound registry + state.
+                ui.strong(&mode_label);
+                ui.separator();
+                if is_bevy {
+                    ui.label(&registry_label);
+                } else {
+                    ui.weak(&registry_label);
+                }
+                // Staleness advisory (FR-008): shown only when warranted, as a weak
+                // marker — it is an advisory, never an error.
+                if let Some(stale) = &staleness {
+                    ui.separator();
+                    ui.weak(stale);
+                }
+                // The explicit per-document toggle (FR-009): zero-byte mode switch.
+                if ui.button(caption).clicked() {
+                    do_toggle = true;
+                }
             });
+
+            // Applied after the closure so the immutable borrow above is released.
+            if do_toggle {
+                self.set_active_mode(target);
+            }
         });
     }
 
@@ -3078,6 +3801,9 @@ impl App {
         // The Type Bindings window floats above everything when open (E006 US2 —
         // FR-009/FR-011).
         self.render_bindings_window(ui);
+        // The Bevy Registries window floats above everything when open (E009 —
+        // FR-009/FR-010/FR-011).
+        self.render_registries_window(ui);
     }
 }
 
@@ -3241,6 +3967,48 @@ fn binding_source_form(
     ui.horizontal(|ui| {
         ui.label("Source path");
         ui.text_edit_singleline(&mut draft.source_path);
+    });
+}
+
+/// Render the registry-binding-rule add/edit form into `ui`, editing `draft`
+/// in-place (E009 — FR-010).
+///
+/// Mirrors [`binding_source_form`] for the parallel registry config: a glob
+/// `pattern`, optional comma-separated `exclude` globs, the `registry_export_path`
+/// (a local data file; may be absolute / out-of-tree), an optional per-pattern mode
+/// hint, and an optional expected Bevy version for the staleness advisory. The
+/// caller's commit is gated on [`RegistryBindingFormDraft::to_rule`] returning
+/// `Some` (a blank pattern or export path is rejected).
+fn registry_rule_form(ui: &mut egui::Ui, draft: &mut crate::settings::RegistryBindingFormDraft) {
+    ui.horizontal(|ui| {
+        ui.label("Pattern");
+        ui.text_edit_singleline(&mut draft.pattern);
+    });
+    ui.horizontal(|ui| {
+        ui.label("Exclude");
+        ui.text_edit_singleline(&mut draft.exclude);
+    });
+    ui.horizontal(|ui| {
+        ui.label("Registry export");
+        ui.text_edit_singleline(&mut draft.registry_export_path);
+    });
+    ui.horizontal(|ui| {
+        ui.label("Mode hint");
+        egui::ComboBox::from_id_salt("registry_rule_mode_hint")
+            .selected_text(match draft.mode {
+                None => "(none)",
+                Some(Mode::Serde) => "serde",
+                Some(Mode::Bevy) => "bevy",
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut draft.mode, None, "(none)");
+                ui.selectable_value(&mut draft.mode, Some(Mode::Serde), "serde");
+                ui.selectable_value(&mut draft.mode, Some(Mode::Bevy), "bevy");
+            });
+    });
+    ui.horizontal(|ui| {
+        ui.label("Expected Bevy version");
+        ui.text_edit_singleline(&mut draft.expected_bevy_version);
     });
 }
 

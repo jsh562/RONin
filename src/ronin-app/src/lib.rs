@@ -29,6 +29,7 @@
 //! and sequential multi-dirty close/quit (FR-012/FR-013/FR-022/FR-025/FR-026).
 
 pub mod app;
+pub mod bevy;
 pub mod binding;
 pub mod completion;
 pub mod diagnostics_map;

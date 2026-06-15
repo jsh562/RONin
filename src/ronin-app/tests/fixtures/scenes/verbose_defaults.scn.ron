@@ -1,0 +1,68 @@
+// A VERBOSE Bevy scene for E009 US3 cluster 5A (T025). Type paths align with
+// `tests/fixtures/bevy_registry_defaults.json`. It mixes:
+//   * fields whose value PROVABLY equals the registry default — including floats
+//     written `1.0`, `1.00`, and `1e0` (all equal a default of `1.0` bit-for-bit);
+//   * fields whose value DIFFERS from the default (left explicit);
+//   * a component whose default is partially unknown (`demo::PartialDefaults`);
+//   * a component with NO reflected default (`demo::NoDefaultComponent` — never elided);
+//   * an unregistered component path (`demo::Unknown` — never elided);
+//   * an unparseable map entry (`9: @@@`) the interpretation skips, never crashing.
+// Comments and ordering in UNTOUCHED regions MUST survive any transform
+// byte-for-byte (FR-016).
+(
+    resources: {
+        // A resource whose default-equal field (`names: []`) is elidable.
+        "demo::Tags": (
+            names: [],
+        ),
+    },
+    entities: {
+        0: (
+            components: {
+                // Transform: scale equals the default Vec3 (1.0/1.00/1e0 all == 1.0),
+                // weight equals the default 1.0, but translation differs.
+                "demo::Transform": (
+                    translation: (x: 5.0, y: 0.0, z: 0.0),
+                    scale: (x: 1.0, y: 1.00, z: 1e0),
+                    weight: 1.0,
+                ),
+                // Health: current differs (default 100); max/label/regen equal defaults.
+                "demo::Health": (
+                    current: 50,
+                    max: 100,
+                    label: "player",
+                    regen: false,
+                ),
+                // PartialDefaults: `known` equals its default 1.0; `mystery` has no
+                // default in the registry, so it is left explicit on elide and is
+                // never fabricated on expand.
+                "demo::PartialDefaults": (
+                    known: 1.0,
+                    mystery: 7.0,
+                ),
+                // No reflected Default: this whole component is never touched, so its
+                // inline field comment must survive byte-for-byte (FR-016).
+                "demo::NoDefaultComponent": (
+                    value: 0.0, // untouched: never elided
+                ),
+                // Unregistered type: never elided (unconstrained); inline comment
+                // on an untouched component survives byte-for-byte (FR-016).
+                "demo::Unknown": (
+                    anything: 1.0, // untouched: unconstrained
+                ),
+            },
+        ),
+        1: (
+            components: {
+                // A second Transform fully at its defaults: translation/scale/weight
+                // all equal the registry default -> all three elidable.
+                "demo::Transform": (
+                    translation: (x: 0.0, y: 0.0, z: 0.0),
+                    scale: (x: 1.0, y: 1.0, z: 1.0),
+                    weight: 1.0,
+                ),
+            },
+        ),
+        9: @@@,
+    },
+)

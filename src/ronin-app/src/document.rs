@@ -42,16 +42,18 @@
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use ron_core::transform::{apply_structural, StructuralOp, TransformOutcome};
 use ron_core::{BlockedReason, UndoEntry, UndoStack};
 
+use crate::bevy::mode::{Mode, ModeState};
 use crate::binding::{BindingOrigin, BindingState, DocumentOverride, TypeBinding};
 use crate::completion::CompletionState;
-use crate::diagnostics_map::{map_diagnostic, DiagnosticView};
+use crate::diagnostics_map::{map_diagnostic, map_scene_diagnostic, DiagnosticView};
 use crate::editor_view::build_highlight_model;
-use crate::reparse::{BoundType, ParseResult, ReparseWorker};
+use crate::reparse::{BoundScene, BoundType, BoundValidation, ParseResult, ReparseWorker};
 use crate::structural::projection::{derive_projection, DerivedProjection};
 use crate::structural::view_state::ViewSelectionAndFocus;
 
@@ -341,7 +343,28 @@ pub struct EditorDocument {
     /// diagnostics are produced (FR-015). The real `BindingConfig`→`BoundType`
     /// resolution that populates this is Phase 4 (US2); for now it defaults to
     /// `None` and is the seam the binding resolver / per-document override will set.
+    ///
+    /// This carries the **serde-mode** bound type only (E006); the Bevy-mode bound
+    /// registry travels separately on [`mode_state`](Self::mode_state) (E009). The
+    /// two are mutually exclusive per document (FR-013): [`bound_validation`](Self::bound_validation)
+    /// picks exactly one per the active [`Mode`].
     pub bound_type: Option<BoundType>,
+    /// The per-document Bevy mode state (E009 — FR-006/009/012/013).
+    ///
+    /// Held **1:1 per document** so different open documents may simultaneously be
+    /// in different modes bound to different registries — there is **no global mode
+    /// state**, which is exactly what guarantees per-document coexistence (FR-012).
+    /// Records the active `{Serde, Bevy}` mode (extension auto-detect + explicit
+    /// override), the resolved bound registry binding, and (after
+    /// [`ModeState::load_registry`](crate::bevy::mode::ModeState::load_registry)) the
+    /// loaded registry + its serialized interchange model. When the active mode is
+    /// [`Mode::Bevy`] with a loaded registry, [`bound_validation`](Self::bound_validation)
+    /// selects the scene validator (which **replaces** the serde source, AD-003);
+    /// otherwise the serde path runs. Default is [`Mode::Serde`], no registry, which
+    /// leaves the serde path byte-for-byte unchanged. Transient/session-only (never
+    /// persisted); the shell resolves it from the project `RegistryBindingConfig` +
+    /// extension auto-detect + any explicit override.
+    pub mode_state: ModeState,
     /// The resolved active binding for this document, for **display** (E006 US2 —
     /// FR-011).
     ///
@@ -490,6 +513,7 @@ impl EditorDocument {
             completion: CompletionState::new(),
             snippet_session: None,
             bound_type: None,
+            mode_state: ModeState::default(),
             binding: TypeBinding::none(),
             override_: None,
             validation_suppressed: false,
@@ -541,6 +565,7 @@ impl EditorDocument {
             completion: CompletionState::new(),
             snippet_session: None,
             bound_type: None,
+            mode_state: ModeState::default(),
             binding: TypeBinding::none(),
             override_: None,
             validation_suppressed: false,
@@ -595,6 +620,7 @@ impl EditorDocument {
             completion: CompletionState::new(),
             snippet_session: None,
             bound_type: None,
+            mode_state: ModeState::default(),
             binding: TypeBinding::none(),
             override_: None,
             validation_suppressed: false,
@@ -958,16 +984,59 @@ impl EditorDocument {
         }
         self.last_requested_generation = self.edit_generation;
         // Carry the active binding so the worker validates against it off-frame
-        // (E006/FR-006). Cloning is cheap — the `TypeModel` is behind an `Arc`.
-        // When validation is degraded for an oversize document, ship `None` so the
-        // worker runs structural-only (no type diagnostics), consistent with E003
-        // disabling highlighting/squiggles past the same threshold (T040).
+        // (E006/FR-006, E009/FR-013). Cloning is cheap — the `TypeModel` / registry
+        // are behind `Arc`s. When validation is degraded for an oversize document,
+        // ship `None` so the worker runs structural-only (no type/scene diagnostics),
+        // consistent with E003 disabling highlighting/squiggles past the same
+        // threshold (T040).
         let bound = if self.validation_suppressed {
             None
         } else {
-            self.bound_type.clone()
+            self.bound_validation()
         };
         worker.request(self.edit_generation, self.buffer.clone(), bound);
+    }
+
+    /// Select the single [`BoundValidation`] for this document under its active
+    /// mode — the one place serde-vs-Bevy validation is chosen (E009/FR-013).
+    ///
+    /// **Exactly one source per document** (mutually exclusive, FR-013):
+    ///
+    /// * [`Mode::Bevy`] with a **loaded** registry → [`BoundValidation::Bevy`]: the
+    ///   bound registry **replaces** the active source (AD-003), so the worker runs
+    ///   the multi-subtree scene validator (`validate_scene`) against the registry +
+    ///   its serialized interchange model (both acquired once at registry-load time
+    ///   and shared by `Arc`). The serde [`bound_type`](Self::bound_type) is ignored
+    ///   in this branch — Bevy mode does not compose with the E006 binding.
+    /// * **otherwise** → the serde path: [`BoundValidation::Serde`] wrapping the
+    ///   E006 [`bound_type`](Self::bound_type) when one resolved, else `None`. This
+    ///   includes Bevy mode with **no** loaded registry (NoRegistry): the scene's
+    ///   structural-only / no-registry hint is produced by the validator only when a
+    ///   registry is present, so a registry-less Bevy document degrades to
+    ///   structural-only here exactly like an unbound serde document (FR-006/FR-015).
+    ///
+    /// Returns `None` when neither a registry nor a serde type is bound (the
+    /// structural-only state). The serde branch is byte-for-byte the prior behavior
+    /// (`self.bound_type.clone()` mapped through `Serde`).
+    #[must_use]
+    fn bound_validation(&self) -> Option<BoundValidation> {
+        if self.mode_state.active_mode() == Mode::Bevy {
+            // Bevy mode REPLACES the active source with the bound registry, but only
+            // when one is actually loaded; a NoRegistry Bevy document falls through
+            // to structural-only (the serde branch yields its `bound_type`, which is
+            // `None` for a Bevy document — never the E006 type, FR-013).
+            if let (Some(model), Some(registry)) =
+                (self.mode_state.registry_model(), self.mode_state.registry())
+            {
+                return Some(BoundValidation::Bevy(BoundScene {
+                    model: Arc::clone(model),
+                    registry: Arc::new(registry.clone()),
+                    expected_version: self.mode_state.expected_bevy_version().map(str::to_owned),
+                }));
+            }
+        }
+        // Serde mode (or Bevy-with-no-registry): the E006 bound type, unchanged.
+        self.bound_type.clone().map(BoundValidation::Serde)
     }
 
     /// Drain finished reparse results from `worker` and install the current one
@@ -1107,6 +1176,145 @@ impl EditorDocument {
         }
     }
 
+    // --- E009: per-document Bevy mode state ------------------------------------
+
+    /// The per-document Bevy mode state (E009 — FR-009/012/013), read-only.
+    ///
+    /// The shell's active-mode/registry indicator and the mode-switch / registry
+    /// controls read this; it is held 1:1 per document so two open documents may be
+    /// in different modes bound to different registries simultaneously (FR-012).
+    #[must_use]
+    pub fn mode_state(&self) -> &ModeState {
+        &self.mode_state
+    }
+
+    /// The per-document Bevy mode state mutably (E009 — FR-009/012).
+    ///
+    /// The shell drives mode toggling
+    /// ([`set_mode_override`](crate::bevy::mode::ModeState::set_mode_override)) and
+    /// registry loading
+    /// ([`load_registry`](crate::bevy::mode::ModeState::load_registry)) through this.
+    /// Mutating mode state changes **zero** document bytes (FR-011): mode is a
+    /// behavior selection, not an edit. The caller re-validates by requesting an
+    /// off-frame reparse after a mode/registry change (see
+    /// [`revalidate`](Self::revalidate)).
+    #[must_use]
+    pub fn mode_state_mut(&mut self) -> &mut ModeState {
+        &mut self.mode_state
+    }
+
+    /// Replace this document's [`ModeState`] wholesale (E009 — FR-009/012/013).
+    ///
+    /// Used by the shell after it resolves the document's mode + registry binding
+    /// from the project `RegistryBindingConfig` + extension auto-detect + any
+    /// explicit override (and loads the registry). Per-document: setting one
+    /// document's mode never touches another's (no global state, FR-012). Changes
+    /// **zero** document bytes — the caller re-validates via [`revalidate`](Self::revalidate).
+    pub fn set_mode_state(&mut self, mode_state: ModeState) {
+        self.mode_state = mode_state;
+    }
+
+    /// `true` iff this document is currently in [`Mode::Bevy`] (E009 — FR-013).
+    #[must_use]
+    pub fn is_bevy_mode(&self) -> bool {
+        self.mode_state.active_mode() == Mode::Bevy
+    }
+
+    /// A short, human-readable label for the **active mode** + its origin, for the
+    /// always-visible mode indicator and tests (E009 — FR-011).
+    ///
+    /// `Mode: serde` / `Mode: bevy` with an `(auto)` / `(override)` suffix
+    /// distinguishing extension auto-detection from an explicit per-document toggle
+    /// (the [`ModeOrigin`](crate::bevy::mode::ModeOrigin)). The mode is a behavior
+    /// selection only — reading or rendering it changes zero document bytes (FR-011).
+    #[must_use]
+    pub fn mode_label(&self) -> String {
+        let origin = match self.mode_state.mode_origin() {
+            crate::bevy::mode::ModeOrigin::AutoDetected => "auto",
+            crate::bevy::mode::ModeOrigin::Override => "override",
+        };
+        format!(
+            "Mode: {} ({origin})",
+            self.mode_state.active_mode().as_str()
+        )
+    }
+
+    /// A short, human-readable label for the **bound registry** + registry state,
+    /// for the always-visible mode/registry indicator and tests (E009 — FR-011).
+    ///
+    /// Surfaces the bound registry export (file name) and the NoRegistry-vs-loaded
+    /// distinction the diagnostics already carry (the three-state model — FR-006):
+    ///
+    /// * **Serde mode** → `Registry: n/a (serde mode)` — the registry is irrelevant
+    ///   to a serde document (it validates via the E006 binding, FR-013).
+    /// * **Bevy, no binding resolved** → `Registry: none` — no rule matched and no
+    ///   override applied (the `NoRegistry` state, hint-only, FR-006/FR-010).
+    /// * **Bevy, bound but not loaded** → `Registry: <name> (no registry loaded)` —
+    ///   a path resolved but the export was missing/unparseable/empty, so it degraded
+    ///   to `NoRegistry` (SC-002): only the "no registry loaded" hint, never an error.
+    /// * **Bevy, loaded** → `Registry: <name> (loaded)` — a non-empty registry loaded
+    ///   from the bound export, so scene-aware validation engages.
+    ///
+    /// The export's file name (not the full, possibly long path) is shown so the
+    /// indicator stays compact; the full path lives in the registry-binding config
+    /// window. A staleness advisory is surfaced separately via
+    /// [`staleness_label`](Self::staleness_label) (FR-008/FR-011).
+    #[must_use]
+    pub fn registry_label(&self) -> String {
+        if !self.is_bevy_mode() {
+            return "Registry: n/a (serde mode)".to_string();
+        }
+        match self.mode_state.bound_registry_path() {
+            None => "Registry: none".to_string(),
+            Some(path) => {
+                let name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("<registry>");
+                if self.mode_state.has_registry() {
+                    format!("Registry: {name} (loaded)")
+                } else {
+                    // A path resolved but the export degraded to NoRegistry — show the
+                    // exact "no registry loaded" hint (no error, SC-002, FR-006).
+                    format!("Registry: {name} (no registry loaded)")
+                }
+            }
+        }
+    }
+
+    /// The staleness advisory label, when one is warranted, or `None` (E009 —
+    /// FR-008/FR-011).
+    ///
+    /// Returns `Some("Stale: expected <x>, registry <y>")` only when a configured
+    /// expected Bevy version disagrees with the loaded registry's apparent version
+    /// ([`ModeState::is_stale`](crate::bevy::mode::ModeState::is_stale)); otherwise
+    /// `None`. A version skew is an advisory, never an error.
+    #[must_use]
+    pub fn staleness_label(&self) -> Option<String> {
+        if !self.mode_state.is_stale() {
+            return None;
+        }
+        let expected = self.mode_state.expected_bevy_version().unwrap_or("?");
+        let apparent = self.mode_state.apparent_bevy_version().unwrap_or("?");
+        Some(format!("Stale: expected {expected}, registry {apparent}"))
+    }
+
+    /// Bump the edit generation and request an off-frame reparse so validation
+    /// re-runs against the current mode/binding **without** changing any bytes
+    /// (E009 — FR-011/FR-013).
+    ///
+    /// This is the re-validate primitive the shell calls after a mode toggle or a
+    /// registry (re)load: switching mode is a behavior selection, not an edit, so it
+    /// touches zero document bytes (FR-011) — it only forces the worker to re-run the
+    /// (now possibly different) mode's validation path and republish the diagnostic
+    /// set wholesale (replace-not-merge, FR-006). Mirrors how
+    /// [`App::apply_binding_to_active`](crate::app::App) re-validates a serde binding
+    /// change immediately rather than deferring to the next edit.
+    pub fn revalidate(&mut self, worker: &ReparseWorker) {
+        self.on_edit();
+        self.request_reparse(worker);
+    }
+
     // --- E008: structural view state + projection + one-undo-unit edit ---------
 
     /// The per-document structural view selection + edit focus + overrides + stale
@@ -1227,37 +1435,264 @@ impl EditorDocument {
             _ => Err(BlockedReason::TargetNotFound),
         }
     }
+
+    /// Commit a **pre-computed final [`CstDocument`]** (e.g. a defaults-elision
+    /// result) as exactly **one** E007 undo unit (E009 US3 — T029, FR-016, SC-006).
+    ///
+    /// This is the multi-op sibling of
+    /// [`apply_structural_edit`](Self::apply_structural_edit): where that method
+    /// applies a single [`StructuralOp`] internally, this takes a whole, already-
+    /// transformed CST (the one CST→CST result the elision pass produced by routing
+    /// every field removal/insertion through `apply_structural` — the
+    /// [`ElisionOutcome::Applied`](crate::bevy::ElisionOutcome::Applied) document) and
+    /// installs it. The body **mirrors `apply_structural_edit` exactly** so the whole
+    /// invocation is one logical action / one undo unit (FR-016):
+    ///
+    /// 1. Flush any in-flight coalescing typing run to its own boundary
+    ///    ([`record_undo_snapshot`](Self::record_undo_snapshot)) so the commit is a
+    ///    **separate** undo unit and never merges with a prior keystroke run.
+    /// 2. Install the new text by **printing** the new CST: every untouched region is
+    ///    byte-for-byte identical (the elision pass reused the green tree for
+    ///    untouched subtrees — FR-016), only the touched fields changed.
+    /// 3. Bump the edit generation ([`on_edit`](Self::on_edit)), force a fresh
+    ///    (non-coalescing) unit by clearing the timing anchor, and snapshot so undo
+    ///    restores **exactly** the pre-commit bytes / redo replays exactly the
+    ///    post-commit bytes (one undo unit — SC-006).
+    /// 4. Request an off-frame reparse so validation + the projection re-derive
+    ///    against the new text.
+    ///
+    /// `now` is the caller-side clock for the undo coalesce decision (`ron-core`
+    /// measures no clock — TR-014); the commit snapshot is always recorded as a
+    /// non-coalescing boundary regardless of timing.
+    ///
+    /// A [`NoOp`](crate::bevy::ElisionOutcome::NoOp) outcome must **not** reach this
+    /// method — nothing in scope was elidable/expandable, so the caller changes zero
+    /// bytes and pushes no undo unit (FR-014). Only the `Applied` document is
+    /// committed here.
+    pub fn commit_transformed_cst(
+        &mut self,
+        new_cst: &ron_core::CstDocument,
+        worker: &ReparseWorker,
+        now: Instant,
+    ) {
+        // Flush any in-flight coalescing typing run first so this commit is a
+        // *separate* undo unit and never merges with a prior keystroke run (FR-016).
+        self.record_undo_snapshot(now);
+        // Install the new text by printing the new CST: untouched regions are
+        // byte-for-byte identical (FR-016); only the elided/expanded fields changed.
+        self.buffer = ron_core::print(new_cst);
+        // One logical op = one undo unit. Bump the generation so the next snapshot
+        // captures THIS new state, and force a fresh (non-coalescing) unit so undo
+        // restores exactly the prior bytes (SC-006).
+        self.on_edit();
+        self.last_undo_instant = None;
+        self.record_undo_snapshot(now);
+        // Re-validate + re-derive the projection off-frame against the new text.
+        self.request_reparse(worker);
+    }
 }
 
 /// Build the merged editor-coordinate diagnostic view for a landed
-/// [`ParseResult`] against `buffer` (E006/FR-006, FR-017).
+/// [`ParseResult`] against `buffer` (E006/FR-006, FR-017; E009/FR-007/FR-013).
 ///
-/// The structural set (`result.diagnostics`) is published in full; the type set
-/// (`result.type_diagnostics`) is first deduped against it via
-/// [`ron_validate::dedup_against_structural`] so any type finding whose byte range
-/// intersects a structural diagnostic is suppressed — structural always wins on
-/// overlap (FR-017). The (kept) structural-then-type sets are then mapped into
-/// [`DiagnosticView`]s (char + line/column) via [`map_diagnostic`]. Structural
-/// findings come first so they take visual/list precedence; each is
-/// distinguishable from the other by [`DiagnosticView::code`]'s
-/// [`source`](ron_core::DiagnosticCode::source) tag (`"ron-core"` vs `"ron-types"`).
+/// The structural set (`result.diagnostics`) is always published in full and comes
+/// first so it takes visual/list precedence. The **mode-specific** set is then
+/// appended — exactly one of the two mutually-exclusive sets is non-empty per the
+/// document's active mode (FR-013):
 ///
-/// This is the single "replace, not merge" publish point for the type set: every
-/// landed result recomputes the whole view, so no stale type finding survives
-/// (FR-006). The structural set is NEVER dropped here — only overlapping TYPE
-/// findings are (structural precedence, FR-017).
+/// * **Serde mode** (`result.type_diagnostics`) → unchanged: deduped against the
+///   structural set via [`ron_validate::dedup_against_structural`] (a type finding
+///   overlapping a structural one is suppressed — structural wins, FR-017), then
+///   mapped via [`map_diagnostic`]. Byte-for-byte the prior behavior.
+/// * **Bevy mode** (`result.scene_diagnostics`) → each [`SceneDiagnostic`] is
+///   mapped via [`map_scene_diagnostic`], so a registered-mismatch renders as a
+///   regular `RON-V####` type finding and a scene-level hint/advisory keeps its
+///   distinguishing `BVY-S####` code (E009/FR-007/IP-005). Scene findings render
+///   through this **same** E006 surface (squiggles + Problems panel).
+///
+/// This is the single "replace, not merge" publish point for the mode-specific
+/// set: every landed result recomputes the whole view, so no stale finding
+/// survives (FR-006). The structural set is NEVER dropped here.
 #[must_use]
 pub fn merge_type_diagnostics(result: &ParseResult, buffer: &str) -> Vec<DiagnosticView> {
-    // Suppress type findings that overlap a structural one (structural wins,
-    // FR-017). The structural set is passed by reference and is never mutated.
+    // Structural findings always lead and are never dropped (FR-017).
+    let mut views: Vec<DiagnosticView> = result
+        .diagnostics
+        .iter()
+        .map(|d| map_diagnostic(d, buffer))
+        .collect();
+
+    // Serde mode: append the deduped type set (structural wins on overlap, FR-017).
+    // Suppress type findings that overlap a structural one. The structural set is
+    // passed by reference and is never mutated.
     let type_diags = ron_validate::dedup_against_structural(
         result.type_diagnostics.clone(),
         &result.diagnostics,
     );
-    result
-        .diagnostics
-        .iter()
-        .chain(type_diags.iter())
-        .map(|d| map_diagnostic(d, buffer))
-        .collect()
+    views.extend(type_diags.iter().map(|d| map_diagnostic(d, buffer)));
+
+    // Bevy mode: append the scene findings (mutually exclusive with the type set —
+    // at most one is non-empty, FR-013). A registered-mismatch renders as a RON-V
+    // type finding; a scene-level hint/advisory keeps its BVY-S code (FR-007).
+    views.extend(
+        result
+            .scene_diagnostics
+            .iter()
+            .map(|d| map_scene_diagnostic(d, buffer)),
+    );
+
+    views
+}
+
+#[cfg(test)]
+mod mode_selection_tests {
+    //! E009 US2 (T021/T022) — the per-document serde-vs-Bevy validation selection
+    //! (`bound_validation`) and per-document coexistence, unit-tested in isolation
+    //! from the off-frame worker (deterministic; no threads).
+
+    use super::*;
+    use crate::bevy::mode::{RegistryBindingConfig, RegistryBindingRule};
+    use crate::reparse::BoundValidation;
+    use std::path::{Path, PathBuf};
+
+    const REGISTRY: &str = r##"{
+        "bevyVersion": "0.16.0",
+        "$defs": { "game::Vec3": { "kind": "Struct", "properties": {} } }
+    }"##;
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("ronin_doc_mode_sel_{tag}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn scene_config() -> RegistryBindingConfig {
+        RegistryBindingConfig {
+            rules: vec![RegistryBindingRule {
+                pattern: "**/*.scn.ron".to_string(),
+                exclude: None,
+                registry_export_path: PathBuf::from("registry.json"),
+                mode: None,
+                expected_bevy_version: None,
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn serde_bound() -> BoundType {
+        BoundType {
+            model: Arc::new(serde_json::json!({ "$defs": { "Entity": { "type": "object" } } })),
+            type_name: "Entity".to_string(),
+        }
+    }
+
+    #[test]
+    fn serde_mode_selects_serde_validation() {
+        // A default (Serde) document with a serde binding selects the Serde variant
+        // — byte-for-byte the prior behavior.
+        let mut doc = EditorDocument::new_untitled(1);
+        doc.bound_type = Some(serde_bound());
+        assert!(!doc.is_bevy_mode());
+        match doc.bound_validation() {
+            Some(BoundValidation::Serde(b)) => assert_eq!(b.type_name, "Entity"),
+            other => panic!("expected Serde validation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn serde_mode_without_binding_selects_none() {
+        let doc = EditorDocument::new_untitled(1);
+        assert!(
+            doc.bound_validation().is_none(),
+            "no binding ⇒ structural-only"
+        );
+    }
+
+    #[test]
+    fn bevy_mode_with_loaded_registry_selects_scene_validation() {
+        // A Bevy document with a loaded registry selects the Bevy variant: the
+        // registry REPLACES the serde source (the serde bound_type is ignored).
+        let root = temp_dir("bevy_loaded");
+        std::fs::write(root.join("registry.json"), REGISTRY).unwrap();
+        let config = scene_config();
+        let path = root.join("w.scn.ron");
+
+        let mut doc = EditorDocument::from_loaded(&path, b"").unwrap();
+        // Even with a serde binding present, Bevy mode replaces it.
+        doc.bound_type = Some(serde_bound());
+        let mut state = ModeState::resolve(&config, Some(&path), None, None);
+        assert!(state.load_registry(&root));
+        doc.set_mode_state(state);
+
+        assert!(doc.is_bevy_mode());
+        match doc.bound_validation() {
+            Some(BoundValidation::Bevy(scene)) => {
+                assert!(scene.registry.contains("game::Vec3"));
+                assert!(scene.model.get("$defs").is_some());
+            }
+            other => panic!("expected Bevy validation, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn bevy_mode_without_registry_falls_through_to_serde() {
+        // Bevy mode but NO registry loaded (NoRegistry): the scene validator only
+        // runs when a registry is present, so this degrades to the serde branch —
+        // its bound_type (which for a real Bevy doc is None ⇒ structural-only).
+        let config = RegistryBindingConfig::default();
+        let mut doc = EditorDocument::new_untitled(1);
+        let state = ModeState::resolve(&config, Some(Path::new("w.scn.ron")), None, None);
+        assert!(state.is_bevy());
+        assert!(!state.has_registry());
+        doc.set_mode_state(state);
+        assert!(doc.is_bevy_mode());
+        // No serde bound_type and no registry ⇒ structural-only.
+        assert!(doc.bound_validation().is_none());
+    }
+
+    #[test]
+    fn two_documents_hold_independent_mode_state_no_global() {
+        // FR-012 — per-document coexistence: one Bevy doc and one serde doc hold
+        // independent ModeStates; setting one never affects the other.
+        let root = temp_dir("coexist_unit");
+        std::fs::write(root.join("registry.json"), REGISTRY).unwrap();
+        let config = scene_config();
+        let scene_path = root.join("a.scn.ron");
+
+        let mut bevy_doc = EditorDocument::from_loaded(&scene_path, b"").unwrap();
+        let mut state = ModeState::resolve(&config, Some(&scene_path), None, None);
+        assert!(state.load_registry(&root));
+        bevy_doc.set_mode_state(state);
+
+        let mut serde_doc = EditorDocument::new_untitled(1);
+        serde_doc.bound_type = Some(serde_bound());
+
+        assert!(bevy_doc.is_bevy_mode());
+        assert!(!serde_doc.is_bevy_mode());
+        assert!(matches!(
+            bevy_doc.bound_validation(),
+            Some(BoundValidation::Bevy(_))
+        ));
+        assert!(matches!(
+            serde_doc.bound_validation(),
+            Some(BoundValidation::Serde(_))
+        ));
+        // Toggling the serde doc to Bevy leaves the bevy doc untouched, and the
+        // bevy doc's registry is unchanged (no shared/global state).
+        serde_doc.mode_state_mut().set_mode_override(Mode::Bevy);
+        assert!(serde_doc.is_bevy_mode());
+        assert!(bevy_doc.is_bevy_mode(), "the other doc is unaffected");
+        // The bevy doc keeps its own loaded registry and scene validation — the
+        // toggle on the serde doc did not touch it (no shared/global state).
+        assert!(bevy_doc.mode_state().has_registry());
+        assert!(matches!(
+            bevy_doc.bound_validation(),
+            Some(BoundValidation::Bevy(_))
+        ));
+        // The serde doc, now in Bevy mode but with NO registry of its own, falls
+        // through to its serde branch (it never borrows the other doc's registry).
+        assert!(!serde_doc.mode_state().has_registry());
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

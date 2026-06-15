@@ -52,6 +52,7 @@ fn diagnostics_seam_lists_a_diagnostic_row() {
         line_col: ((0, 4), (0, 5)),
         severity: Severity::Error,
         code: DiagnosticCode::UnexpectedToken,
+        scene_code: None,
         message: "unexpected token".to_string(),
     };
 

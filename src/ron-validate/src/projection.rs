@@ -126,6 +126,44 @@ impl CstJsonProjection {
         let instance = project_value_guided(&value, schema, &g, &mut builder, &mut index);
         Self { instance, index }
     }
+
+    /// Build a schema-guided projection from a single value-position CST
+    /// **sub-tree** rather than a whole document (E009/IP-002, AD-001).
+    ///
+    /// This is the generic, Bevy-agnostic entry the scene interpreter
+    /// ([`ronin-app`]) drives per component: it projects ONE value node (e.g. a
+    /// component value inside a scene) against ONE schema node, with the same
+    /// guidance and read-only guarantees as [`Self::from_document_guided`].
+    ///
+    /// `subtree` must be a value-position node (`Struct`/`Tuple`/`List`/`Map`/
+    /// `EnumVariant`/`Unit`/`Literal`/`Error`). A non-value node (e.g. `Root`, a
+    /// struct field, a map entry) yields an empty projection (JSON `null`, empty
+    /// index) — the same fail-soft as a document with no value (no panic).
+    ///
+    /// # Full-document coordinates
+    ///
+    /// rowan [`SyntaxNode`]s carry **absolute** [`TextRange`] offsets within their
+    /// owning tree, and the projection records every span via
+    /// `value.syntax().text_range()`. So when `subtree` is a node of the original
+    /// parsed document, the spans recorded here are already in full-document byte
+    /// coordinates — a diagnostic produced from this projection points at the exact
+    /// offending construct in the whole document, with no offset translation
+    /// needed (FR-005). The walk is read-only over the CST (FR-020).
+    #[must_use]
+    pub fn from_subtree_guided(
+        subtree: &SyntaxNode,
+        schema: &serde_json::Value,
+        defs: &serde_json::Value,
+    ) -> Self {
+        let Some(value) = Value::cast(subtree.clone()) else {
+            return Self::default();
+        };
+        let mut index = PointerRangeIndex::new();
+        let mut builder = PointerBuilder::new();
+        let g = Guide { defs };
+        let instance = project_value_guided(&value, schema, &g, &mut builder, &mut index);
+        Self { instance, index }
+    }
 }
 
 /// Schema-guidance context for the guided projection: the `$defs` map used to
