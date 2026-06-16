@@ -1,0 +1,122 @@
+# release-plz configuration — feature 00011-release-distribution (OBJ2).
+#
+# release-plz is the SINGLE source of truth for Cargo-workspace VERSIONING and
+# crates.io PUBLISHING (OR-004 / OR-005 / OR-008). It (a) opens a "Release PR"
+# that bumps each crate per its own conventional-commit history + regenerates the
+# changelog + runs a BLOCKING cargo-semver-checks gate, and (b) on the
+# maintainer-pushed umbrella tag, publishes the four publishable crates to
+# crates.io IN DEPENDENCY ORDER.
+#
+# RESPONSIBILITY SPLIT (AD-002 / HINT-005): release-plz is the SOLE crates.io
+# publisher. `dist` (dist-workspace.toml / release.yml) builds BINARIES ONLY and
+# never pushes a crate, so the two tools cannot double-publish (a yank-only
+# error).
+#
+# VERSIONING MODEL (AD-001 / OR-005 / OR-008):
+#   - INDEPENDENT per-crate semantic versions: each crate bumps according to its
+#     OWN conventional-commit history (the default release-plz behavior — there is
+#     NO `[workspace] version` unification here, so versions are NOT linked).
+#   - UMBRELLA product version: the overall RONin release version lives on
+#     `ronin-app` (OR-008). The maintainer-pushed umbrella tag `vX.Y.Z` (matching
+#     ronin-app's version) is the single release trigger (HINT-002 / STF-001);
+#     per-crate git tags release-plz records are provenance-only, never a trigger.
+#
+# The root-excluded `src/ron-core/fuzz` crate is NOT a workspace member (root
+# Cargo.toml `exclude = ["src/ron-core/fuzz"]`), so release-plz never sees it; it
+# can never be versioned or published (OR-005 / HINT-005). The explicit
+# `[[package]]` block below additionally pins `publish = false` as defense in
+# depth in case the crate is ever re-added as a member.
+
+# ---------------------------------------------------------------------------
+# WORKSPACE-WIDE DEFAULTS (apply to every publishable member unless a per-crate
+# `[[package]]` block overrides them).
+# ---------------------------------------------------------------------------
+[workspace]
+# Open/maintain the Release PR but do NOT auto-create git releases/tags from a
+# push: tagging is the deliberate maintainer trigger (OR-001 / OR-008). The
+# release-plz.yml workflow runs `release-plz release` on the umbrella tag for the
+# actual publish; `release-plz release-pr` runs on push:main for the PR.
+release = true
+
+# Independent per-crate versioning: do NOT couple crate versions. Each crate's
+# bump is computed solely from the conventional commits that touch it (AD-001 /
+# OR-005). (release-plz links versions only when explicitly told to; the absence
+# of any shared-version directive keeps them independent.)
+# `git_release_enable = false`: release-plz must NOT create GitHub Releases — the
+# binary GitHub Release is owned by `dist` (release.yml) on the umbrella tag
+# (AD-002). release-plz only PUBLISHES CRATES.
+git_release_enable = false
+
+# Per-crate git tags are PROVENANCE-ONLY (HINT-002 / STF-001): release-plz may
+# record them, but they are never a release trigger (the umbrella tag is). Use
+# the conventional `{{ package }}-v{{ version }}` form so a per-crate tag can
+# never collide with the umbrella `vX.Y.Z` product tag.
+git_tag_enable = true
+git_tag_name = "{{ package }}-v{{ version }}"
+
+# BLOCKING semver gate (OR-004 / T015 / [COMPLETES OR-004]): run
+# cargo-semver-checks on every crate during the Release PR. A detected breaking
+# API change without the matching version bump (major for >=1.0, MINOR in 0.x)
+# is reported by release-plz and the bump it proposes accounts for it — so a
+# breaking change without the matching bump fails the Release PR / publish gate.
+# `release-plz.yml` additionally runs `cargo semver-checks` as a REQUIRED, hard
+# (non-zero-exit) step on the Release-PR job so the block is enforced, not merely
+# advisory.
+semver_check = true
+
+# Regenerate the changelog on each Release PR from conventional commits, using
+# the git-cliff config in cliff.toml (T016). The Release PR therefore always
+# carries an up-to-date, keepachangelog-style changelog (OR-004).
+changelog_update = true
+changelog_config = "cliff.toml"
+
+# Use the committed Cargo.lock for reproducible dependency resolution and to keep
+# the lockfile updated alongside the version bumps (OR-010). The actual
+# `cargo publish` invocations in release-plz.yml pass `--locked`.
+dependencies_update = false
+
+# ---------------------------------------------------------------------------
+# ORDERED crates.io PUBLISH (OR-005 / HINT-002): release-plz publishes only the
+# crates whose manifest version is not yet on crates.io, and it ALWAYS publishes
+# in DEPENDENCY ORDER. release-plz derives the order from the Cargo dependency
+# graph automatically; the explicit per-crate blocks below make the intended
+# order — ron-core -> ron-types -> ron-validate -> ronin-app — auditable.
+#
+#   ron-core      : leaf, no workspace deps                       (publish 1st)
+#   ron-types     : leaf, no workspace deps                       (publish 2nd)
+#   ron-validate  : depends on ron-core                           (publish 3rd)
+#   ronin-app     : depends on ron-core + ron-types + ron-validate;
+#                   carries the UMBRELLA product version (OR-008) (publish last)
+# ---------------------------------------------------------------------------
+
+[[package]]
+name = "ron-core"
+publish = true
+# Independent version source-of-truth is this crate's own Cargo.toml; bumped per
+# its own conventional commits. No version linkage to the others.
+
+[[package]]
+name = "ron-types"
+publish = true
+
+[[package]]
+name = "ron-validate"
+publish = true
+
+[[package]]
+name = "ronin-app"
+publish = true
+# UMBRELLA product version (OR-008): ronin-app's version is the overall RONin
+# release version. The maintainer-pushed umbrella tag `vX.Y.Z` matches this
+# version and is the single release trigger (dist binaries + release-plz publish).
+git_release_enable = false
+
+# ---------------------------------------------------------------------------
+# DEFENSE IN DEPTH: explicitly mark the root-excluded fuzz crate non-publishable
+# in case it is ever re-added as a workspace member. As configured today it is
+# `exclude`d in the root Cargo.toml, so release-plz never enumerates it (OR-005).
+# ---------------------------------------------------------------------------
+[[package]]
+name = "ron-core-fuzz"
+release = false
+publish = false

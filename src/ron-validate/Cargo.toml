@@ -4,7 +4,11 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "WASM-clean type-aware RON validator: jsonschema over a CST→JSON projection (E006, offline)."
+keywords = ["ron", "validation", "json-schema", "lint", "diagnostics"]
+categories = ["parser-implementations", "development-tools"]
+readme = "README.md"
 
 # WASM-clean validator (ADR-0006): depends only on the rowan-only `ron-core`
 # (path), `jsonschema`, and `serde_json`. `jsonschema` is taken with

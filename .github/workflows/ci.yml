@@ -1,26 +1,43 @@
-# CI Quality Gates (feature 00002-ci-quality-gates).
+# CI Quality Gates (feature 00002-ci-quality-gates; refactored in E011 T006).
 #
-# Enforces the RONin "Verified Quality" invariants on every change:
-#   - check        : rustfmt + clippy (-D warnings)            [OR-001, OR-002]
-#   - test         : cargo test on Linux/Windows/macOS         [OR-003, OR-009]
-#   - wasm         : ron-core builds for wasm32-unknown-unknown [OR-004]
-#   - supply-chain : cargo-audit + cargo-deny (PR/push + cron)  [OR-005]
+# Enforces the RONin "Verified Quality" invariants on every change. As of E011
+# (AD-003 / HINT-004) the gate jobs themselves live in the REUSABLE workflow
+# `.github/workflows/gates.yml`; this workflow only owns the PR/push/cron
+# *triggers* and DELEGATES to that reusable workflow via `uses:`. The release
+# pipeline calls the SAME `gates.yml`, so PR CI and the release re-run identical
+# gate definitions — no duplicated drift (OR-009 / SC-007).
 #
-# Conventions enforced here:
-#   - Single workflow, discrete lowercase job ids usable as required status
-#     checks (OR-010 / SC-008). Marking them required is the repo-admin step in
-#     docs/runbooks/branch-protection.md (RR-001).
-#   - Least-privilege GITHUB_TOKEN: top-level `permissions: contents: read`,
-#     no per-job write re-grant (OR-012 / SC-009).
-#   - `pull_request` trigger only (never `pull_request_target`) and no
-#     `secrets.*` references, so fork PRs validate identically (OR-011 / SC-010).
-#   - Every third-party action pinned to a full commit SHA (AD-005 / SC-009);
-#     Dependabot (.github/dependabot.yml) bumps the pins (OR-012).
-#   - All cargo build/test invocations use `--locked` against the committed
-#     Cargo.lock (OR-007); the stable toolchain comes from rust-toolchain.toml
-#     with no per-job channel override (OR-008 / SC-011).
-#   - `--workspace` never builds the root-excluded `src/ron-core/fuzz` crate,
-#     keeping the nightly-only fuzz crate off the stable matrix (OR-009 / SC-007).
+# The gates (defined in gates.yml, ported verbatim from this file's prior
+# inlined jobs) are:
+#   - check        : rustfmt + clippy (-D warnings)             [OR-001, OR-002]
+#   - test         : cargo test on Linux/Windows/macOS          [OR-003, OR-009]
+#   - wasm         : ron-core builds for wasm32-unknown-unknown  [OR-004]
+#   - wasm-validate: ron-validate builds for wasm32-unknown-unknown [FR-023]
+#   - supply-chain : cargo-audit + cargo-deny (PR/push + cron)   [OR-005]
+#
+# Triggers preserved from E002 (unchanged):
+#   - pull_request (never pull_request_target; fork PRs validate identically —
+#     OR-011 / SC-010, and the reusable gates.yml references no `secrets.*`).
+#   - push to main.
+#   - the daily supply-chain cron — every trigger that fires this workflow runs
+#     ALL gates in gates.yml, so the cron still runs the supply-chain gate (and
+#     the rest), catching newly published advisories with no new commit
+#     (AD-004 / OR-005 / SC-004).
+#
+# Least-privilege GITHUB_TOKEN preserved: top-level `permissions: contents:
+# read` here AND in gates.yml; the called workflow cannot exceed the caller's
+# grant (OR-012 / SC-009).
+#
+# BRANCH-PROTECTION NOTE (PR-gating byte-equivalence): the SAME five gate jobs
+# run with the SAME ids/steps/matrix/SHAs/`--locked` as before — gating is
+# byte-equivalent in substance. The ONLY surface change is the check NAME: a job
+# run via a reusable workflow is reported as "<caller-job> / <called-job>"
+# (e.g. `gates / test (ubuntu-latest)`, `gates / check (fmt + clippy)`). The
+# caller job below is named `gates` to keep those names stable and
+# self-describing. If required-status-check branch protection was configured
+# against the OLD inlined names (`check`, `test (ubuntu-latest)`, `wasm ...`,
+# `supply-chain ...`), re-point it at the new `gates / <job>` names — the
+# repo-admin step in docs/runbooks/branch-protection.md (RR-001).
 name: CI
 
 on:
@@ -29,108 +46,21 @@ on:
     branches: [main]
   schedule:
     # Daily supply-chain scan (00:00 UTC) so newly published advisories are
-    # caught with no new commit (AD-004 / OR-005 / SC-004).
+    # caught with no new commit (AD-004 / OR-005 / SC-004). On this trigger the
+    # called gates.yml still runs the supply-chain gate (and all other gates).
     - cron: "0 0 * * *"
 
 # Least-privilege GITHUB_TOKEN for all jobs; no write scopes, no inheritance of
-# the repository's default token permissions (OR-012 / SC-009).
+# the repository's default token permissions (OR-012 / SC-009). A reusable
+# workflow cannot be granted more than its caller, so this cap also bounds
+# gates.yml.
 permissions:
   contents: read
 
 jobs:
-  # fmt + clippy, Linux only (OS-independent — AD-006) [OR-001, OR-002].
-  check:
-    name: check (fmt + clippy)
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
-      - name: Install Rust toolchain
-        # Honors the stable pin + components in rust-toolchain.toml (AD-001 / OR-008).
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          components: rustfmt, clippy
-      - name: Cache cargo registry + target
-        uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
-      - name: rustfmt (check)
-        run: cargo fmt --all -- --check
-      - name: clippy (deny warnings)
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-
-  # cargo test across all three target OSes (OR-003). `--workspace` excludes the
-  # root-excluded fuzz crate (OR-009 / SC-007); fail-fast caps free-tier minutes.
-  test:
-    name: test
-    strategy:
-      fail-fast: true
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-      - name: Cache cargo registry + target
-        uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
-      - name: cargo test
-        run: cargo test --workspace --locked
-
-  # Compile ron-core to wasm32-unknown-unknown to enforce the WASM-clean
-  # invariant (ADR-0002 / IP-003); Linux only (AD-006) [OR-004].
-  wasm:
-    name: wasm (ron-core wasm32)
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
-      - name: Install Rust toolchain (wasm32 target)
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          targets: wasm32-unknown-unknown
-      - name: Cache cargo registry + target
-        uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
-      - name: Build ron-core for wasm32
-        run: cargo build -p ron-core --target wasm32-unknown-unknown --locked
-
-  # Compile ron-validate to wasm32-unknown-unknown to enforce the WASM-clean
-  # validator invariant (ADR-0006 / FR-023): proves `jsonschema` with
-  # `default-features = false` keeps the network/TLS resolver (reqwest/rustls)
-  # out and the validator portable. Mirrors the `wasm` job; Linux only (AD-006).
-  wasm-validate:
-    name: wasm (ron-validate wasm32)
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
-      - name: Install Rust toolchain (wasm32 target)
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          targets: wasm32-unknown-unknown
-      - name: Cache cargo registry + target
-        uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
-      - name: Build ron-validate for wasm32
-        run: cargo build -p ron-validate --target wasm32-unknown-unknown --locked
-
-  # Supply-chain scanning: cargo-audit (RustSec advisories) + cargo-deny
-  # (deny.toml license/ban/advisory/source policy). Runs on PR/push AND the
-  # daily cron. Hard-fails on any advisory/disallowed license; the only waiver
-  # is a dated entry in deny.toml / the cargo-audit ignore-list
-  # (docs/runbooks/advisory-response.md) [OR-005].
-  supply-chain:
-    name: supply-chain (audit + deny)
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-      - name: Install cargo-audit + cargo-deny (pinned, prebuilt)
-        # Prebuilt, version-pinned installs (AD-003) — no source compile.
-        uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
-        with:
-          tool: cargo-audit@0.22.2,cargo-deny@0.19.4
-      - name: cargo audit
-        run: cargo audit
-      - name: cargo deny check
-        run: cargo deny check
+  # Delegate every E002 gate (check/test/wasm/wasm-validate/supply-chain) to the
+  # reusable workflow. This single `uses:` runs ALL five jobs defined in
+  # gates.yml on each trigger (PR, push:main, daily cron) — same job
+  # definitions the release pipeline re-runs (OR-009 / AD-003 / HINT-004).
+  gates:
+    uses: ./.github/workflows/gates.yml

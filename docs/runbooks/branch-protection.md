@@ -24,10 +24,26 @@ OS.
 | `test (macos-latest)`            | `test` matrix  | macOS test suite (OR-003) |
 | `wasm (ron-core wasm32)`         | `wasm`         | WASM-clean invariant, ADR-0002 (OR-004) |
 | `supply-chain (audit + deny)`    | `supply-chain` | cargo-audit + cargo-deny (OR-005) |
+| `release-verify (dry-run + lint)` | `release-verify` | release-pipeline dry-run/lint gate (E011 OR-015..018 / SC-001..007) |
 
-All six must be required so a red gate blocks merge (SC-001 / SC-008). The
-`supply-chain` job also runs on the daily schedule; scheduled runs report on the
-default branch but do not gate an individual PR — that is expected.
+All seven must be required so a red gate blocks merge (SC-001 / SC-008 / E011
+SC-007). The `supply-chain` job also runs on the daily schedule; scheduled runs
+report on the default branch but do not gate an individual PR — that is expected.
+
+### E011: `release-verify` as a required check (T036 / OR-015 / SC-007)
+
+`release-verify` is the release-pipeline verification gate
+(`.github/workflows/release-verify.yml`). It runs on `pull_request` + `push: main`
+(it is a PR gate, NOT a release trigger — it never publishes) and proves the
+release config without cutting a live release: `dist plan` / `dist generate
+--check`, `actionlint`, the SHA-pin + manifest-metadata + tag→channel-routing +
+provenance/SBOM + SC-007-hardening check scripts, `cargo publish --dry-run` per
+crate, and blocking `cargo-semver-checks` (OR-015..018). Marking it required makes
+config drift / a broken pin / a missing-metadata regression block merge (E011
+SC-007). Add the check exactly as shown above (its UI name is
+`release-verify (dry-run + lint)`); because it lives in its own workflow (not the
+reusable `gates.yml`), it is reported by its own job `name:` (no `gates / …`
+prefix).
 
 ## Steps (GitHub web UI)
 
@@ -54,6 +70,7 @@ gh api -X PUT repos/OWNER/REPO/branches/main/protection \
   -f 'required_status_checks[checks][][context]=test (macos-latest)' \
   -f 'required_status_checks[checks][][context]=wasm (ron-core wasm32)' \
   -f 'required_status_checks[checks][][context]=supply-chain (audit + deny)' \
+  -f 'required_status_checks[checks][][context]=release-verify (dry-run + lint)' \
   -F 'enforce_admins=true' \
   -F 'required_pull_request_reviews=null' \
   -F 'restrictions=null'

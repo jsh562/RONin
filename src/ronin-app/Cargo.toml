@@ -6,7 +6,23 @@ edition.workspace = true
 # 1.77 MSRV; native deps are confined to ronin-app, so this override is local-only.
 rust-version = "1.92"
 license.workspace = true
-description = "RONin desktop application shell (stub; full implementation deferred to E003)."
+repository.workspace = true
+description = "RONin — a desktop editor for RON (Rusty Object Notation): lossless editing, type-aware validation, Bevy scene mode, and RON⇄JSON interop."
+keywords = ["ron", "editor", "gui", "egui", "bevy"]
+categories = ["text-editors", "development-tools"]
+readme = "README.md"
+
+# `cargo binstall` metadata (E011 OR-003). Points binstall at the GitHub Release
+# tarball assets produced by `dist` (see dist-workspace.toml) so
+# `cargo binstall ronin-app` fetches the prebuilt binary instead of compiling.
+# `pkg-fmt = "tar.gz"` matches dist's windows/unix-archive = ".tar.gz"; the
+# pkg-url placeholders resolve to the dist default asset name
+# `ronin-app-<target>.tar.gz` on the release tagged `v<version>`. No separately
+# hosted install URL — zero extra infra (OR-003 / OR-012).
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }.tar.gz"
+pkg-fmt = "tar.gz"
+bin-dir = "{ bin }{ binary-ext }"
 
 [dependencies]
 # Cross-platform atomic file replace for the never-corrupt save seam (E007,

@@ -1,0 +1,176 @@
+# release-plz (crate versioning + crates.io publish) — feature
+# 00011-release-distribution (OBJ2 / OR-004 / OR-005 / OR-008 / OR-011).
+#
+# release-plz is the SOLE crates.io publisher (AD-002 / HINT-005). `dist`
+# (release.yml) builds BINARIES ONLY and never pushes a crate, so the two tools
+# cannot double-publish (a yank-only error). This workflow has TWO disjoint jobs:
+#
+#   1. release-pr  (on push: main)  — opens/updates the "Release PR": independent
+#      per-crate version bumps + umbrella product bump (OR-008) + regenerated
+#      changelog (cliff.toml) + a BLOCKING cargo-semver-checks gate (OR-004).
+#      It does NOT publish anything; it only proposes versions/changelog via a PR.
+#
+#   2. publish     (on push: tag vX.Y.Z) — the maintainer-pushed UMBRELLA tag is
+#      the single release trigger (HINT-002 / STF-001). Runs `release-plz release`
+#      which publishes each crate whose manifest version is not yet on crates.io,
+#      IN DEPENDENCY ORDER (ron-core -> ron-types -> ron-validate -> ronin-app —
+#      OR-005). EXACTLY ONE step performs the crates.io publish (no double
+#      publish). This is the ONLY job that can see CARGO_REGISTRY_TOKEN (T019).
+#
+# SHA-PIN PROVENANCE (T018 / OR-010):
+#   - actions/checkout / taiki-e/install-action / dtolnay/rust-toolchain — pins
+#     COPIED VERBATIM from the already-pinned .github/workflows/{gates,ci,release}.yml
+#     (single source of truth; Dependabot bumps them in "/").
+#   - release-plz itself is installed as a pinned CLI via the already-pinned
+#     taiki-e/install-action (NOT via the `release-plz/action` GitHub Action),
+#     so NO new un-pinnable action is introduced — every action below is a full
+#     commit SHA already vetted elsewhere in this repo. cargo-semver-checks is
+#     installed the same way for the OR-004 blocking gate.
+name: release-plz
+
+# TRIGGERS (least-trigger, no fork-secret exposure — OR-011 / T019):
+#   - push: main          → the Release PR (no secret-bearing publish; runs on
+#                           the trusted main branch only, never on fork PRs and
+#                           never via pull_request_target).
+#   - push: tags 'v*'     → the umbrella-tag publish (maintainer-gated; tags can
+#                           only be pushed by someone with write access, so the
+#                           CARGO_REGISTRY_TOKEN is never reachable from a fork).
+# There is deliberately NO `pull_request` / `pull_request_target` trigger, so a
+# fork PR can never run this workflow or reach the publish secret (Edge Cases).
+on:
+  push:
+    branches: [main]
+    tags:
+      - "v*"
+
+# LEAST-PRIVILEGE DEFAULT (OR-011 / T019): grant NOTHING at the workflow level.
+# Each job re-declares only the scopes it needs. The publish job needs no Git
+# write scopes (it pushes to crates.io with CARGO_REGISTRY_TOKEN, not GITHUB_TOKEN);
+# the release-pr job needs `contents: write` + `pull-requests: write` to open the
+# Release PR. No global write grant exists.
+permissions: {}
+
+# Deterministic, reproducible cargo behavior (OR-010 / OR-012).
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  # ===========================================================================
+  # RELEASE PR (OR-004 / OR-008): on every push to main, recompute independent
+  # per-crate version bumps + the umbrella product bump from conventional
+  # commits, regenerate the changelog (cliff.toml), run the BLOCKING semver gate,
+  # and open/update the Release PR. Publishes NOTHING — CARGO_REGISTRY_TOKEN is
+  # NOT available to this job (T019).
+  # ===========================================================================
+  release-pr:
+    name: release-pr (versions + changelog + semver gate)
+    # Only on a branch push to main — never on a tag push (the `publish` job owns
+    # tags). Guards against this job also firing on the umbrella tag.
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    # SCOPES (OR-011 / T019): exactly what opening the Release PR needs and no
+    # more — `contents: write` to push the release branch + changelog/version
+    # bumps, `pull-requests: write` to open/update the PR. No id-token, no
+    # packages, no global write. CARGO_REGISTRY_TOKEN is NOT referenced here.
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout (full history for changelog generation)
+        uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
+        with:
+          # Full history so git-cliff/release-plz can compute bumps + changelog
+          # from the conventional-commit log since the last release.
+          fetch-depth: 0
+      - name: Install Rust toolchain
+        # Stable pin from rust-toolchain.toml (OR-014) — same pin as the E002 gates.
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Install release-plz + cargo-semver-checks (pinned, prebuilt)
+        # Installed via the already-SHA-pinned taiki-e/install-action so NO new
+        # un-pinnable GitHub Action is introduced (T018). Versions are pinned for
+        # reproducibility (Dependabot/maintainer bumps the tool versions).
+        uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
+        with:
+          tool: release-plz@0.3.135,cargo-semver-checks@0.42.0
+      # --- BLOCKING semver gate (OR-004 / T015 / [COMPLETES OR-004]): run
+      # cargo-semver-checks as a REQUIRED, hard step BEFORE building the Release
+      # PR. A breaking API change without the matching bump exits non-zero and
+      # FAILS this job, blocking the Release PR — not advisory. `--locked` keeps
+      # it reproducible against the committed Cargo.lock (OR-010). ---
+      - name: cargo semver-checks (blocking)
+        run: cargo semver-checks check-release --locked --workspace
+      # --- Open/update the Release PR: independent per-crate bumps + umbrella
+      # bump + regenerated changelog. release-plz ALSO runs its own semver_check
+      # (release-plz.toml) so the bumps it proposes already account for breaking
+      # changes; the explicit step above is the hard gate. ---
+      - name: release-plz release-pr (open/update Release PR)
+        env:
+          # GITHUB_TOKEN for opening the PR — scoped by the job `permissions`
+          # above (contents+pull-requests write only). NOT a publish secret.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: release-plz release-pr --config release-plz.toml
+
+  # ===========================================================================
+  # PUBLISH (OR-005 / HINT-002): the maintainer-pushed UMBRELLA tag `vX.Y.Z` is
+  # the single release trigger. `release-plz release` publishes each crate whose
+  # manifest version is not yet on crates.io, IN DEPENDENCY ORDER (ron-core ->
+  # ron-types -> ron-validate -> ronin-app). EXACTLY ONE step performs the
+  # crates.io publish (no double-publish). This is the ONLY job that can see
+  # CARGO_REGISTRY_TOKEN (T019 / OR-011).
+  # ===========================================================================
+  publish:
+    name: publish (crates.io, dependency order)
+    # Only on a TAG push — never on the main-branch push (the `release-pr` job
+    # owns that). `startsWith(github.ref, 'refs/tags/v')` matches the umbrella
+    # product tag (and any -rc/-nightly pre-release tag, which still publishes
+    # the bumped crate versions; channel routing for the BINARY release is
+    # release.yml's concern — OR-008).
+    if: startsWith(github.ref, 'refs/tags/v') && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    # SCOPES (OR-011 / T019): least-privilege. `contents: read` is all the
+    # crates.io publish needs — the push to crates.io uses CARGO_REGISTRY_TOKEN,
+    # NOT the GITHUB_TOKEN. release-plz must NOT create a GitHub Release here
+    # (git_release_enable = false in release-plz.toml; the binary Release is
+    # dist's job — AD-002), so no `contents: write` is granted.
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
+        with:
+          fetch-depth: 0
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Install release-plz (pinned, prebuilt)
+        # Same pinned install path as the release-pr job (T018) — no new action.
+        uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
+        with:
+          tool: release-plz@0.3.135
+      # --- THE SINGLE crates.io PUBLISH STEP (OR-005 / T019 — exactly one).
+      # `release-plz release` resolves the dependency graph and publishes each
+      # not-yet-published crate version in DEPENDENCY ORDER (ron-core ->
+      # ron-types -> ron-validate -> ronin-app). The root-excluded fuzz crate is
+      # never a member, so it is never published (OR-005 / HINT-005).
+      #
+      # CARGO_REGISTRY_TOKEN — the ONLY repository secret (OR-011) — is injected
+      # ONLY HERE, on this single step of this single job. It is unreachable from
+      # the release-pr job, from any fork PR (no pull_request* trigger), and from
+      # release.yml (which never references it).
+      #
+      # LOCKED PUBLISH (OR-010 / T018): the committed Cargo.lock is present and
+      # release-plz's underlying `cargo publish` resolves against it; the
+      # `--no-verify`-free verify pass + the blocking `cargo semver-checks
+      # --locked` gate on the release-pr job assert lockfile consistency. (older
+      # release-plz CLIs do not expose a generic `--locked` publish passthrough;
+      # the committed lockfile + the gate provide the equivalent guarantee.) ---
+      - name: release-plz release (publish crates.io, dep order)
+        env:
+          # crates.io auth — scoped to THIS step ONLY (T019). The maintainer sets
+          # this repo secret per docs/runbooks/release.md (RR-003).
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          # GITHUB_TOKEN is bounded by this job's `contents: read`; release-plz
+          # uses it only for read metadata, NOT to create a GitHub Release
+          # (git_release_enable = false).
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: release-plz release --config release-plz.toml
