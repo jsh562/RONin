@@ -523,6 +523,127 @@ pub struct App {
     partial_ron_prompt: Option<PartialRonPrompt>,
 }
 
+/// The deferred tab-strip mutations collected during one [`render_tab_strip`] pass.
+///
+/// The tab loop must not reshape the document list mid-iteration, so the click /
+/// reorder / close intents are collected here and applied by the caller after the
+/// loop (preserving the existing deferred-mutation structure).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct TabBarActions {
+    /// A non-drag click selected this tab index (click-to-switch — FR-012).
+    pub switch_to: Option<usize>,
+    /// A tab was dropped over another: move `from` to `to` (drag-to-reorder).
+    pub reorder: Option<(usize, usize)>,
+    /// The per-tab close button was clicked for this index.
+    pub close_idx: Option<usize>,
+}
+
+/// Render the horizontal tab strip for `workspace` and return the user's intents.
+///
+/// Pure rendering: it touches no document bytes and mutates no workspace state —
+/// the caller applies the returned [`TabBarActions`] after the pass (FR-012).
+///
+/// Click-to-switch is detected by a **dedicated `Sense::click()` interact placed on
+/// the tab rect with its own id**, *not* by reading `.clicked()` off the drag source
+/// or its inner widget. In egui 0.34 `dnd_drag_source` registers a `Sense::drag()`
+/// interaction on the same id/rect; that drag interaction wins pointer arbitration
+/// and **swallows the click**, so neither `inner.inner.clicked()` nor
+/// `inner.response.clicked()` ever fires (the regression this guards against — tabs
+/// never switched). A second interact under a distinct id senses the click cleanly
+/// in both the live app and the headless egui_kittest harness. The drag payload is
+/// still read off the drag-source response.
+pub fn render_tab_strip(ui: &mut egui::Ui, workspace: &EditorWorkspace) -> TabBarActions {
+    let active = workspace.active_index();
+    let mut actions = TabBarActions::default();
+
+    ui.horizontal(|ui| {
+        for idx in 0..workspace.len() {
+            let Some(doc) = workspace.get(idx) else {
+                continue;
+            };
+            let dot = if doc.dirty() { "\u{25CF} " } else { "" };
+            let label = format!("{dot}{}", doc.title());
+            let selected = active == Some(idx);
+
+            let id = egui::Id::new(("ronin_tab", doc.id()));
+            // `dnd_drag_source` returns `InnerResponse<R>`: `.inner` is the closure's
+            // return (the `selectable_label` response), `.response` is the drag-source's
+            // `Sense::drag()` response that carries the drag payload.
+            let inner = ui.dnd_drag_source(id, idx, |ui| ui.selectable_label(selected, label));
+            let rect = inner.response.rect;
+
+            // Click-to-switch: the drag source's `Sense::drag()` interact on the same
+            // id/rect swallows the click (egui 0.34), so neither response reports
+            // `.clicked()`. Sense the click with a dedicated `Sense::click()` interact
+            // under its OWN id over the same rect — it fires in both the live app and the
+            // headless harness (the regression this guards against: tabs never switched).
+            let click_id = id.with("ronin_tab_click");
+            if ui.interact(rect, click_id, egui::Sense::click()).clicked() {
+                actions.switch_to = Some(idx);
+            }
+            // Drag-to-reorder: if a tab payload is released over this tab, move the
+            // dragged tab to this position (FR-012). Read off the drag-source response.
+            if let Some(payload) = inner.response.dnd_release_payload::<usize>() {
+                let from = *payload;
+                if from != idx {
+                    actions.reorder = Some((from, idx));
+                }
+            }
+
+            if ui.small_button("\u{00D7}").clicked() {
+                actions.close_idx = Some(idx);
+            }
+            ui.separator();
+        }
+    });
+
+    actions
+}
+
+/// The egui font-data keys for the three bundled Noto fallback faces, in the order
+/// they are appended to each family's fallback chain.
+const NOTO_FALLBACK_FONTS: [&str; 3] = ["noto_symbols", "noto_symbols2", "noto_math"];
+
+/// Build the [`egui::FontDefinitions`] that [`App::install_fonts`] applies.
+///
+/// Factored out of `set_fonts` so the chain membership is unit-testable without a
+/// live [`egui::Context`]. It starts from the egui defaults, registers the three
+/// bundled Noto faces (`include_bytes!` from `assets/`), then appends each — in
+/// order — to the *end* (fallback position) of both the `Proportional` and
+/// `Monospace` family chains. In egui 0.34 `font_data` values are `Arc<FontData>`,
+/// so each `FontData` is converted with `.into()`.
+#[must_use]
+pub fn build_font_definitions() -> egui::FontDefinitions {
+    let mut fonts = egui::FontDefinitions::default();
+
+    fonts.font_data.insert(
+        "noto_symbols".to_owned(),
+        egui::FontData::from_static(include_bytes!("../assets/noto-symbols.ttf")).into(),
+    );
+    fonts.font_data.insert(
+        "noto_symbols2".to_owned(),
+        egui::FontData::from_static(include_bytes!("../assets/noto-symbols2.ttf")).into(),
+    );
+    fonts.font_data.insert(
+        "noto_math".to_owned(),
+        egui::FontData::from_static(include_bytes!("../assets/noto-math.ttf")).into(),
+    );
+
+    // Append all three to the END (fallback position) of both family chains so the
+    // default fonts still drive normal text and only missing glyphs fall through.
+    for fam in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+        let chain = fonts
+            .families
+            .get_mut(&fam)
+            .expect("egui default FontDefinitions always defines Proportional and Monospace");
+        for name in NOTO_FALLBACK_FONTS {
+            chain.push(name.to_owned());
+        }
+    }
+
+    fonts
+}
+
 impl App {
     /// Construct the shell, optionally opening `cli_path` at launch (FR-003).
     ///
@@ -3659,62 +3780,37 @@ impl App {
         if self.workspace.is_empty() {
             return;
         }
-        egui::Panel::top("tab_bar").show_inside(ui, |ui| {
-            let active = self.workspace.active_index();
-            // Deferred mutations so we don't reshape the list mid-iteration.
-            let mut switch_to: Option<usize> = None;
-            let mut close_idx: Option<usize> = None;
-            let mut reorder: Option<(usize, usize)> = None;
+        let actions = egui::Panel::top("tab_bar")
+            .show_inside(ui, |ui| render_tab_strip(ui, &self.workspace))
+            .inner;
 
-            // Track which tab is being dragged this frame (egui drag id state).
-            ui.horizontal(|ui| {
-                for idx in 0..self.workspace.len() {
-                    let Some(doc) = self.workspace.get(idx) else {
-                        continue;
-                    };
-                    let dot = if doc.dirty() { "\u{25CF} " } else { "" };
-                    let label = format!("{dot}{}", doc.title());
-                    let selected = active == Some(idx);
+        // Apply the deferred mutations *after* the loop so we never reshape the
+        // tab list mid-iteration. A reorder takes precedence over a stray click on
+        // the same frame; a click-to-switch refreshes the active-binding indicator.
+        if let Some((from, to)) = actions.reorder {
+            self.workspace.reorder(from, to);
+        } else if let Some(idx) = actions.switch_to {
+            self.workspace.switch(idx);
+            // Refresh the active-binding indicator for the now-active tab
+            // (E006 US2 — FR-011); cheap (re-resolve + Arc-shared model).
+            self.apply_binding_to_active();
+        }
+        if let Some(idx) = actions.close_idx {
+            self.request_close_doc(idx);
+        }
+    }
 
-                    let id = egui::Id::new(("ronin_tab", doc.id()));
-                    let response = ui
-                        .dnd_drag_source(id, idx, |ui| {
-                            let _ = ui.selectable_label(selected, label);
-                        })
-                        .response;
-
-                    // Click-to-switch (a non-drag click selects the tab).
-                    if response.clicked() {
-                        switch_to = Some(idx);
-                    }
-                    // Drag-to-reorder: if a tab payload is released over this tab,
-                    // move the dragged tab to this position (FR-012).
-                    if let Some(payload) = response.dnd_release_payload::<usize>() {
-                        let from = *payload;
-                        if from != idx {
-                            reorder = Some((from, idx));
-                        }
-                    }
-
-                    if ui.small_button("\u{00D7}").clicked() {
-                        close_idx = Some(idx);
-                    }
-                    ui.separator();
-                }
-            });
-
-            if let Some((from, to)) = reorder {
-                self.workspace.reorder(from, to);
-            } else if let Some(idx) = switch_to {
-                self.workspace.switch(idx);
-                // Refresh the active-binding indicator for the now-active tab
-                // (E006 US2 — FR-011); cheap (re-resolve + Arc-shared model).
-                self.apply_binding_to_active();
-            }
-            if let Some(idx) = close_idx {
-                self.request_close_doc(idx);
-            }
-        });
+    /// Install the bundled Noto symbol/math fonts as **fallbacks** on `ctx`.
+    ///
+    /// Starts from egui's default [`egui::FontDefinitions`] (so normal text keeps
+    /// the default proportional/monospace faces) and appends the three Noto faces
+    /// to the *end* of both the `Proportional` and `Monospace` family chains — the
+    /// fallback position — so only glyphs the default fonts lack (symbols, math)
+    /// fall through to them. No glyph in any authored UI string is swapped.
+    ///
+    /// Call once during startup where `cc.egui_ctx` is available (see `main.rs`).
+    pub fn install_fonts(ctx: &egui::Context) {
+        ctx.set_fonts(build_font_definitions());
     }
 
     /// Render the central editor region for the active document, or the

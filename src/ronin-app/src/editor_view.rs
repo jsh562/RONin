@@ -68,6 +68,7 @@ use egui::{Align, Color32, FontId, Galley, Key, Modifiers, Pos2, Rect, Stroke, T
 
 use ron_core::{CompletionKind, Severity, SyntaxKind};
 
+use crate::byte_to_char::ByteToChar;
 use crate::completion::Trigger;
 use crate::diagnostics_map::DiagnosticView;
 use crate::document::{EditorDocument, HighlightModel, HighlightSpan};
@@ -232,55 +233,6 @@ pub fn build_highlight_model(parse: &ParseResult, generation: u64) -> HighlightM
     HighlightModel {
         generation: Some(generation),
         spans,
-    }
-}
-
-/// A forward-only byte-offset → char-offset resolver over a source string.
-///
-/// Tokens are visited in source order with non-decreasing offsets, so resolving
-/// is amortised O(n) across the whole walk rather than O(n) per token.
-struct ByteToChar<'a> {
-    iter: std::str::CharIndices<'a>,
-    source_len: usize,
-    cur_byte: usize,
-    cur_char: usize,
-    done: bool,
-}
-
-impl<'a> ByteToChar<'a> {
-    fn new(source: &'a str) -> Self {
-        Self {
-            iter: source.char_indices(),
-            source_len: source.len(),
-            cur_byte: 0,
-            cur_char: 0,
-            done: false,
-        }
-    }
-
-    /// The char offset at `byte_offset`. Offsets must be non-decreasing across
-    /// calls; an offset past end-of-source clamps to the final char count.
-    fn char_at(&mut self, byte_offset: usize) -> usize {
-        let target = byte_offset.min(self.source_len);
-        while self.cur_byte < target && !self.done {
-            match self.iter.next() {
-                Some((idx, _)) => {
-                    // `idx` is the byte index of the char we are about to pass.
-                    if idx >= target {
-                        self.cur_byte = idx;
-                        return self.cur_char;
-                    }
-                    self.cur_byte = idx;
-                    self.cur_char += 1;
-                }
-                None => {
-                    self.done = true;
-                    self.cur_byte = self.source_len;
-                    return self.cur_char;
-                }
-            }
-        }
-        self.cur_char
     }
 }
 

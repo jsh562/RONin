@@ -28,7 +28,8 @@ use egui_kittest::Harness;
 use ronin_app::document::EditorDocument;
 use ronin_app::reparse::{BoundType, ReparseWorker};
 use ronin_app::structural::tree::{
-    render_tree_view, LeafWidget, OptionShape, TreeEditable, TreeFormModel, TreeNodeKind,
+    collapse_id, is_collapsible_collection, render_tree_view, set_subtree_open, LeafWidget,
+    OptionShape, TreeEditable, TreeFormModel, TreeNode, TreeNodeKind,
 };
 use ronin_app::structural::view_state::{PathStep, StructuralPath};
 
@@ -669,4 +670,198 @@ fn change_variant_node_op_is_discoverable_for_an_enum_variant() {
         !model.roots[0].supports_variant_swap(),
         "variant-change must NOT be offered on a non-enum node (FR-022)"
     );
+}
+
+// =============================================================================
+// Collapse-Id stability (UI Fix 3) — path-keyed, nesting-independent, persistent
+// =============================================================================
+
+/// Find the first node in `model` whose label is `label` AND that has a child
+/// labelled `child_label` (so we can pick out the two distinct `cells:` owners).
+fn find_node_with_child<'a>(
+    node: &'a TreeNode,
+    label: &str,
+    child_label: &str,
+) -> Option<&'a TreeNode> {
+    if node.label == label && node.children.iter().any(|c| c.label == child_label) {
+        return Some(node);
+    }
+    for child in &node.children {
+        if let Some(found) = find_node_with_child(child, label, child_label) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+#[test]
+fn collapse_id_distinguishes_distinct_nodes_sharing_depth_and_label() {
+    // Two sibling maps each containing a `cells:` list (mirrors
+    // `hulls: { (1): {cells:[…]}, (2): {cells:[…]} }`). The two `cells` collection
+    // nodes share depth + label but live at distinct structural paths, so their
+    // collapse Ids MUST differ — the old depth+label key collided here, sharing
+    // collapse state across the two unrelated subtrees.
+    let worker = ReparseWorker::new();
+    let doc = doc_at(
+        "Hulls(hulls: { (1): (cells: [1, 2]), (2): (cells: [3, 4]) })",
+        &worker,
+    );
+    let model = model_of(&doc);
+    let root = &model.roots[0];
+
+    // The two map-entry value structs each own a `cells` list child. Collect the
+    // `cells` nodes (the collection nodes that share depth + label).
+    let mut cells_nodes: Vec<&TreeNode> = Vec::new();
+    fn collect_cells<'a>(node: &'a TreeNode, out: &mut Vec<&'a TreeNode>) {
+        if node.label == "cells" {
+            out.push(node);
+        }
+        for child in &node.children {
+            collect_cells(child, out);
+        }
+    }
+    collect_cells(root, &mut cells_nodes);
+    assert_eq!(
+        cells_nodes.len(),
+        2,
+        "fixture must yield exactly two `cells` collection nodes"
+    );
+    assert_ne!(
+        cells_nodes[0].node_ref, cells_nodes[1].node_ref,
+        "the two `cells` nodes must occupy distinct structural paths"
+    );
+
+    let doc_id = doc.id();
+    let id_a = collapse_id(doc_id, cells_nodes[0]);
+    let id_b = collapse_id(doc_id, cells_nodes[1]);
+    assert_ne!(
+        id_a, id_b,
+        "two distinct nodes sharing depth + label must get DISTINCT collapse Ids"
+    );
+
+    // Sanity: the two map-entry value owners (labels "(1)" and "(2)" — the verbatim
+    // tuple-key text the projection uses) are also distinct.
+    let entry1 = find_node_with_child(root, "(1)", "cells").expect("entry (1) present");
+    let entry2 = find_node_with_child(root, "(2)", "cells").expect("entry (2) present");
+    assert_ne!(
+        collapse_id(doc_id, entry1),
+        collapse_id(doc_id, entry2),
+        "distinct map-entry owners must also get distinct collapse Ids"
+    );
+}
+
+#[test]
+fn collapse_id_is_stable_across_a_reparse_of_the_same_source() {
+    // The same source re-derives the same structural path, so a node's collapse Id
+    // (and therefore its expand/collapse state) must survive an off-frame reparse
+    // (FR-016 cross-reparse identity).
+    let worker = ReparseWorker::new();
+    let src = "Hulls(hulls: { (1): (cells: [1, 2]), (2): (cells: [3, 4]) })";
+    let mut doc = doc_at(src, &worker);
+    let doc_id = doc.id();
+
+    let before = model_of(&doc);
+    let before_cells = find_node_with_child(&before.roots[0], "(1)", "cells")
+        .and_then(|e| e.children.iter().find(|c| c.label == "cells"))
+        .expect("cells node under entry (1) before reparse");
+    let id_before = collapse_id(doc_id, before_cells);
+    let path_before = before_cells.node_ref.clone();
+
+    // Force a fresh reparse of the identical buffer (a no-op edit re-deriving the CST).
+    doc.on_edit();
+    drive_reparse(&mut doc, &worker);
+    assert_eq!(doc.id(), doc_id, "document identity is stable across reparse");
+
+    let after = model_of(&doc);
+    let after_cells = find_node_with_child(&after.roots[0], "(1)", "cells")
+        .and_then(|e| e.children.iter().find(|c| c.label == "cells"))
+        .expect("cells node under entry (1) after reparse");
+    let id_after = collapse_id(doc_id, after_cells);
+
+    assert_eq!(
+        after_cells.node_ref, path_before,
+        "the same source must re-resolve the node to the same structural path"
+    );
+    assert_eq!(
+        id_before, id_after,
+        "collapse Id for a given path must be identical before and after a reparse"
+    );
+}
+
+/// Collect every collapsible-collection node in `node`'s subtree (depth-first), the
+/// exact set the Expand/Collapse-All walk targets and that owns a `CollapsingState`.
+fn collect_collapsible<'a>(node: &'a TreeNode, out: &mut Vec<&'a TreeNode>) {
+    if is_collapsible_collection(node) {
+        out.push(node);
+    }
+    for child in &node.children {
+        collect_collapsible(child, out);
+    }
+}
+
+/// Read back the stored open state of `node`'s `CollapsingState` from egui memory.
+/// Uses a `default_open` of the OPPOSITE of what the walk just stored, so a `true`
+/// result proves the stored value (not the default) was read.
+fn stored_open(ctx: &egui::Context, doc_id: u64, node: &TreeNode, default_open: bool) -> bool {
+    egui::collapsing_header::CollapsingState::load_with_default_open(
+        ctx,
+        collapse_id(doc_id, node),
+        default_open,
+    )
+    .is_open()
+}
+
+#[test]
+fn expand_all_then_collapse_all_toggle_every_collection_nodes_stored_state() {
+    // Expand/Collapse-All (Fix 3 / FR-026): the header walk must set EVERY
+    // collapsible-collection node's stored egui CollapsingState — and only set it via
+    // `collapse_id` — so the next render frame reads the updated state. Drive the same
+    // `set_subtree_open` walk the buttons run against a headless `egui::Context` and
+    // assert the stored open flag for every collection node flips on Expand-all and
+    // off on Collapse-all.
+    let worker = ReparseWorker::new();
+    let doc = doc_at(
+        "Hulls(hulls: { (1): (cells: [1, 2]), (2): (cells: [3, 4, 5]) })",
+        &worker,
+    );
+    let doc_id = doc.id();
+    let model = model_of(&doc);
+
+    let mut nodes: Vec<&TreeNode> = Vec::new();
+    for root in &model.roots {
+        collect_collapsible(root, &mut nodes);
+    }
+    assert!(
+        nodes.len() >= 4,
+        "fixture must contain several nested collapsible collections (got {})",
+        nodes.len()
+    );
+
+    let ctx = egui::Context::default();
+
+    // Expand-all: store `open = true` for every collection node, then read back with a
+    // `false` default so a `true` result proves the stored value drives it.
+    for root in &model.roots {
+        set_subtree_open(&ctx, doc_id, root, true);
+    }
+    for node in &nodes {
+        assert!(
+            stored_open(&ctx, doc_id, node, false),
+            "after Expand-all the node at {:?} must have its stored CollapsingState OPEN",
+            node.node_ref
+        );
+    }
+
+    // Collapse-all: store `open = false` for every collection node, then read back with
+    // a `true` default so a `false` result proves the stored value drives it.
+    for root in &model.roots {
+        set_subtree_open(&ctx, doc_id, root, false);
+    }
+    for node in &nodes {
+        assert!(
+            !stored_open(&ctx, doc_id, node, true),
+            "after Collapse-all the node at {:?} must have its stored CollapsingState CLOSED",
+            node.node_ref
+        );
+    }
 }

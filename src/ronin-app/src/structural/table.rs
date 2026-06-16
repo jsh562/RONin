@@ -69,6 +69,7 @@ use ron_core::ast;
 use ron_core::transform::{ParentRef, StructuralOp};
 use ron_core::{BlockedReason, CstDocument, Severity, SyntaxNode};
 
+use crate::byte_to_char::ByteCharIndex;
 use crate::diagnostics_map::DiagnosticView;
 use crate::document::EditorDocument;
 use crate::reparse::ReparseWorker;
@@ -189,7 +190,12 @@ impl TableModel {
         diagnostics: &[DiagnosticView],
     ) -> Option<Self> {
         let root = cst.root();
-        let source = root.text();
+        // Map cell value byte ranges → char ranges for diagnostic attachment in a
+        // single amortised-O(n) forward pass (see [`build_byte_char_index`]) rather
+        // than an O(file-size) `chars().count()` per cell — the O(cells × file_size)
+        // cost that froze the view. Empty (and never queried) when there are no
+        // diagnostics, since [`diagnostics_for`] short-circuits on an empty set.
+        let index = build_byte_char_index(&root, diagnostics);
         let list_node = resolve_path(&root, section)?;
         let list = ast::List::cast(list_node)?;
 
@@ -211,7 +217,7 @@ impl TableModel {
                 let element_ref = section.child(PathStep::Index(row_idx));
                 let cells = columns
                     .iter()
-                    .map(|col| build_cell(&element_ref, col, fields, diagnostics, &source))
+                    .map(|col| build_cell(&element_ref, col, fields, diagnostics, &index))
                     .collect();
                 Row { element_ref, cells }
             })
@@ -308,12 +314,12 @@ fn build_cell(
     col: &Column,
     fields: &[(String, ast::Value)],
     diagnostics: &[DiagnosticView],
-    source: &str,
+    index: &ByteCharIndex,
 ) -> Cell {
     match fields.iter().find(|(name, _)| name == &col.field_name) {
         Some((_, value)) => {
             let value_ref = element_ref.child(PathStep::Field(col.field_name.clone()));
-            let diags = diagnostics_for(value.syntax(), diagnostics, source);
+            let diags = diagnostics_for(value.syntax(), diagnostics, index);
             if is_nested(value) {
                 Cell {
                     value_ref: Some(value_ref),
@@ -364,14 +370,14 @@ fn summarize(node: &SyntaxNode) -> String {
 fn diagnostics_for(
     node: &SyntaxNode,
     diagnostics: &[DiagnosticView],
-    source: &str,
+    index: &ByteCharIndex,
 ) -> Vec<DiagnosticView> {
     if diagnostics.is_empty() {
         return Vec::new();
     }
     let range = node.text_range();
-    let node_start = byte_to_char(source, range.start());
-    let node_end = byte_to_char(source, range.end());
+    let node_start = index.char_at(range.start());
+    let node_end = index.char_at(range.end());
     diagnostics
         .iter()
         .filter(|d| ranges_overlap(d.char_range, (node_start, node_end)))
@@ -384,10 +390,23 @@ fn ranges_overlap(a: (usize, usize), b: (usize, usize)) -> bool {
     a.0 < b.1 && b.0 < a.1
 }
 
-/// Convert a byte offset into a char offset within `source` (clamped).
-fn byte_to_char(source: &str, byte_offset: usize) -> usize {
-    let clamped = byte_offset.min(source.len());
-    source[..clamped].chars().count()
+/// Build a byte→char index covering every node boundary in `root`, for the cell
+/// diagnostic-attachment char mapping (FR-018), in a single forward pass.
+///
+/// Mirrors the tree view's index (see `tree::build_byte_char_index`): token
+/// boundaries are a superset of node boundaries, so registering every token's
+/// start/end resolves any cell value node's `(start, end)` exactly. Returns an empty
+/// index when there are no diagnostics, since the char mapping is then never queried.
+fn build_byte_char_index(root: &SyntaxNode, diagnostics: &[DiagnosticView]) -> ByteCharIndex {
+    let source = root.text();
+    if diagnostics.is_empty() {
+        return ByteCharIndex::build(&source, std::iter::empty());
+    }
+    let offsets = root.descendant_tokens().flat_map(|t| {
+        let range = t.text_range();
+        [range.start(), range.end()]
+    });
+    ByteCharIndex::build(&source, offsets)
 }
 
 // =============================================================================
@@ -607,14 +626,19 @@ pub fn render_table_view_counting(
         ui.weak("(updating\u{2026})");
     }
 
-    let Some(parse) = doc.parse.clone() else {
+    if doc.parse.is_none() {
         ui.weak("Parsing\u{2026}");
         return;
-    };
+    }
 
     // For US2 the section is the document's top-level value (must be a list).
     let section = StructuralPath::root();
-    let Some(model) = TableModel::derive(&parse.cst, &section, &doc.diagnostics) else {
+    // Reuse the per-parse cached model (derived once per parse generation), instead of
+    // re-deriving from the CST every render frame (zero bytes, FR-020). The clone is a
+    // cheap structural copy taken so the borrow on `doc` is released before the mutable
+    // view-state writes later in this function; the table virtualization still paints
+    // only viewport-visible rows below (the cache holds the model, not row widgets).
+    let Some(model) = doc.cached_table_model(&section).cloned() else {
         ui.weak("(not a uniform list section)");
         return;
     };

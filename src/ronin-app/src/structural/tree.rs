@@ -50,6 +50,7 @@ use ron_core::ast;
 use ron_core::transform::{ParentRef, StructuralOp};
 use ron_core::{BlockedReason, CstDocument, Severity, SyntaxNode};
 
+use crate::byte_to_char::ByteCharIndex;
 use crate::diagnostics_map::DiagnosticView;
 use crate::document::EditorDocument;
 use crate::reparse::ReparseWorker;
@@ -244,9 +245,13 @@ impl TreeFormModel {
     #[must_use]
     pub fn derive(cst: &CstDocument, diagnostics: &[DiagnosticView]) -> Self {
         let root = cst.root();
-        // The full document text, used once to map node byte ranges → char ranges
-        // for diagnostic attachment (the diagnostics carry char ranges, FR-018).
-        let source = root.text();
+        // Map node byte ranges → char ranges for diagnostic attachment in a single
+        // amortised-O(n) forward pass: build a byte→char index over every token
+        // boundary (a superset of all node boundaries, since each node's range is the
+        // union of its tokens) instead of an O(file-size) `chars().count()` per node
+        // (the O(nodes × file_size) cost that froze the view). Skip the index entirely
+        // when there are no diagnostics — the only consumer of the char mapping.
+        let index = build_byte_char_index(&root, diagnostics);
         let Some(top) = ast::Document::cast(root)
             .and_then(|d| d.value())
             .map(|v| v.syntax().clone())
@@ -259,7 +264,7 @@ impl TreeFormModel {
             StructuralPath::root(),
             true,
             diagnostics,
-            &source,
+            &index,
             &[],
         );
         Self { roots: vec![node] }
@@ -303,18 +308,18 @@ fn build_node(
     path: StructuralPath,
     expanded: bool,
     diagnostics: &[DiagnosticView],
-    source: &str,
+    index: &ByteCharIndex,
     peer_variants: &[String],
 ) -> TreeNode {
     let kind = TreeNodeKind::of(node);
-    let diags = diagnostics_for(node, diagnostics, source);
+    let diags = diagnostics_for(node, diagnostics, index);
     let value_summary = summarize(node);
     let option_shape = option_shape_of(node);
     let (editable, leaf_widget) = classify_editable(node, kind, option_shape.as_ref());
     let (variant_name, variant_candidates) = variant_info_of(node, kind, peer_variants);
 
     let children = if kind.is_collection() {
-        build_children(node, kind, &path, diagnostics, source)
+        build_children(node, kind, &path, diagnostics, index)
     } else {
         Vec::new()
     };
@@ -341,7 +346,7 @@ fn build_children(
     kind: TreeNodeKind,
     path: &StructuralPath,
     diagnostics: &[DiagnosticView],
-    source: &str,
+    index: &ByteCharIndex,
 ) -> Vec<TreeNode> {
     match kind {
         TreeNodeKind::Struct => ast::Struct::cast(node.clone())
@@ -357,7 +362,7 @@ fn build_children(
                             child_path,
                             false,
                             diagnostics,
-                            source,
+                            index,
                             &[],
                         ))
                     })
@@ -377,7 +382,7 @@ fn build_children(
                             child_path,
                             false,
                             diagnostics,
-                            source,
+                            index,
                             &[],
                         ))
                     })
@@ -397,7 +402,7 @@ fn build_children(
                             child_path,
                             false,
                             diagnostics,
-                            source,
+                            index,
                             &[],
                         ))
                     })
@@ -420,7 +425,7 @@ fn build_children(
                             child_path,
                             false,
                             diagnostics,
-                            source,
+                            index,
                             &peers,
                         )
                     })
@@ -439,7 +444,7 @@ fn build_children(
                             child_path,
                             false,
                             diagnostics,
-                            source,
+                            index,
                             &[],
                         )
                     })
@@ -579,18 +584,49 @@ fn classify_editable(
 
 /// A compact one-line preview of a value node (display-only; never normalized for
 /// editing — this is only the collapsed-row summary).
+///
+/// Builds the preview from the node's descendant tokens, collapsing internal
+/// whitespace runs to single spaces and **stopping early** once enough characters
+/// have accumulated to decide truncation. This avoids materializing the node's
+/// entire subtree text per node (`node.text()` is O(subtree-size)) — which, summed
+/// over every node in a large nested tree, was an O(n²) cost in `derive`.
 fn summarize(node: &SyntaxNode) -> String {
     /// Maximum preview length before eliding.
     const MAX: usize = 48;
-    let text = node.text().to_string();
-    // Collapse internal whitespace runs to single spaces for a compact preview.
-    let compact: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if compact.chars().count() > MAX {
-        let truncated: String = compact.chars().take(MAX).collect();
-        format!("{truncated}\u{2026}")
-    } else {
-        compact
+
+    let mut out = String::new();
+    let mut chars = 0usize; // number of chars pushed to `out`
+    let mut pending_space = false; // a whitespace run seen but not yet emitted
+    let mut truncated = false;
+
+    'outer: for token in node.descendant_tokens() {
+        for ch in token.text().chars() {
+            if ch.is_whitespace() {
+                // Defer a single collapsed space; never leads (chars == 0) and is
+                // dropped if it would trail (no following non-whitespace emitted).
+                pending_space = chars > 0;
+                continue;
+            }
+            if pending_space {
+                out.push(' ');
+                chars += 1;
+                pending_space = false;
+            }
+            if chars == MAX {
+                // We already have MAX chars and another non-whitespace char follows:
+                // the preview is longer than MAX, so elide.
+                truncated = true;
+                break 'outer;
+            }
+            out.push(ch);
+            chars += 1;
+        }
     }
+
+    if truncated {
+        out.push('\u{2026}');
+    }
+    out
 }
 
 /// Collect the diagnostics whose char range overlaps `node`'s char range (FR-018).
@@ -602,16 +638,16 @@ fn summarize(node: &SyntaxNode) -> String {
 fn diagnostics_for(
     node: &SyntaxNode,
     diagnostics: &[DiagnosticView],
-    source: &str,
+    index: &ByteCharIndex,
 ) -> Vec<DiagnosticView> {
     if diagnostics.is_empty() {
         return Vec::new();
     }
-    // The node's byte range; map to a char range over the full document text (the
-    // diagnostics carry char ranges, FR-018).
+    // The node's byte range; map to a char range via the precomputed byte→char
+    // index (amortised O(1) per query) — the diagnostics carry char ranges, FR-018.
     let range = node.text_range();
-    let node_start = byte_to_char(source, range.start());
-    let node_end = byte_to_char(source, range.end());
+    let node_start = index.char_at(range.start());
+    let node_end = index.char_at(range.end());
 
     diagnostics
         .iter()
@@ -625,10 +661,24 @@ fn ranges_overlap(a: (usize, usize), b: (usize, usize)) -> bool {
     a.0 < b.1 && b.0 < a.1
 }
 
-/// Convert a byte offset into a char offset within `source` (clamped).
-fn byte_to_char(source: &str, byte_offset: usize) -> usize {
-    let clamped = byte_offset.min(source.len());
-    source[..clamped].chars().count()
+/// Build a byte→char index covering every node boundary in `root`, for the
+/// diagnostic-attachment char mapping (FR-018), in a single forward pass.
+///
+/// Token boundaries are a superset of node boundaries (each node's range is the
+/// union of its descendant tokens), so registering every token's start/end resolves
+/// any node's `(start, end)` exactly. Returns an empty index when there are no
+/// diagnostics, since the char mapping is then never queried — the index is only
+/// consulted by [`diagnostics_for`], which short-circuits on an empty set.
+fn build_byte_char_index(root: &SyntaxNode, diagnostics: &[DiagnosticView]) -> ByteCharIndex {
+    let source = root.text();
+    if diagnostics.is_empty() {
+        return ByteCharIndex::build(&source, std::iter::empty());
+    }
+    let offsets = root.descendant_tokens().flat_map(|t| {
+        let range = t.text_range();
+        [range.start(), range.end()]
+    });
+    ByteCharIndex::build(&source, offsets)
 }
 
 // =============================================================================
@@ -926,17 +976,24 @@ enum PendingAction {
 /// (asserted in `tree_form_view.rs`); the buffer-mutating edits are covered
 /// headlessly via the document-side `apply_tree_*` API (T017).
 pub fn render_tree_view(ui: &mut Ui, doc: &mut EditorDocument, worker: &ReparseWorker) {
+    // The owning document's id, captured up front (Copy) so it can be mixed into
+    // each collapsible node's egui Id without re-borrowing `doc` during the walk —
+    // this is what keeps collapse state distinct across open files (Fix 3).
+    let doc_id = doc.id();
+
     // Stale marker (FR-015): a user-perceivable notice while a reparse is pending.
     if doc.view_state().is_stale() {
         ui.weak("(updating\u{2026})");
     }
 
-    // Derive the model from the landed CST + diagnostics (zero bytes, FR-020).
-    let Some(parse) = doc.parse.clone() else {
+    // Reuse the per-parse cached model (derived once per parse generation), instead
+    // of re-deriving from the CST every render frame (zero bytes, FR-020). The clone
+    // is a cheap structural copy taken so the borrow on `doc` is released before the
+    // mutable view-state writes later in this function.
+    let Some(model) = doc.cached_tree_model().cloned() else {
         ui.weak("Parsing\u{2026}");
         return;
     };
-    let model = TreeFormModel::derive(&parse.cst, &doc.diagnostics);
     if model.roots.is_empty() {
         ui.weak("(empty document)");
         return;
@@ -963,6 +1020,33 @@ pub fn render_tree_view(ui: &mut Ui, doc: &mut EditorDocument, worker: &ReparseW
         return;
     }
 
+    // Expand-All / Collapse-All (FR-026): a small button row above the tree. On
+    // click we walk the *cached* model (never re-derived — FR-020) and set every
+    // collection node's egui CollapsingState open/closed using the same
+    // `collapse_id`, so the next frame's renderer reads the updated state. Mutating
+    // egui memory here is byte-free and borrows nothing on `doc` (the model is a
+    // clone), keeping the deferred-edit borrow discipline below intact.
+    ui.horizontal(|ui| {
+        if ui
+            .small_button("Expand all")
+            .on_hover_text("Expand every collapsible node")
+            .clicked()
+        {
+            for root in &model.roots {
+                set_subtree_open(ui.ctx(), doc_id, root, true);
+            }
+        }
+        if ui
+            .small_button("Collapse all")
+            .on_hover_text("Collapse every collapsible node")
+            .clicked()
+        {
+            for root in &model.roots {
+                set_subtree_open(ui.ctx(), doc_id, root, false);
+            }
+        }
+    });
+
     // The current draft for an in-progress leaf edit (carried on the view-state).
     let mut draft: Option<(StructuralPath, String)> = doc
         .view_state()
@@ -980,6 +1064,7 @@ pub fn render_tree_view(ui: &mut Ui, doc: &mut EditorDocument, worker: &ReparseW
     let mut clear_rename = false;
 
     let mut ctx = RenderCtx {
+        doc_id,
         draft: &mut draft,
         rename_draft: &mut rename_draft,
         pending: &mut pending,
@@ -1085,6 +1170,10 @@ pub fn render_tree_view(ui: &mut Ui, doc: &mut EditorDocument, worker: &ReparseW
 /// focus changes) during the walk so they apply *after* it, keeping the borrow of
 /// `doc` clean and each op one undo unit (FR-014).
 struct RenderCtx<'a> {
+    /// The owning document's process-unique id, mixed into each node's collapse
+    /// [`egui::Id`] so identical structural paths in different open files never
+    /// share collapse state ([`collapse_id`]).
+    doc_id: u64,
     /// The in-progress value-edit draft `(path, text)`, if any.
     draft: &'a mut Option<(StructuralPath, String)>,
     /// The in-progress rename draft `(path, text)`, distinct from a value edit.
@@ -1132,6 +1221,68 @@ fn return_to_table(doc: &mut EditorDocument) {
         .set_active_view(crate::structural::view_state::ActiveView::Table);
 }
 
+/// The persistent egui [`Id`](egui::Id) for a collection node's [`CollapsingState`].
+///
+/// Keyed by the owning document's id plus the node's full [`StructuralPath`]
+/// ([`TreeNode::node_ref`]) — which is itself `Hash` — so the id is:
+///
+/// * **path-keyed / nesting-independent**: two distinct collection nodes that
+///   happen to share depth + label live at different paths and so get distinct ids
+///   (no cross-subtree collapse-state collision);
+/// * **persistent across reparse**: the same source re-derives the same path, so a
+///   node's expand/collapse state survives an off-frame reparse (FR-016);
+/// * **per-document distinct**: identical paths in two open files differ by `doc_id`.
+///
+/// Pure (no `ui`/`ctx`), so it is unit-testable without an egui Harness.
+#[must_use]
+pub fn collapse_id(doc_id: u64, node: &TreeNode) -> egui::Id {
+    egui::Id::new(("ronin_tree", doc_id, &node.node_ref))
+}
+
+/// `true` when `node` renders as a collapsible collection header (and so owns a
+/// [`CollapsingState`](egui::collapsing_header::CollapsingState) keyed by
+/// [`collapse_id`]) — the exact condition the renderer uses at the show site.
+///
+/// An `Option` value and a *bare* enum variant render as leaf rows (no collapsing
+/// header) even though their kind is a collection, so they are excluded here too.
+///
+/// `pub` so the Expand/Collapse-All tests can assert exactly which nodes own a
+/// [`CollapsingState`](egui::collapsing_header::CollapsingState) keyed by
+/// [`collapse_id`].
+#[must_use]
+pub fn is_collapsible_collection(node: &TreeNode) -> bool {
+    let is_option_leaf = node.option_shape.is_some();
+    let is_bare_variant =
+        node.kind == TreeNodeKind::EnumVariant && node.children.is_empty() && !is_option_leaf;
+    node.kind.is_collection() && !is_option_leaf && !is_bare_variant
+}
+
+/// Set `node` and its entire subtree's collapsing state to `open` in egui memory.
+///
+/// Used by Expand-All / Collapse-All: it walks the cached model and, for every node
+/// that renders as a collapsible collection ([`is_collapsible_collection`]), loads
+/// the [`CollapsingState`](egui::collapsing_header::CollapsingState) under the same
+/// [`collapse_id`], sets it open/closed, and stores it back — so the next render
+/// frame reads the updated state. Leaf rows have no collapsing state and are
+/// skipped (but their would-be children, if any, are still recursed into).
+///
+/// `pub` so the Expand/Collapse-All tests can drive the same walk the header
+/// buttons run and then read each node's stored state back via `collapse_id`.
+pub fn set_subtree_open(ctx: &egui::Context, doc_id: u64, node: &TreeNode, open: bool) {
+    if is_collapsible_collection(node) {
+        let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
+            ctx,
+            collapse_id(doc_id, node),
+            node.expanded,
+        );
+        state.set_open(open);
+        state.store(ctx);
+    }
+    for child in &node.children {
+        set_subtree_open(ctx, doc_id, child, open);
+    }
+}
+
 /// Render one tree node row + (recursively) its expanded children. `sibling` is
 /// `Some` for a child within a collection (it then offers reorder/remove controls),
 /// `None` for the root.
@@ -1141,13 +1292,14 @@ fn render_node(ui: &mut Ui, node: &TreeNode, sibling: Option<&SiblingCtx>, ctx: 
     // regardless of its underlying variant/tuple shape (FR-002) — render it as a
     // leaf-style row, never a collapsible collection. A *bare* enum variant (no
     // payload fields) likewise renders as a leaf row carrying its inline variant
-    // selector, rather than an empty collapsible header.
-    let is_option_leaf = node.option_shape.is_some();
-    let is_bare_variant =
-        node.kind == TreeNodeKind::EnumVariant && node.children.is_empty() && !is_option_leaf;
-    if node.kind.is_collection() && !is_option_leaf && !is_bare_variant {
+    // selector, rather than an empty collapsible header. `is_collapsible_collection`
+    // encodes exactly this condition (shared with the Expand/Collapse-All walk).
+    if is_collapsible_collection(node) {
         // A collapsible collection: header + per-node op controls + children.
-        let id = ui.make_persistent_id(("ronin_tree", node.node_ref.steps().len(), &node.label));
+        // The collapse Id is keyed by the node's full structural path (+ the doc id),
+        // so it is nesting-independent and never collides between unrelated subtrees
+        // that happen to share depth+label, and it persists across reparse (Fix 3).
+        let id = collapse_id(ctx.doc_id, node);
         egui::collapsing_header::CollapsingState::load_with_default_open(
             ui.ctx(),
             id,
@@ -1667,5 +1819,46 @@ mod tests {
         ]);
         let node = m.node_at(&path).expect("deep node present");
         assert_eq!(node.label, "1");
+    }
+
+    /// The (early-stopping) `summarize` must produce the same preview the original
+    /// whitespace-collapse + truncate-to-48 algorithm did, so the only change is the
+    /// avoided O(subtree-size)-per-node `node.text()` cost.
+    #[test]
+    fn summarize_matches_naive_collapse_and_truncate() {
+        /// The original algorithm `summarize` replaced (kept here as the oracle).
+        fn naive(text: &str) -> String {
+            const MAX: usize = 48;
+            let compact: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            if compact.chars().count() > MAX {
+                let truncated: String = compact.chars().take(MAX).collect();
+                format!("{truncated}\u{2026}")
+            } else {
+                compact
+            }
+        }
+
+        let cases = [
+            "true",
+            "()",
+            "Point(x: 1, y: 2)",
+            "[10, 20, 30]",
+            // Long, multi-line, deeply-nested → exercises truncation + whitespace runs.
+            "Outer(\n    items: [\n        Inner( a: 1, b: 2, c: 3 ),\n        Inner( a: 4, b: 5, c: 6 ),\n    ],\n)",
+            // Exactly-at and just-over the 48-char boundary after collapse.
+            "\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"", // 48 chars
+            "\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"", // 49 chars
+        ];
+        for src in cases {
+            let node = ast::Document::cast(parse(src).root())
+                .and_then(|d| d.value())
+                .map(|v| v.syntax().clone())
+                .unwrap_or_else(|| panic!("parse {src:?}"));
+            assert_eq!(
+                summarize(&node),
+                naive(&node.text()),
+                "summarize mismatch for {src:?}"
+            );
+        }
     }
 }

@@ -31,6 +31,8 @@
 pub mod app;
 pub mod bevy;
 pub mod binding;
+/// Shared byte→char offset resolution used by the highlight + structural surfaces.
+mod byte_to_char;
 pub mod completion;
 pub mod diagnostics_map;
 pub mod document;

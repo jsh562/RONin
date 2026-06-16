@@ -26,6 +26,9 @@ fn main() -> eframe::Result<()> {
         "RONin",
         native_options,
         Box::new(move |cc| {
+            // Install the bundled Noto symbol/math fonts as glyph fallbacks before
+            // any text is laid out, so authored UI glyphs (symbols, math) render.
+            App::install_fonts(&cc.egui_ctx);
             let app = App::new(settings, cli_path);
             // Let the reparse worker wake an idle UI when results land (FR-024).
             app.set_repaint_ctx(cc.egui_ctx.clone());

@@ -55,7 +55,9 @@ use crate::diagnostics_map::{map_diagnostic, map_scene_diagnostic, DiagnosticVie
 use crate::editor_view::build_highlight_model;
 use crate::reparse::{BoundScene, BoundType, BoundValidation, ParseResult, ReparseWorker};
 use crate::structural::projection::{derive_projection, DerivedProjection};
-use crate::structural::view_state::ViewSelectionAndFocus;
+use crate::structural::table::TableModel;
+use crate::structural::tree::TreeFormModel;
+use crate::structural::view_state::{StructuralPath, ViewSelectionAndFocus};
 
 /// Process-wide monotonic source of per-document identity tokens.
 ///
@@ -261,6 +263,51 @@ impl Default for CursorState {
             caret: 0,
             selection: None,
             scroll: 0.0,
+        }
+    }
+}
+
+/// The per-parse cache of derived structural view models (E008 performance — keyed
+/// on the landed parse [`generation`](Self::generation)).
+///
+/// The tree/form and table surfaces project the document's CST into a
+/// [`TreeFormModel`] / [`TableModel`]. Re-deriving those **every render frame** froze
+/// the structural view on a large well-formed file (a 35 KB / ~1125-line file took
+/// ~45 ms per derive). This caches each derived model against the generation it was
+/// derived from, so a steady-state frame reuses the cached model instead of
+/// re-deriving; the cache is invalidated wholesale when a newer parse lands. The
+/// table virtualization is unaffected — this caches the *model*, not row widgets, so
+/// only viewport-visible rows are still painted.
+///
+/// Models are derived **lazily on first access** (a frame that shows only the table
+/// never derives the tree model and vice-versa, honoring FR-026 lazy realization),
+/// and stored per requested section for the table (different sections project
+/// different grids). All entries share one `generation`: when it advances the whole
+/// cache is reset.
+#[derive(Debug, Clone, Default)]
+struct StructuralModelCache {
+    /// The parse generation every cached model below was derived from. `None` until
+    /// the first model is cached; any mismatch with the live parse generation resets
+    /// the cache before serving.
+    generation: Option<u64>,
+    /// The cached tree/form model, derived on first access for this generation.
+    tree: Option<TreeFormModel>,
+    /// Cached table models per requested section. `None` in the value position means
+    /// "derived, but the section is not a list" (a negative cache, so a non-list
+    /// section is not re-derived every frame either). Keyed by [`StructuralPath`]
+    /// since different sections project different tables.
+    tables: Vec<(StructuralPath, Option<TableModel>)>,
+}
+
+impl StructuralModelCache {
+    /// Reset the cache to the given generation if it differs from the cached one.
+    /// A no-op when the generation already matches (so accesses within one parse
+    /// generation accumulate rather than clobbering each other).
+    fn sync_generation(&mut self, generation: u64) {
+        if self.generation != Some(generation) {
+            self.generation = Some(generation);
+            self.tree = None;
+            self.tables.clear();
         }
     }
 }
@@ -475,6 +522,14 @@ pub struct EditorDocument {
     /// changes no bytes and pushes no undo entry, so this is the only state it
     /// touches. Cleared on the next successful op. Transient/session-only.
     tree_error: Option<String>,
+    /// Per-parse cache of derived structural view models (E008 performance).
+    ///
+    /// Keyed on the landed parse generation so a steady-state render frame reuses the
+    /// cached [`TreeFormModel`] / [`TableModel`] instead of re-deriving it from the
+    /// CST every frame (the per-frame re-derive froze the structural view on a large
+    /// well-formed file). Invalidated wholesale when a newer parse lands via
+    /// [`poll_parse`](Self::poll_parse). Transient/session-only; never persisted.
+    structural_cache: StructuralModelCache,
 }
 
 impl EditorDocument {
@@ -527,6 +582,7 @@ impl EditorDocument {
             view_state: ViewSelectionAndFocus::new(),
             projection: None,
             tree_error: None,
+            structural_cache: StructuralModelCache::default(),
         };
         // Seed the undo baseline at the loaded (generation-0) state so the first
         // edit's snapshot pushes the original as the first undo boundary (TR-010).
@@ -579,6 +635,7 @@ impl EditorDocument {
             view_state: ViewSelectionAndFocus::new(),
             projection: None,
             tree_error: None,
+            structural_cache: StructuralModelCache::default(),
         };
         // Seed the undo baseline at the empty (generation-0) state.
         doc.seed_undo();
@@ -634,6 +691,7 @@ impl EditorDocument {
             view_state: ViewSelectionAndFocus::new(),
             projection: None,
             tree_error: None,
+            structural_cache: StructuralModelCache::default(),
         };
         // Seed the undo baseline at the restored (generation-0) state so the first
         // post-reopen edit pushes the restored content as the first undo boundary.
@@ -1071,6 +1129,11 @@ impl EditorDocument {
             // projection ONCE per landed current reparse, off the per-frame path.
             // This is a single read pass over the landed CST (zero bytes, FR-020).
             self.projection = Some(derive_projection(&result.cst));
+            // E008 performance: invalidate the per-parse structural model cache so the
+            // tree/table surfaces re-derive against the fresh CST on next access (and
+            // only then), instead of re-deriving every render frame. Keying it to the
+            // new generation drops the prior generation's cached models.
+            self.structural_cache.sync_generation(generation);
             // E008 (T013/FR-016/FR-027): re-resolve edit focus + section overrides
             // against the fresh CST by structural-path identity. If the focused
             // node still resolves, focus is kept; if it vanished, edit mode is
@@ -1342,6 +1405,86 @@ impl EditorDocument {
     #[must_use]
     pub fn projection(&self) -> Option<&DerivedProjection> {
         self.projection.as_ref()
+    }
+
+    /// The cached tree/form model for the landed parse, deriving it once per parse
+    /// generation on first access (E008 performance — FR-001/FR-026).
+    ///
+    /// Returns `None` only when no parse has landed yet. The model is
+    /// [`TreeFormModel::derive`]d from the landed CST + the current diagnostics the
+    /// **first** time it is requested for a given parse generation, then reused on
+    /// every subsequent frame within that generation — instead of re-deriving from the
+    /// CST every render frame, the per-frame cost that froze the structural view on a
+    /// large file. A newer landed parse invalidates the cache (see
+    /// [`poll_parse`](Self::poll_parse)), so the next access re-derives against the
+    /// fresh CST. Deriving is a pure read over the CST (zero bytes, FR-020).
+    pub fn cached_tree_model(&mut self) -> Option<&TreeFormModel> {
+        let parse = self.parse.as_ref()?;
+        let generation = parse.generation;
+        self.structural_cache.sync_generation(generation);
+        if self.structural_cache.tree.is_none() {
+            // Derive against the landed CST + current diagnostics. Read the inputs
+            // before borrowing the cache mutably to satisfy the borrow checker.
+            let model = TreeFormModel::derive(&parse.cst, &self.diagnostics);
+            self.structural_cache.tree = Some(model);
+        }
+        self.structural_cache.tree.as_ref()
+    }
+
+    /// The cached table model for `section` within the landed parse, deriving it once
+    /// per parse generation on first access (E008 performance — FR-005/FR-026).
+    ///
+    /// Returns `None` when no parse has landed, or when `section` does not resolve to
+    /// a list (a negative result is cached too, so a non-list section is not
+    /// re-derived every frame either). The model is [`TableModel::derive`]d the
+    /// **first** time it is requested for a given `(generation, section)`, then reused
+    /// on every subsequent frame within that generation — instead of re-deriving from
+    /// the CST every render frame. The cache is invalidated when a newer parse lands.
+    /// Deriving caches the **model**, never row widgets, so the table virtualization is
+    /// unaffected: only viewport-visible rows are still painted. Pure read (FR-020).
+    pub fn cached_table_model(&mut self, section: &StructuralPath) -> Option<&TableModel> {
+        let parse = self.parse.as_ref()?;
+        let generation = parse.generation;
+        self.structural_cache.sync_generation(generation);
+        if !self
+            .structural_cache
+            .tables
+            .iter()
+            .any(|(path, _)| path == section)
+        {
+            let model = TableModel::derive(&parse.cst, section, &self.diagnostics);
+            self.structural_cache.tables.push((section.clone(), model));
+        }
+        self.structural_cache
+            .tables
+            .iter()
+            .find(|(path, _)| path == section)
+            .and_then(|(_, model)| model.as_ref())
+    }
+
+    /// `true` when the structural model cache currently holds a derived tree model for
+    /// the live parse generation (test seam for the per-parse cache regression guard).
+    #[must_use]
+    pub fn has_cached_tree_model(&self) -> bool {
+        self.parse
+            .as_ref()
+            .is_some_and(|p| self.structural_cache.generation == Some(p.generation))
+            && self.structural_cache.tree.is_some()
+    }
+
+    /// `true` when the structural model cache currently holds a derived (or negatively
+    /// cached) table model for `section` at the live parse generation (test seam for
+    /// the per-parse cache regression guard).
+    #[must_use]
+    pub fn has_cached_table_model(&self, section: &StructuralPath) -> bool {
+        self.parse
+            .as_ref()
+            .is_some_and(|p| self.structural_cache.generation == Some(p.generation))
+            && self
+                .structural_cache
+                .tables
+                .iter()
+                .any(|(path, _)| path == section)
     }
 
     /// The last structural-op inline error message, if one is showing (E008 —
