@@ -1,0 +1,17 @@
+---
+source: src/ronin-app/tests/interop_roundtrip.rs
+expression: jsonc(src)
+---
+{
+  "pos": [
+    1,
+    2
+  ],
+  "initial": "A",
+  "state": {
+    "Running": 5
+  },
+  "keyed": {
+    "7": "x"
+  }
+}

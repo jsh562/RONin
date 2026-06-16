@@ -124,6 +124,7 @@ fn problems_panel_orders_rows_by_source_location_without_mutating_input() {
         severity: Severity::Error,
         code: DiagnosticCode::UnexpectedToken,
         scene_code: None,
+        loss_code: None,
         message: "later problem".to_string(),
     };
     let earlier = DiagnosticView {
@@ -132,6 +133,7 @@ fn problems_panel_orders_rows_by_source_location_without_mutating_input() {
         severity: Severity::Error,
         code: DiagnosticCode::MissingValue,
         scene_code: None,
+        loss_code: None,
         message: "earlier problem".to_string(),
     };
     // Input order: [later, earlier]. The earlier-located one must be clickable as

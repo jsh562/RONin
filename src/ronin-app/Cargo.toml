@@ -36,6 +36,14 @@ globset = "0.4.16"
 egui_extras = "0.34"
 rfd = "0.17.2"
 ron-core = { version = "0.1.0", path = "../ron-core" }
+# RON⇄JSON interop boundary (E010, ADR-0008). The serde `ron` crate is the
+# canonical-grammar VERIFIER / round-trip cross-check at the native interop
+# boundary — NOT the primary converter (the CST-based path carries fidelity).
+# Native-only: confined to `ronin-app`; `ron-core` stays rowan-only and the
+# WASM-clean `ron-core`/`ron-validate` gain no `ron`-crate dependency (FR-012,
+# SC-006). Exact-version pin = supply-chain control (reproducible; no unreviewed
+# grammar-surface bumps; keeps cargo-deny/audit on a vetted version).
+ron = "=0.12.1"
 # Type-model acquisition (E006 US2 Phase 4b — FR-014/FR-024). ronin-app is the
 # native app, so it may depend on the native-gated `ron-types`; only the
 # WASM-clean `ron-core`/`ron-validate` must stay free of it.
@@ -53,3 +61,6 @@ egui_kittest = "0.34.3"
 # bit-for-bit float-equality rule and the shrink->expand->shrink byte-identical
 # stability invariant. Already in the workspace lock via `ron-core`.
 proptest = "1.11.0"
+# JSONC RON->JSON output snapshots for the E010 interop round-trip tests (T007).
+# Already in the workspace lock via `ron-core`/`ron-validate`.
+insta = "1.47.2"

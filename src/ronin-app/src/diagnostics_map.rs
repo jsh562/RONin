@@ -10,6 +10,7 @@
 use ron_core::{Diagnostic, DiagnosticCode, Severity};
 
 use crate::bevy::{SceneDiagnostic, SceneDiagnosticCode, SceneSeverity};
+use crate::interop::{LossKind, LossyConstruct};
 
 /// A diagnostic expressed in editor coordinates (FR-008).
 ///
@@ -52,31 +53,47 @@ pub struct DiagnosticView {
     /// (no-registry / type-not-in-registry / staleness advisory); `None` for every
     /// structural, serde-mode, or registered-mismatch finding (E009/FR-007).
     pub scene_code: Option<SceneDiagnosticCode>,
+    /// The E010 interop loss code, when this view came from a RON→JSON
+    /// lossy-construct (FR-006); `None` for every structural / serde / Bevy
+    /// finding.
+    ///
+    /// Set by [`map_loss_construct`] from a [`LossyConstruct`] so a conversion loss
+    /// renders through this **same** E006 surface (squiggle + Problems panel) as a
+    /// structural or type finding, mirroring [`scene_code`](Self::scene_code) for
+    /// Bevy. When `Some`, [`code_str`](Self::code_str) / [`source`](Self::source)
+    /// return the stable `RON-I####` code + the `"ronin-interop"` source tag; the
+    /// regular [`code`](Self::code) field carries a non-error placeholder superseded
+    /// by those accessors.
+    pub loss_code: Option<LossKind>,
     /// Human-readable message copied from the source diagnostic.
     pub message: String,
 }
 
 impl DiagnosticView {
-    /// The stable code string to render — the scene code (`BVY-S####`) when this
-    /// is a scene-level Bevy finding, else the underlying `RON-P####`/`RON-V####`
-    /// (E009/FR-007). Prefer this over reading [`code`](Self::code) directly so a
-    /// scene-level finding shows its true identity.
+    /// The stable code string to render — the interop loss code (`RON-I####`) when
+    /// this is a conversion loss, the scene code (`BVY-S####`) when this is a
+    /// scene-level Bevy finding, else the underlying `RON-P####`/`RON-V####`
+    /// (E009/FR-007, E010/FR-006). Prefer this over reading [`code`](Self::code)
+    /// directly so a loss / scene-level finding shows its true identity.
     #[must_use]
     pub fn code_str(&self) -> &'static str {
-        match self.scene_code {
-            Some(scene) => scene.code(),
-            None => self.code.code(),
+        match (self.loss_code, self.scene_code) {
+            (Some(loss), _) => loss.code(),
+            (None, Some(scene)) => scene.code(),
+            (None, None) => self.code.code(),
         }
     }
 
-    /// The producing-component `source` tag to render — `"ronin-bevy"` for a
-    /// scene-level Bevy finding, else the wrapped code's own source
-    /// (`"ron-core"`/`"ron-types"`) (E009/FR-007).
+    /// The producing-component `source` tag to render — `"ronin-interop"` for a
+    /// conversion loss, `"ronin-bevy"` for a scene-level Bevy finding, else the
+    /// wrapped code's own source (`"ron-core"`/`"ron-types"`) (E009/FR-007,
+    /// E010/FR-006).
     #[must_use]
     pub fn source(&self) -> &'static str {
-        match self.scene_code {
-            Some(scene) => scene.source(),
-            None => self.code.source(),
+        match (self.loss_code, self.scene_code) {
+            (Some(loss), _) => loss.source(),
+            (None, Some(scene)) => scene.source(),
+            (None, None) => self.code.source(),
         }
     }
 }
@@ -140,6 +157,7 @@ pub fn map_diagnostic(diag: &Diagnostic, source: &str) -> DiagnosticView {
         severity: diag.severity,
         code: diag.code,
         scene_code: None,
+        loss_code: None,
         message: diag.message.clone(),
     }
 }
@@ -184,8 +202,70 @@ pub fn map_scene_diagnostic(diag: &SceneDiagnostic, source: &str) -> DiagnosticV
         severity,
         code,
         scene_code,
+        loss_code: None,
         message: diag.message.clone(),
     }
+}
+
+/// Convert an E010 [`LossyConstruct`] into a [`DiagnosticView`] in editor
+/// coordinates, so a RON→JSON conversion loss renders through the **same** E006
+/// surface (squiggles + Problems panel) as a structural / type / Bevy finding
+/// (FR-006/FR-007, AD-004).
+///
+/// This is the RON→JSON-side analogue of [`map_scene_diagnostic`]: it carries the
+/// construct's stable `RON-I####` [`LossKind`] in
+/// [`loss_code`](DiagnosticView::loss_code) (so [`code_str`](DiagnosticView::code_str)
+/// / [`source`](DiagnosticView::source) return the loss identity + the
+/// `"ronin-interop"` source tag), collapses the loss onto the non-error
+/// [`Severity::Warning`] (a loss is advisory — the conversion still proceeds after
+/// the user confirms), and sets a non-error placeholder [`code`](DiagnosticView::code)
+/// superseded by the accessors. The message prefers the construct's human
+/// [`detail`](LossyConstruct::detail), falling back to the kind's
+/// [`label`](LossKind::label).
+///
+/// **One source of truth (FR-007).** The caller maps every entry of the SAME
+/// [`LossReport`](crate::interop::LossReport)`.constructs()` list that drives the
+/// pre-conversion loss dialog, so a loss can never reach one surface but not the
+/// other. The byte range is resolved to char + `(line, column)` exactly like
+/// [`map_diagnostic`] (multibyte-correct over the prefix).
+#[must_use]
+pub fn map_loss_construct(construct: &LossyConstruct, source: &str) -> DiagnosticView {
+    let range = construct.source_range();
+    let start = resolve_position(source, range.start());
+    let end = resolve_position(source, range.end());
+    let kind = construct.kind();
+
+    DiagnosticView {
+        char_range: (start.char_offset, end.char_offset),
+        line_col: ((start.line, start.column), (end.line, end.column)),
+        // A loss is advisory: the conversion proceeds after confirm, so it collapses
+        // onto the non-error Warning level (a loss is never a hard parse error).
+        severity: Severity::Warning,
+        // A non-error placeholder code superseded by `code_str()`/`source()`, which
+        // return the `RON-I####` loss identity when `loss_code` is set.
+        code: DiagnosticCode::UnknownField,
+        scene_code: None,
+        loss_code: Some(kind),
+        message: construct
+            .detail()
+            .map_or_else(|| kind.label().to_string(), ToString::to_string),
+    }
+}
+
+/// Map every [`LossyConstruct`] in a [`LossReport`](crate::interop::LossReport) to a
+/// [`DiagnosticView`], in the report's source order (FR-006/FR-007).
+///
+/// The convenience the app layer uses to drive BOTH surfaces from one list: the
+/// report's `constructs()` (the single source of truth) feed both the
+/// pre-conversion dialog AND, through this function, the inline diagnostics — so a
+/// loss can never appear in one surface but not the other (FR-007, AD-004).
+#[must_use]
+pub fn map_loss_report(report: &crate::interop::LossReport, source: &str) -> Vec<DiagnosticView> {
+    report
+        .constructs()
+        .iter()
+        .map(|c| map_loss_construct(c, source))
+        .collect()
 }
 
 /// Map a Bevy [`SceneSeverity`] onto the rendered `ron-core` [`Severity`]: a hard
@@ -295,5 +375,67 @@ mod tests {
         let view = map_scene_diagnostic(&diag, src);
         // One char (é) precedes, so the char range starts at 1, not 2.
         assert_eq!(view.char_range.0, 1);
+    }
+
+    // --- T013: E010 interop loss constructs render through the E006 surface ----
+
+    use crate::interop::{LossKind, LossRecovery, LossyConstruct};
+
+    #[test]
+    fn loss_construct_renders_with_its_stable_ron_i_code_and_interop_source() {
+        // A RON→JSON loss maps to a DiagnosticView whose code_str/source surface the
+        // stable RON-I#### identity + the "ronin-interop" tag (FR-006), exactly the
+        // way a Bevy scene finding surfaces its BVY-S#### identity.
+        let construct = LossyConstruct::with_detail(
+            LossKind::TupleVsList,
+            TextRange::new(4, 10),
+            LossRecovery::RoundTripSafeWithinRonin,
+            "tuple → JSON array",
+        );
+        let view = map_loss_construct(&construct, "(t: (1, 2))");
+        // A loss is advisory, not a hard parse error.
+        assert_eq!(view.severity, Severity::Warning);
+        assert_eq!(view.loss_code, Some(LossKind::TupleVsList));
+        assert!(view.scene_code.is_none());
+        // The rendered identity is the stable loss code + the interop source tag.
+        assert_eq!(view.code_str(), "RON-I0002");
+        assert_eq!(view.source(), "ronin-interop");
+        // The detail wording drives the message; the range maps to char offsets.
+        assert_eq!(view.message, "tuple → JSON array");
+        assert_eq!(view.char_range, (4, 10));
+    }
+
+    #[test]
+    fn loss_construct_without_detail_falls_back_to_the_kind_label() {
+        let construct = LossyConstruct::new(
+            LossKind::Char,
+            TextRange::new(0, 3),
+            LossRecovery::LossyToExternal,
+        );
+        let view = map_loss_construct(&construct, "'x'");
+        assert_eq!(view.code_str(), "RON-I0003");
+        assert_eq!(view.message, LossKind::Char.label());
+    }
+
+    #[test]
+    fn map_loss_report_maps_every_construct_in_source_order() {
+        // The one report list drives the inline surface: each construct → one view,
+        // in order, with its own stable code (FR-007 — one list, both surfaces).
+        let report = crate::interop::LossReport::from_constructs(vec![
+            LossyConstruct::new(
+                LossKind::TupleVsList,
+                TextRange::new(0, 4),
+                LossRecovery::RoundTripSafeWithinRonin,
+            ),
+            LossyConstruct::new(
+                LossKind::DroppedComment,
+                TextRange::new(6, 12),
+                LossRecovery::LossyToExternal,
+            ),
+        ]);
+        let views = map_loss_report(&report, "(t: (1, 2))// c");
+        assert_eq!(views.len(), report.len(), "one view per construct");
+        assert_eq!(views[0].code_str(), "RON-I0002");
+        assert_eq!(views[1].code_str(), "RON-I0009");
     }
 }

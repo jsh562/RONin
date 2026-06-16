@@ -1490,6 +1490,54 @@ impl EditorDocument {
         // Re-validate + re-derive the projection off-frame against the new text.
         self.request_reparse(worker);
     }
+
+    /// Install a **pre-serialized converted text buffer** (e.g. a RON→JSON / JSONC
+    /// conversion) as exactly **one** E007 undo unit (E010 US1 — T014, FR-003,
+    /// AD-005).
+    ///
+    /// This is the text-installing sibling of
+    /// [`commit_transformed_cst`](Self::commit_transformed_cst): where that method
+    /// prints a transformed RON [`CstDocument`], an in-place RON→JSON conversion
+    /// produces **JSON/JSONC text** that is *not* a RON tree, so the already-
+    /// serialized `text` is installed directly (printing it as RON would corrupt
+    /// it). The body **mirrors `commit_transformed_cst` exactly** so the whole
+    /// conversion is one logical action / one undo unit (FR-003):
+    ///
+    /// 1. Flush any in-flight coalescing typing run to its own boundary
+    ///    ([`record_undo_snapshot`](Self::record_undo_snapshot)) so the conversion
+    ///    is a **separate** undo unit and never merges with a prior keystroke run.
+    /// 2. Install the converted `text` as the live buffer (zero bytes change until
+    ///    this line — the caller built the conversion read-only over the source, so
+    ///    a Cancel before commit leaves the document byte-identical, SC-002/003).
+    /// 3. Bump the edit generation ([`on_edit`](Self::on_edit)), force a fresh
+    ///    (non-coalescing) unit by clearing the timing anchor, and snapshot so undo
+    ///    restores **exactly** the pre-conversion bytes / redo replays exactly the
+    ///    converted bytes (one undo unit — SC-003).
+    /// 4. Request an off-frame reparse so the converted buffer is a **normal dirty
+    ///    E007 buffer** covered by the existing autosave/recovery sidecar — no new
+    ///    persistence path (AD-005).
+    ///
+    /// `now` is the caller-side clock for the undo coalesce decision; the commit
+    /// snapshot is always recorded as a non-coalescing boundary regardless of
+    /// timing.
+    pub fn commit_converted_text(&mut self, text: String, worker: &ReparseWorker, now: Instant) {
+        // Flush any in-flight coalescing typing run first so this commit is a
+        // *separate* undo unit and never merges with a prior keystroke run (FR-003).
+        self.record_undo_snapshot(now);
+        // Install the converted text directly — it is JSON/JSONC, not a RON tree, so
+        // it is NOT routed through `ron_core::print` (that would re-parse + corrupt
+        // it). The source bytes are unchanged until exactly this assignment.
+        self.buffer = text;
+        // One logical op = one undo unit. Bump the generation so the next snapshot
+        // captures THIS new state, and force a fresh (non-coalescing) unit so undo
+        // restores exactly the prior bytes (SC-003).
+        self.on_edit();
+        self.last_undo_instant = None;
+        self.record_undo_snapshot(now);
+        // Re-validate off-frame against the new text; the converted buffer is a
+        // normal dirty E007 buffer (autosave/recovery covers it — AD-005).
+        self.request_reparse(worker);
+    }
 }
 
 /// Build the merged editor-coordinate diagnostic view for a landed

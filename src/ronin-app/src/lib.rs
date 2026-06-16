@@ -36,6 +36,7 @@ pub mod diagnostics_map;
 pub mod document;
 pub mod editor_view;
 pub mod fileio;
+pub mod interop;
 pub mod logging;
 pub mod panels;
 pub mod problems_panel;

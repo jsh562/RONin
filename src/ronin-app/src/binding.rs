@@ -358,6 +358,75 @@ impl TypeBinding {
     }
 }
 
+// ===========================================================================
+// E010 US2 — JSON→RON schema-aware reconstruction consultation (T021, FR-009/015).
+// ===========================================================================
+
+/// A bound `TypeModel` + its root type name, owned so the JSON→RON converter can
+/// borrow a [`JsonToRonBinding`](crate::interop::JsonToRonBinding) view from it
+/// (E010 US2 — T021, FR-009/015).
+///
+/// The E010 JSON→RON reconstruction is **schema-aware when a type is bound** — it
+/// consults the bound `TypeModel` strictly as **data** (ADR-0004; never executed,
+/// never mutated) to recover tuples-vs-lists, named enum variants (via the recorded
+/// serde [`Discriminator`](ron_types::model::Discriminator)), `char`, `Option`, and
+/// non-string map keys (via the [`RonTypeExtension`](ron_types::extension::RonTypeExtension)
+/// tuple-arity / char / non-string-key / option facts). This struct is the seam
+/// that turns a document's resolved binding into that consultable model: the worker
+/// carries the bound type as a **serialized** E004 interchange
+/// (`reparse::BoundType.model`), and [`from_serialized_model`](Self::from_serialized_model)
+/// deserializes it once into an in-memory [`TypeModel`] paired with the root type
+/// name — exactly the data `json_to_ron` needs (HINT-005). When no type is bound the
+/// converter receives `None` and applies the documented best-effort mapping (FR-009).
+#[derive(Debug, Clone)]
+pub struct JsonToRonConsultation {
+    /// The in-memory `TypeModel` consulted as data for reconstruction (FR-009).
+    pub model: ron_types::model::TypeModel,
+    /// The bound root type name — a key into
+    /// [`TypeModel::named_types`](ron_types::model::TypeModel::named_types).
+    pub root_type: String,
+}
+
+impl JsonToRonConsultation {
+    /// Build a consultation from an owned `TypeModel` + root type name.
+    #[must_use]
+    pub fn new(model: ron_types::model::TypeModel, root_type: impl Into<String>) -> Self {
+        Self {
+            model,
+            root_type: root_type.into(),
+        }
+    }
+
+    /// Build a consultation from a document's **serialized** E004 `TypeModel`
+    /// interchange (`reparse::BoundType.model`) + the bound root type name (T021).
+    ///
+    /// Deserializes the JSON-Schema-2020-12 + `x-ron-*` interchange back into an
+    /// in-memory [`TypeModel`] via [`ron_types::from_json`]; returns `None` when the
+    /// interchange is malformed or the root type is absent — the caller then falls
+    /// back to the unbound best-effort path (FR-009, schema-optional / no false
+    /// certainty, §III). The model is consulted strictly as **data** (ADR-0004).
+    #[must_use]
+    pub fn from_serialized_model(serialized: &serde_json::Value, root_type: &str) -> Option<Self> {
+        let model = ron_types::from_json(serialized).ok()?;
+        // Only a consultation whose root type is actually registered is useful; an
+        // absent root degrades to unbound best-effort rather than a false binding.
+        if !model.contains(root_type) {
+            return None;
+        }
+        Some(Self {
+            model,
+            root_type: root_type.to_string(),
+        })
+    }
+
+    /// Borrow a [`JsonToRonBinding`](crate::interop::JsonToRonBinding) view over this
+    /// consultation for the converter (T021).
+    #[must_use]
+    pub fn as_binding(&self) -> crate::interop::JsonToRonBinding<'_> {
+        crate::interop::JsonToRonBinding::new(&self.model, &self.root_type)
+    }
+}
+
 /// Upper bound on the length (bytes) of a glob `pattern` we will hand to the
 /// compiler (FR-025).
 ///
@@ -593,6 +662,65 @@ fn rule_is_candidate(rule: &BindingRule, path: &Path) -> bool {
         }
     }
     true
+}
+
+#[cfg(test)]
+mod consultation_tests {
+    //! T021 — the JSON→RON schema-aware reconstruction consultation (FR-009/015).
+
+    use super::*;
+    use ron_types::model::{TypeModel, TypeNode, TypeRef};
+
+    fn tuple_model() -> TypeModel {
+        let mut model = TypeModel::new();
+        model.insert_named(
+            "Pos2",
+            TypeNode::tuple(vec![
+                TypeRef::inline(TypeNode::primitive(ron_types::model::Primitive::Integer)),
+                TypeRef::inline(TypeNode::primitive(ron_types::model::Primitive::Integer)),
+            ]),
+        );
+        model
+    }
+
+    #[test]
+    fn from_serialized_model_round_trips_and_binds() {
+        // A serialized E004 interchange deserializes back to a consultable model.
+        let model = tuple_model();
+        let serialized = ron_types::to_json(&model);
+        let consult = JsonToRonConsultation::from_serialized_model(&serialized, "Pos2")
+            .expect("a registered root type binds");
+        assert_eq!(consult.root_type, "Pos2");
+        // The borrowed binding view reconstructs a JSON array as a tuple by arity.
+        let json = serde_json::json!([1, 2]);
+        let r = crate::interop::json_to_ron(&json, Some(consult.as_binding()), None);
+        assert!(r.text.contains("(1, 2)"), "tuple by arity, got: {}", r.text);
+    }
+
+    #[test]
+    fn from_serialized_model_absent_root_degrades_to_none() {
+        let serialized = ron_types::to_json(&tuple_model());
+        // An unregistered root type degrades to unbound best-effort (no false bind).
+        assert!(
+            JsonToRonConsultation::from_serialized_model(&serialized, "NotThere").is_none(),
+            "an absent root type yields no consultation"
+        );
+    }
+
+    #[test]
+    fn from_serialized_model_malformed_interchange_degrades_to_none() {
+        // A non-interchange JSON value cannot deserialize → no consultation, no panic.
+        let bogus = serde_json::json!({ "not": "a type model" });
+        assert!(JsonToRonConsultation::from_serialized_model(&bogus, "X").is_none());
+    }
+
+    #[test]
+    fn owned_constructor_yields_a_usable_binding() {
+        let consult = JsonToRonConsultation::new(tuple_model(), "Pos2");
+        let json = serde_json::json!([3, 4]);
+        let r = crate::interop::json_to_ron(&json, Some(consult.as_binding()), None);
+        assert!(r.text.contains("(3, 4)"), "got: {}", r.text);
+    }
 }
 
 #[cfg(test)]

@@ -46,14 +46,26 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::bevy::mode::{Mode, ModeState, RegistryBindingConfig, RegistryBindingRule};
-use crate::binding::{BindingConfig, BindingRule, DocumentOverride, TypeSourceLocator};
+use crate::binding::{
+    BindingConfig, BindingRule, DocumentOverride, JsonToRonConsultation, TypeSourceLocator,
+};
+use crate::diagnostics_map::map_loss_report;
 use crate::document::{ByteFidelityProfile, EditorDocument};
 use crate::editor_view::{editor_view, structural_form_view};
-use crate::fileio::{open_path, save_bytes, save_document, OpenError, SaveError};
+use crate::fileio::{
+    export_json, import_json, open_path, reconstruct_ron_from_bytes, save_bytes, save_document,
+    ExportError, ImportError, OpenError, SaveError,
+};
+use crate::interop::loss::{LossKind, LossRecovery, LossReport, LossyConstruct};
+use crate::interop::{
+    derive_scaffold, render_json, ron_to_json, CommentCarrier, CommentMode, DeriveScaffold,
+    JsoncStyle,
+};
 use crate::panels::{mode_selector_seam_stub, tree_table_seam_stub};
 use crate::problems_panel::problems_panel;
 use crate::reparse::ReparseWorker;
 use crate::settings::{AppSettings, BlankLinePolicy, FormattingConfig, WindowGeometry};
+use crate::settings::{JsonFormat, StrictCommentCarrier};
 use crate::snippets::{SnippetSet, UserSnippetFile, USER_SNIPPET_TEMPLATE};
 use crate::structural::view_state::ActiveView;
 use crate::type_acquire::resolve_and_acquire;
@@ -286,6 +298,114 @@ pub struct RecoveryOffer {
     pub sidecar: crate::recovery::RecoverySidecar,
 }
 
+// ===========================================================================
+// E010 US1 — RON→JSON convert command + loss-report dialog (FR-001/005/013).
+// ===========================================================================
+
+/// Where an in-flight RON→JSON conversion commits when the user confirms (E010
+/// US1 — T014/T015/T016, FR-001/003).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConvertTarget {
+    /// Replace the active buffer in place as ONE E007 undo unit (FR-003); the
+    /// converted buffer is a normal dirty E007 buffer (AD-005).
+    InPlace,
+    /// Write the converted JSON/JSONC to a chosen file, leaving the source document
+    /// untouched (FR-003); a strict-mode sidecar is written as a deterministic
+    /// sibling (FR-008).
+    Export(PathBuf),
+}
+
+/// The per-conversion output-format override surfaced in the convert/loss-report
+/// dialog (E010 US1 — T016, FR-008, NEW-CONFIG).
+///
+/// Defaults are seeded from the persisted
+/// [`ConversionSettings`](crate::settings::ConversionSettings); the user may flip
+/// JSONC↔strict (and the strict comment carrier) for a single conversion without
+/// changing the persisted default. The override resolves to a [`CommentMode`] for
+/// the converter + renderer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConvertFormatOverride {
+    /// JSONC (comments inline) vs strict standard JSON for this conversion (FR-008).
+    pub format: JsonFormat,
+    /// In strict mode: carry comments via the sibling sidecar, or drop them (and
+    /// report each drop as a loss) (FR-008).
+    pub strict_carrier: StrictCommentCarrier,
+}
+
+impl ConvertFormatOverride {
+    /// Resolve the effective [`CommentMode`] for this override (FR-008):
+    ///
+    /// * JSONC → [`CommentMode::JsoncInline`] (comments inline, the primary carrier);
+    /// * strict + sidecar → [`CommentMode::Sidecar`] (comments survive via the
+    ///   sibling map);
+    /// * strict + pure → [`CommentMode::None`] (comments dropped → each reported).
+    #[must_use]
+    pub fn comment_mode(self) -> CommentMode {
+        match (self.format, self.strict_carrier) {
+            (JsonFormat::Jsonc, _) => CommentMode::JsoncInline,
+            (JsonFormat::StrictJson, StrictCommentCarrier::Sidecar) => CommentMode::Sidecar,
+            (JsonFormat::StrictJson, StrictCommentCarrier::PureNoComments) => CommentMode::None,
+        }
+    }
+}
+
+/// An in-flight RON→JSON conversion awaiting the user's confirm/cancel decision in
+/// the loss-report dialog (E010 US1 — T016/T017, FR-005, data-model
+/// §ConversionResult).
+///
+/// Built **read-only** over the source document — nothing is written until the user
+/// confirms (FR-005, SC-002/003). The SAME [`loss_report`](Self::loss_report)
+/// `constructs()` list drives BOTH this dialog AND the inline diagnostics (FR-007,
+/// T017): the inline views are published onto the document the moment the dialog
+/// opens, so a loss can never reach one surface but not the other.
+pub struct PendingConversion {
+    /// The active document index this conversion targets.
+    doc_index: usize,
+    /// The deterministic converted output text (JSON / JSONC), already serialized.
+    text: String,
+    /// The lossy-construct map — the single source of truth for both surfaces
+    /// (FR-007).
+    loss_report: LossReport,
+    /// The comment carrier used (drives the strict-mode sidecar on an export).
+    comments: CommentCarrier,
+    /// Where the conversion commits on confirm (in-place / export).
+    target: ConvertTarget,
+    /// The per-conversion format override (the user may flip it in the dialog).
+    format: ConvertFormatOverride,
+}
+
+/// The user's choice on the unparseable-RON block-vs-convert-remainder prompt
+/// (E010 US1 — T016, FR-013, SC-008).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PartialRonChoice {
+    /// Abort the conversion with a clear error locating the offending region; no
+    /// output, zero bytes written (FR-013, SC-008).
+    Block,
+    /// Convert the parseable remainder; each unparseable region is rendered as a
+    /// flagged placeholder also recorded in the loss report (FR-013, SC-008).
+    ConvertRemainder,
+}
+
+/// A live unparseable-RON prompt awaiting the block-vs-convert-remainder decision
+/// (E010 US1 — T016, FR-013, SC-008).
+///
+/// Raised when a RON→JSON convert command is invoked on a buffer the parser could
+/// not fully parse. Choosing block aborts (a clear error pointing at the first
+/// offending region); choosing convert-remainder proceeds with the parseable
+/// portion (the resolution re-runs the conversion build, which records each
+/// unparseable region as an [`LossKind::UnparseableRegion`] loss).
+#[derive(Debug, Clone)]
+pub struct PartialRonPrompt {
+    /// The active document index the prompt concerns.
+    doc_index: usize,
+    /// Where the conversion would commit if the user proceeds.
+    target: ConvertTarget,
+    /// The per-conversion format override seeded from settings.
+    format: ConvertFormatOverride,
+    /// The byte range of the first unparseable region (for the block-branch locate).
+    first_error: ron_core::TextRange,
+}
+
 /// The RONin desktop editor shell (FR-003).
 pub struct App {
     /// The multi-tab workspace: open documents, the active-tab pointer, the
@@ -390,6 +510,17 @@ pub struct App {
     /// The index of the registry rule currently being edited in-place, or `None` when
     /// the rule form is adding a new rule (E009 — FR-010).
     editing_registry_rule: Option<usize>,
+    /// An in-flight RON→JSON conversion awaiting the loss-report confirm/cancel
+    /// decision, or `None` when no convert dialog is open (E010 US1 — FR-005).
+    ///
+    /// Built read-only over the source; a Cancel discards it with zero side effects
+    /// (SC-002/003). While set, the loss dialog renders and the inline loss
+    /// diagnostics are published on the target document (one list → both surfaces,
+    /// FR-007).
+    pending_conversion: Option<PendingConversion>,
+    /// A live unparseable-RON block-vs-convert-remainder prompt, or `None` (E010
+    /// US1 — FR-013, SC-008).
+    partial_ron_prompt: Option<PartialRonPrompt>,
 }
 
 impl App {
@@ -440,6 +571,8 @@ impl App {
             show_registries: false,
             registry_rule_draft: crate::settings::RegistryBindingFormDraft::default(),
             editing_registry_rule: None,
+            pending_conversion: None,
+            partial_ron_prompt: None,
         };
         // Surface any snippet-file degrade notice once at startup (FR-017/FR-034).
         app.surface_snippet_notice();
@@ -974,6 +1107,533 @@ impl App {
                 self.push_authoring_notice(NoticeKind::Info, kind.noop_message());
             }
         }
+    }
+
+    // --- E010 US1: RON→JSON convert commands (FR-001/003/005/007/013) ----------
+
+    /// `true` iff a document is open to convert (the gate for the Convert menu).
+    #[must_use]
+    pub fn convert_available(&self) -> bool {
+        self.active_document().is_some()
+    }
+
+    /// The per-conversion format override seeded from the persisted
+    /// [`ConversionSettings`](crate::settings::ConversionSettings) (E010 US1 —
+    /// FR-008, NEW-CONFIG).
+    #[must_use]
+    fn default_format_override(&self) -> ConvertFormatOverride {
+        ConvertFormatOverride {
+            format: self.settings.conversion.default_format,
+            strict_carrier: self.settings.conversion.strict_default_comment_carrier,
+        }
+    }
+
+    /// **Convert to JSON (in place)** — replace the active buffer with its JSON/JSONC
+    /// projection as ONE E007 undo unit, after the loss-report confirm (E010 US1 —
+    /// T014/T016, FR-001/003/005).
+    ///
+    /// The source bytes are unchanged until the user confirms; a Cancel changes zero
+    /// bytes (SC-002/003). A single Undo restores the exact prior RON (FR-003).
+    pub fn convert_to_json_in_place(&mut self) {
+        let format = self.default_format_override();
+        self.begin_conversion(ConvertTarget::InPlace, format);
+    }
+
+    /// **Export to JSON…** — pick a target via the file dialog and convert RON→JSON
+    /// non-destructively (the source document is untouched), after the loss-report
+    /// confirm (E010 US1 — T015/T016, FR-001/003/008).
+    ///
+    /// The `rfd` dialog cannot run headless, so the post-dialog flow (build +
+    /// confirm + atomic write) is also reachable directly via
+    /// [`begin_conversion`](Self::begin_conversion) with a chosen
+    /// [`ConvertTarget::Export`] for tests.
+    pub fn export_to_json_active(&mut self) {
+        if self.active_document().is_none() {
+            return;
+        }
+        let default = self.settings.conversion.default_format;
+        let extension = if default.is_jsonc() { "jsonc" } else { "json" };
+        let Some(target) = rfd::FileDialog::new()
+            .add_filter("JSON", &["json", "jsonc"])
+            .set_file_name(format!("export.{extension}"))
+            .save_file()
+        else {
+            return;
+        };
+        let format = self.default_format_override();
+        self.begin_conversion(ConvertTarget::Export(target), format);
+    }
+
+    /// Build a RON→JSON conversion read-only over the active document and either
+    /// open the loss-report dialog (when lossy) or commit immediately (when within
+    /// the round-trip-safe tier) (E010 US1 — T016/T017, FR-005/007/013).
+    ///
+    /// The shared entry point for both in-place and export commands (and for tests,
+    /// which call it directly to sidestep the `rfd` dialog). Flow:
+    ///
+    /// 1. **Unparseable-RON gate (FR-013, SC-008).** If the live buffer has parse
+    ///    errors, raise the block-vs-convert-remainder prompt instead of converting;
+    ///    the user's choice routes back here (block → abort + locate;
+    ///    convert-remainder → re-enter with the error tolerated).
+    /// 2. **Build read-only (FR-005, §I).** Run [`ron_to_json`] + serialize the
+    ///    output text + collect the loss report — all without touching a source byte.
+    /// 3. **Publish the inline losses (FR-007, T017).** Map the SAME
+    ///    `loss_report.constructs()` list onto the target document's diagnostics, so
+    ///    the inline surface and the dialog are driven by one list.
+    /// 4. **Confirm gate (FR-005).** A lossy conversion stashes a
+    ///    [`PendingConversion`] and opens the dialog; a loss-free conversion commits
+    ///    immediately (nothing to confirm — the round-trip-safe tier).
+    pub fn begin_conversion(&mut self, target: ConvertTarget, format: ConvertFormatOverride) {
+        self.begin_conversion_inner(target, format, false);
+    }
+
+    /// The conversion builder; `tolerate_errors` is set when re-entered from the
+    /// convert-remainder branch so the unparseable-RON gate is skipped (FR-013).
+    fn begin_conversion_inner(
+        &mut self,
+        target: ConvertTarget,
+        format: ConvertFormatOverride,
+        tolerate_errors: bool,
+    ) {
+        let Some(idx) = self.workspace.active_index() else {
+            return;
+        };
+        let Some(doc) = self.workspace.get(idx) else {
+            return;
+        };
+
+        // 1. Unparseable-RON gate: prompt block vs convert-remainder (FR-013/SC-008).
+        let cst = ron_core::parse(&doc.buffer);
+        if !tolerate_errors {
+            if let Some(first) = cst.diagnostics().first() {
+                self.partial_ron_prompt = Some(PartialRonPrompt {
+                    doc_index: idx,
+                    target,
+                    format,
+                    first_error: first.range,
+                });
+                return;
+            }
+        }
+
+        // 2. Build the conversion READ-ONLY over the source (no byte changes yet).
+        let comment_mode = format.comment_mode();
+        // US1 keeps the binding `None` (best-effort emit conventions); US2 wires the
+        // schema-aware binding. The loss report's recovery flag reflects unbound.
+        let converted = ron_to_json(&cst, None, comment_mode);
+        let mut loss_report = converted.loss_report;
+
+        // Convert-remainder branch: each unparseable region is a flagged placeholder
+        // ALSO recorded in the loss report (FR-013, SC-008) — never silently dropped.
+        if tolerate_errors {
+            for diag in cst.diagnostics() {
+                loss_report.push(LossyConstruct::with_detail(
+                    LossKind::UnparseableRegion,
+                    diag.range,
+                    LossRecovery::LossyToExternal,
+                    "unparseable RON region — emitted as a flagged placeholder",
+                ));
+            }
+        }
+
+        let style = JsoncStyle::from_comment_mode(comment_mode);
+        let indent = self.settings.conversion.effective_json_indent() as usize;
+        let text = render_json(&converted.value, &converted.comments, indent, style);
+
+        // 3. Publish the inline losses from the SAME list (FR-007, T017).
+        let source = doc.buffer.clone();
+        if let Some(doc) = self.workspace.get_mut(idx) {
+            doc.diagnostics = map_loss_report(&loss_report, &source);
+        }
+
+        // 4. Confirm gate: lossy → dialog; loss-free → commit now (round-trip-safe).
+        if loss_report.requires_confirmation() {
+            self.pending_conversion = Some(PendingConversion {
+                doc_index: idx,
+                text,
+                loss_report,
+                comments: converted.comments,
+                target,
+                format,
+            });
+        } else {
+            self.commit_conversion(idx, text, &converted.comments, &target, format);
+        }
+    }
+
+    /// The loss-report dialog's per-conversion format override is in flight when a
+    /// dialog is open; this exposes whether the convert/loss dialog is showing (for
+    /// tests / hosts).
+    #[must_use]
+    pub fn conversion_pending(&self) -> bool {
+        self.pending_conversion.is_some()
+    }
+
+    /// `true` when the unparseable-RON block-vs-convert-remainder prompt is open
+    /// (E010 US1 — FR-013, SC-008).
+    #[must_use]
+    pub fn partial_ron_prompt_open(&self) -> bool {
+        self.partial_ron_prompt.is_some()
+    }
+
+    /// The per-kind loss counts of the pending conversion, for the dialog summary +
+    /// tests (E010 US1 — FR-005, SC-002). Empty when no dialog is open.
+    #[must_use]
+    pub fn pending_conversion_counts(&self) -> std::collections::BTreeMap<LossKind, usize> {
+        self.pending_conversion
+            .as_ref()
+            .map(|c| c.loss_report.counts_by_kind())
+            .unwrap_or_default()
+    }
+
+    /// Resolve the open loss-report dialog (E010 US1 — T016/T017, FR-005, SC-002/003).
+    ///
+    /// * `confirm == true` → commit the conversion (in-place one undo unit, or the
+    ///   non-destructive atomic export). The bytes change for the first time here.
+    /// * `confirm == false` → **Cancel**: discard the pending conversion with zero
+    ///   side effects — no document is modified and no file is written (FR-005,
+    ///   SC-002/003). The inline loss diagnostics fall away on the next reparse.
+    pub fn resolve_conversion(&mut self, confirm: bool) {
+        let Some(pending) = self.pending_conversion.take() else {
+            return;
+        };
+        if !confirm {
+            // Cancel: zero bytes changed, nothing written (SC-002/003). Clear the
+            // inline loss diagnostics by requesting a fresh reparse of the unchanged
+            // buffer (the loss views were transient).
+            if let Some(doc) = self.workspace.get_mut(pending.doc_index) {
+                doc.request_reparse(&self.worker);
+            }
+            return;
+        }
+        self.commit_conversion(
+            pending.doc_index,
+            pending.text,
+            &pending.comments,
+            &pending.target,
+            pending.format,
+        );
+    }
+
+    /// Commit a (confirmed or loss-free) conversion to its target (E010 US1 —
+    /// T014/T015, FR-003/008).
+    ///
+    /// In-place → install the converted text as ONE E007 undo unit
+    /// ([`EditorDocument::commit_converted_text`]); export → write atomically via
+    /// [`export_json`] with the strict-mode sidecar, leaving the source untouched.
+    fn commit_conversion(
+        &mut self,
+        idx: usize,
+        text: String,
+        comments: &CommentCarrier,
+        target: &ConvertTarget,
+        format: ConvertFormatOverride,
+    ) {
+        match target {
+            ConvertTarget::InPlace => {
+                let Some(doc) = self.workspace.get_mut(idx) else {
+                    return;
+                };
+                // One E007 undo unit; a single Undo restores the exact prior RON.
+                doc.commit_converted_text(text, &self.worker, Instant::now());
+                self.push_authoring_notice(
+                    NoticeKind::Info,
+                    "Converted to JSON in place (one Undo restores the original RON).",
+                );
+            }
+            ConvertTarget::Export(path) => {
+                // Strict + sidecar carries comments in the deterministic sibling map;
+                // JSONC carries them inline (no sidecar); pure-JSON writes none.
+                let sidecar = if format.comment_mode() == CommentMode::Sidecar {
+                    Some(comments.sidecar_map())
+                } else {
+                    None
+                };
+                match export_json(&text, path, sidecar.as_ref()) {
+                    Ok(()) => {
+                        self.push_authoring_notice(
+                            NoticeKind::Info,
+                            format!("Exported JSON to {} (source unchanged).", path.display()),
+                        );
+                    }
+                    Err(e) => self.push_export_error(&e),
+                }
+            }
+        }
+    }
+
+    /// Push an error notice for a failed JSON export (E010 US1 — T015, FR-003).
+    ///
+    /// A failed export never touches the source document; the notice names the
+    /// failure surface (atomic-save / sidecar / unsafe sidecar path).
+    fn push_export_error(&mut self, err: &ExportError) {
+        self.push_authoring_notice(NoticeKind::Error, format!("Export failed: {err}"));
+    }
+
+    /// Resolve the open unparseable-RON prompt (E010 US1 — T016, FR-013, SC-008).
+    ///
+    /// * [`PartialRonChoice::Block`] → abort with a clear error locating the first
+    ///   offending region; no output, zero bytes (SC-008).
+    /// * [`PartialRonChoice::ConvertRemainder`] → re-enter the conversion build with
+    ///   parse errors tolerated; each unparseable region becomes a flagged
+    ///   [`LossKind::UnparseableRegion`] placeholder also recorded in the loss
+    ///   report (SC-008).
+    pub fn resolve_partial_ron_prompt(&mut self, choice: PartialRonChoice) {
+        let Some(prompt) = self.partial_ron_prompt.take() else {
+            return;
+        };
+        match choice {
+            PartialRonChoice::Block => {
+                // Abort + locate: a clear, non-crashing error pointing at the region.
+                let start = prompt.first_error.start();
+                self.push_authoring_notice(
+                    NoticeKind::Error,
+                    format!(
+                        "Conversion blocked: the RON has an unparseable region at byte {start}. \
+                         Fix it, or choose \"Convert remainder\" to emit the parseable portion."
+                    ),
+                );
+            }
+            PartialRonChoice::ConvertRemainder => {
+                // Re-enter with errors tolerated, keeping the original target/format.
+                let _ = prompt.doc_index;
+                self.begin_conversion_inner(prompt.target, prompt.format, true);
+            }
+        }
+    }
+
+    // --- E010 US2: JSON→RON convert commands (FR-002/008/009/013) ---------------
+
+    /// Build the schema-aware reconstruction consultation from the **active**
+    /// document's bound type, when one resolved (E010 US2 — T021/T024, FR-009).
+    ///
+    /// The active document carries its bound type as a serialized E004 interchange
+    /// (`bound_type`); when present this deserializes it into a consultable
+    /// [`JsonToRonConsultation`] so JSON→RON reconstructs the RON-specific shapes
+    /// schema-aware. `None` ⇒ no type bound ⇒ the converter applies the documented
+    /// best-effort mapping (FR-009, schema-optional / §III).
+    #[must_use]
+    fn active_reconstruction_consultation(&self) -> Option<JsonToRonConsultation> {
+        let doc = self.active_document()?;
+        let bound = doc.bound_type.as_ref()?;
+        JsonToRonConsultation::from_serialized_model(&bound.model, &bound.type_name)
+    }
+
+    /// **Import JSON / JSONC…** — pick a JSON/JSONC file and reconstruct it into a
+    /// **new** editor tab, leaving the source file untouched (E010 US2 — T023/T024,
+    /// FR-002/008/009/013).
+    ///
+    /// The `rfd` dialog cannot run headless, so the post-pick flow (read + sidecar
+    /// read-back + reconstruct + open-new-tab) is also reachable directly via
+    /// [`import_json_path`](Self::import_json_path) for tests. Malformed JSON / a
+    /// non-UTF-8 file surfaces a clear error notice and creates **no** tab (FR-013).
+    pub fn import_json_to_new_tab(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("JSON", &["json", "jsonc"])
+            .pick_file()
+        else {
+            return;
+        };
+        self.import_json_path(&path);
+    }
+
+    /// Import a JSON/JSONC file at `path` into a new tab (the headless-reachable core
+    /// of [`import_json_to_new_tab`]) (E010 US2 — T023/T024, FR-002/013).
+    ///
+    /// Reads + reconstructs schema-aware when a type is bound to the active document,
+    /// best-effort otherwise (FR-009); the reconstructed RON opens in a fresh dirty
+    /// untitled tab and the source JSON is never modified (FR-002). A read /
+    /// malformed-JSON / non-UTF-8 failure surfaces a clear error notice and creates
+    /// **no** tab (FR-013).
+    pub fn import_json_path(&mut self, path: &std::path::Path) {
+        let consultation = self.active_reconstruction_consultation();
+        match import_json(path, consultation.as_ref()) {
+            Ok(imported) => {
+                self.open_reconstructed_ron(imported.ron_text, &imported.notes);
+            }
+            Err(e) => self.push_import_error(&e, Some(path)),
+        }
+    }
+
+    /// **Convert JSON→RON (in place)** — reconstruct the active JSON/JSONC buffer to
+    /// RON as ONE E007 undo unit (E010 US2 — T024, FR-002/003/013) `[COMPLETES FR-002]`.
+    ///
+    /// Reconstructs schema-aware when a type is bound, best-effort otherwise (FR-009);
+    /// the reconstructed RON replaces the buffer as a single undo unit (one Undo
+    /// restores the exact prior JSON bytes — reusing
+    /// [`commit_converted_text`](EditorDocument::commit_converted_text), FR-003). A
+    /// malformed JSON buffer surfaces a clear error notice and changes **zero** bytes
+    /// — no doc created/corrupted (FR-013).
+    pub fn convert_json_to_ron_in_place(&mut self) {
+        let Some(idx) = self.workspace.active_index() else {
+            return;
+        };
+        let Some(doc) = self.workspace.get(idx) else {
+            return;
+        };
+        let raw = doc.buffer.clone().into_bytes();
+        let consultation = self.active_reconstruction_consultation();
+        // Reconstruct read-only over the source — zero bytes change until commit.
+        match reconstruct_ron_from_bytes(&raw, None, consultation.as_ref()) {
+            Ok(imported) => {
+                let Some(doc) = self.workspace.get_mut(idx) else {
+                    return;
+                };
+                // One E007 undo unit; a single Undo restores the exact prior JSON.
+                doc.commit_converted_text(imported.ron_text, &self.worker, Instant::now());
+                self.surface_reconstruction_notes(&imported.notes);
+                self.push_authoring_notice(
+                    NoticeKind::Info,
+                    "Converted JSON to RON in place (one Undo restores the original JSON).",
+                );
+            }
+            // Malformed JSON / non-UTF-8: a clear error, zero bytes changed (FR-013).
+            Err(e) => self.push_import_error(&e, None),
+        }
+    }
+
+    /// Open reconstructed RON in a new tab + surface any residual-ambiguity notes
+    /// (E010 US2 — T023, FR-002/009).
+    fn open_reconstructed_ron(&mut self, ron_text: String, notes: &[String]) {
+        let idx = self.workspace.open_imported_ron(ron_text);
+        // Parse the new tab so it gets diagnostics/highlighting like a fresh open.
+        if let Some(doc) = self.workspace.get_mut(idx) {
+            doc.request_reparse(&self.worker);
+        }
+        self.apply_binding_to_active();
+        self.apply_mode_to_active();
+        self.surface_reconstruction_notes(notes);
+        self.push_authoring_notice(
+            NoticeKind::Info,
+            "Imported JSON as RON in a new tab (the source JSON is unchanged).",
+        );
+    }
+
+    /// Surface each residual-ambiguity reconstruction note as an info notice (FR-009).
+    ///
+    /// The best-effort / unbound path notes where it had to guess (array-as-list,
+    /// string-keys, external-tag assumption); these are informational, never blocking.
+    fn surface_reconstruction_notes(&mut self, notes: &[String]) {
+        for note in notes {
+            self.push_authoring_notice(NoticeKind::Info, format!("JSON→RON: {note}"));
+        }
+    }
+
+    /// Push a clear, non-crashing error notice for a failed JSON import (E010 US2 —
+    /// T024, FR-013).
+    ///
+    /// Every import failure leaves the source untouched and creates no tab/doc — the
+    /// notice names the failure (not valid UTF-8 / malformed JSON / I/O) so the user
+    /// knows why nothing happened.
+    fn push_import_error(&mut self, err: &ImportError, path: Option<&std::path::Path>) {
+        let where_ = path
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .map(|n| format!(" {n}"))
+            .unwrap_or_default();
+        self.push_authoring_notice(NoticeKind::Error, format!("Cannot import{where_}: {err}"));
+    }
+
+    // --- E010 US3: derive a RON document from a Rust type (FR-010) ---------------
+
+    /// **Derive RON from type…** — derive an initial, parseable RON scaffold from the
+    /// active document's **bound** Rust type, open it in a NEW tab, and surface its
+    /// "placeholder — fill in" diagnostics (E010 US3 — T027, FR-010)
+    /// `[COMPLETES FR-010]`.
+    ///
+    /// The registered type comes from the active document's resolved binding
+    /// (`bound_type`, the E004/E006 type-pick surface — FR-009/010): when a type is
+    /// bound, its serialized `TypeModel` is deserialized (consulted strictly as
+    /// **data**, ADR-0004) and walked into a deterministic typed-placeholder scaffold
+    /// via [`derive_scaffold`] (FR-010); the scaffold opens in a fresh dirty untitled
+    /// tab (the active document is untouched) and its fill-in diagnostics are
+    /// published inline through the SAME E006 surface as conversion losses.
+    ///
+    /// An **unknown / unregistered** type — no document open, no type bound, or a
+    /// malformed/absent type model — surfaces a clear, non-crashing "no type model
+    /// available" notice and creates **no** document (US3 AS2, FR-010/FR-013).
+    pub fn derive_ron_from_type(&mut self) {
+        // Resolve the active document's bound type model + root name (the type-pick
+        // surface). No active doc / no bound type → a clear message, no document.
+        let Some((model, root_type)) = self.active_bound_type_model() else {
+            self.push_authoring_notice(
+                NoticeKind::Error,
+                "Cannot derive: no type model is available — bind a Rust type to the active \
+                 document first (Type Bindings…).",
+            );
+            return;
+        };
+
+        // A registered type but a malformed/absent root in the model degrades to the
+        // same clear message rather than a partial/corrupt scaffold (FR-010 / §III).
+        if !model.contains(&root_type) {
+            self.push_authoring_notice(
+                NoticeKind::Error,
+                format!("Cannot derive: type \"{root_type}\" is not in the bound type model."),
+            );
+            return;
+        }
+
+        // Walk the type's shape into a parseable typed-placeholder scaffold (FR-010).
+        let DeriveScaffold {
+            text,
+            fill_in_diagnostics,
+            ..
+        } = derive_scaffold(&model, &root_type);
+
+        // Open the scaffold in a NEW tab (the active document is untouched) and parse
+        // it so it gets highlighting/diagnostics like a freshly opened buffer.
+        let idx = self.workspace.open_imported_ron(text);
+        if let Some(doc) = self.workspace.get_mut(idx) {
+            doc.request_reparse(&self.worker);
+            // Publish the "placeholder — fill in" diagnostics inline from the SAME
+            // list, through the E006 surface (FR-006/010). They are transient: the
+            // next reparse of the (edited) buffer recomputes diagnostics.
+            let source = doc.buffer.clone();
+            doc.diagnostics = map_loss_report(&fill_in_diagnostics, &source);
+        }
+        // Refresh the active-binding indicator + mode for the new tab.
+        self.apply_binding_to_active();
+        self.apply_mode_to_active();
+
+        let fill_in = fill_in_diagnostics.len();
+        let suffix = if fill_in == 0 {
+            String::new()
+        } else {
+            format!(
+                " ({fill_in} placeholder{} to fill in)",
+                if fill_in == 1 { "" } else { "s" }
+            )
+        };
+        self.push_authoring_notice(
+            NoticeKind::Info,
+            format!("Derived a RON scaffold from \"{root_type}\" in a new tab{suffix}."),
+        );
+    }
+
+    /// `true` when a type is bound to the active document, so the Derive command can
+    /// produce a scaffold (the menu-enable gate, US3).
+    #[must_use]
+    pub fn derive_available(&self) -> bool {
+        self.active_document()
+            .and_then(|d| d.bound_type.as_ref())
+            .is_some()
+    }
+
+    /// Deserialize the active document's bound type into an in-memory `TypeModel` +
+    /// root type name for derive (E010 US3 — T027, FR-010).
+    ///
+    /// The active document carries its bound type as a **serialized** E004
+    /// interchange (`bound_type`); this deserializes it once (consulted strictly as
+    /// **data**, ADR-0004). Returns `None` when no document is open, no type is bound,
+    /// or the interchange is malformed — the caller then surfaces the clear
+    /// "no type model available" message (FR-010 / §III, no false certainty).
+    #[must_use]
+    fn active_bound_type_model(&self) -> Option<(ron_types::model::TypeModel, String)> {
+        let doc = self.active_document()?;
+        let bound = doc.bound_type.as_ref()?;
+        let model = ron_types::from_json(&bound.model).ok()?;
+        Some((model, bound.type_name.clone()))
     }
 
     /// Replace the whole project registry-binding config, persist it, and re-resolve
@@ -2783,6 +3443,59 @@ impl App {
                         ui.weak("(Bevy mode + a loaded registry required)");
                     }
                 });
+                // Convert menu (E010 US1 — FR-001/003/005/008): RON→JSON conversion,
+                // offered as a non-destructive export AND as an in-place transform
+                // (one E007 undo unit). Both run the pre-conversion loss-report
+                // confirm/cancel dialog when the conversion is lossy; a loss-free
+                // (round-trip-safe-tier) conversion commits without a prompt. Both
+                // are enabled only when a document is open so the menu shape stays
+                // stable. The JSON→RON import direction is US2.
+                ui.menu_button("Convert", |ui| {
+                    let can_convert = self.convert_available();
+                    ui.add_enabled_ui(can_convert, |ui| {
+                        if ui.button("Convert to JSON (in place)").clicked() {
+                            self.convert_to_json_in_place();
+                            ui.close();
+                        }
+                        if ui.button("Export to JSON\u{2026}").clicked() {
+                            self.export_to_json_active();
+                            ui.close();
+                        }
+                        // JSON→RON direction (E010 US2 — FR-002): reconstruct the
+                        // active JSON buffer in place (one undo unit). Import-from-file
+                        // is offered unconditionally below (it opens a NEW tab).
+                        if ui.button("Convert JSON\u{2192}RON (in place)").clicked() {
+                            self.convert_json_to_ron_in_place();
+                            ui.close();
+                        }
+                    });
+                    ui.separator();
+                    // Import-to-new-tab is always available — it opens a fresh tab and
+                    // needs no currently-open document (FR-002).
+                    if ui.button("Import JSON / JSONC\u{2026}").clicked() {
+                        self.import_json_to_new_tab();
+                        ui.close();
+                    }
+                    ui.separator();
+                    // Derive-from-type (E010 US3 — FR-010): scaffold a parseable RON
+                    // document from the active doc's bound Rust type into a NEW tab.
+                    // Enabled only when a type is bound; an unbound/unknown type
+                    // surfaces a clear non-crashing message and creates no document.
+                    let can_derive = self.derive_available();
+                    ui.add_enabled_ui(can_derive, |ui| {
+                        if ui.button("Derive RON from type\u{2026}").clicked() {
+                            self.derive_ron_from_type();
+                            ui.close();
+                        }
+                    });
+                    if !can_derive {
+                        ui.weak("(bind a Rust type to derive a RON scaffold)");
+                    }
+                    if !can_convert {
+                        ui.separator();
+                        ui.weak("(open a RON document to convert to JSON)");
+                    }
+                });
                 // Snippets menu (FR-015/FR-025): each effective snippet is listed by
                 // its prefix + description (discoverability), insertable into the
                 // active document via the explicit trigger; plus a Browse window and
@@ -3191,6 +3904,136 @@ impl App {
             });
         if let Some(choice) = choice {
             self.resolve_recovery_offer(choice);
+        }
+    }
+
+    /// Render the pre-conversion loss-report dialog as a modal window when a
+    /// RON→JSON conversion is pending (E010 US1 — T016/T017, FR-005, SC-002).
+    ///
+    /// Lists the lossy constructs (per-kind counts + the per-construct detail), hosts
+    /// the JSONC-vs-strict **per-conversion override** control (FR-008), and requires
+    /// an explicit Convert / Cancel. Cancel changes zero bytes and writes nothing
+    /// (SC-002/003). The SAME `loss_report.constructs()` list drives this dialog AND
+    /// the inline diagnostics already published on the document (FR-007).
+    fn render_conversion_dialog(&mut self, ui: &mut egui::Ui) {
+        let Some(pending) = self.pending_conversion.as_ref() else {
+            return;
+        };
+        let counts = pending.loss_report.counts_by_kind();
+        let total = pending.loss_report.len();
+        let is_export = matches!(pending.target, ConvertTarget::Export(_));
+        let mut format = pending.format;
+
+        let mut confirm: Option<bool> = None;
+        let mut format_changed = false;
+        egui::Window::new("Convert to JSON — review losses")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ui.ctx(), |ui| {
+                ui.label(format!(
+                    "This conversion has {total} construct(s) that JSON cannot represent losslessly:"
+                ));
+                // Per-kind summary (count + the kind's stable label).
+                egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
+                    for (kind, n) in &counts {
+                        ui.label(format!("\u{2022} {n} \u{00D7} {} [{}]", kind.label(), kind.code()));
+                    }
+                });
+                ui.separator();
+                // The per-conversion JSONC-vs-strict override (FR-008, NEW-CONFIG).
+                ui.label("Output format (this conversion only):");
+                ui.horizontal(|ui| {
+                    format_changed |= ui
+                        .radio_value(&mut format.format, JsonFormat::Jsonc, "JSONC (comments inline)")
+                        .changed();
+                    format_changed |= ui
+                        .radio_value(
+                            &mut format.format,
+                            JsonFormat::StrictJson,
+                            "Strict JSON",
+                        )
+                        .changed();
+                });
+                if format.format == JsonFormat::StrictJson {
+                    ui.horizontal(|ui| {
+                        format_changed |= ui
+                            .radio_value(
+                                &mut format.strict_carrier,
+                                StrictCommentCarrier::Sidecar,
+                                "Comments \u{2192} sidecar",
+                            )
+                            .changed();
+                        format_changed |= ui
+                            .radio_value(
+                                &mut format.strict_carrier,
+                                StrictCommentCarrier::PureNoComments,
+                                "Drop comments (reported)",
+                            )
+                            .changed();
+                    });
+                }
+                ui.separator();
+                ui.horizontal(|ui| {
+                    let confirm_label = if is_export { "Export" } else { "Convert" };
+                    if ui.button(confirm_label).clicked() {
+                        confirm = Some(true);
+                    }
+                    if ui.button("Cancel").clicked() {
+                        confirm = Some(false);
+                    }
+                });
+            });
+
+        // A format flip re-builds the conversion (text + losses) under the new mode,
+        // keeping the same target — the override beats the persisted default for this
+        // run only (FR-008). Re-entry preserves the open dialog.
+        if format_changed && confirm.is_none() {
+            if let Some(p) = self.pending_conversion.take() {
+                self.begin_conversion(p.target, format);
+            }
+            return;
+        }
+        if let Some(confirm) = confirm {
+            self.resolve_conversion(confirm);
+        }
+    }
+
+    /// Render the unparseable-RON block-vs-convert-remainder prompt as a modal
+    /// window when one is open (E010 US1 — T016, FR-013, SC-008).
+    ///
+    /// Block aborts with a clear error locating the region (no output, zero bytes);
+    /// convert-remainder emits the parseable portion with each unparseable region as
+    /// a flagged, loss-reported placeholder.
+    fn render_partial_ron_prompt(&mut self, ui: &mut egui::Ui) {
+        let Some(prompt) = self.partial_ron_prompt.as_ref() else {
+            return;
+        };
+        let start = prompt.first_error.start();
+        let mut choice: Option<PartialRonChoice> = None;
+        egui::Window::new("Unparseable RON")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ui.ctx(), |ui| {
+                ui.label(format!(
+                    "This RON has an unparseable region (near byte {start})."
+                ));
+                ui.label(
+                    "Block the conversion to fix it first, or convert the parseable \
+                     remainder (each unparseable region becomes a flagged placeholder).",
+                );
+                ui.horizontal(|ui| {
+                    if ui.button("Block (locate)").clicked() {
+                        choice = Some(PartialRonChoice::Block);
+                    }
+                    if ui.button("Convert remainder").clicked() {
+                        choice = Some(PartialRonChoice::ConvertRemainder);
+                    }
+                });
+            });
+        if let Some(choice) = choice {
+            self.resolve_partial_ron_prompt(choice);
         }
     }
 
@@ -3794,6 +4637,10 @@ impl App {
         // The crash-recovery restore offer floats above everything when open (E007
         // OBJ2 — TR-008).
         self.render_recovery_offer(ui);
+        // The RON→JSON loss-report dialog + the unparseable-RON prompt float above
+        // everything when open (E010 US1 — FR-005/013, SC-002/008).
+        self.render_conversion_dialog(ui);
+        self.render_partial_ron_prompt(ui);
         // The Settings window floats above everything when open (FR-007/FR-023).
         self.render_settings_window(ui);
         // The Snippets browser floats above everything when open (FR-025).

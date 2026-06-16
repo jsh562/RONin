@@ -400,3 +400,520 @@ pub fn save_atomic(
 pub fn save_document(doc: &EditorDocument, path: &Path) -> Result<(), SaveError> {
     save_atomic(&doc.buffer, &doc.byte_profile, path)
 }
+
+// ===========================================================================
+// E010 US1 — non-destructive RON→JSON export (T015, FR-003/008/013).
+// ===========================================================================
+//
+// The export path writes the converted JSON/JSONC text to a user-chosen target
+// via the SAME crash-safe atomic pipeline as a RON save (`save_atomic`), so the
+// SOURCE document is never touched (FR-003) — the converted text is supplied by
+// the caller, not read from the source's buffer. In strict mode, comments survive
+// in a deterministic sibling sidecar map (`<target>.comments.json`, same
+// directory) written next to the target; the sidecar path is derived purely from
+// the target file name and can never resolve outside the target's directory
+// (FR-008). Non-UTF-8 cannot occur on this path — the converted text is always
+// valid UTF-8 String — but the sidecar JSON is serialized losslessly.
+
+/// The fixed sidecar suffix appended to the export target's file name (FR-008).
+///
+/// The sidecar is a deterministic sibling: `world.json` → `world.json.comments.json`
+/// in the SAME directory. A fixed suffix on the target's own name keeps the path
+/// derivation local and predictable.
+const SIDECAR_SUFFIX: &str = ".comments.json";
+
+/// Why a JSON/JSONC export (or its sidecar) failed (E010 US1 — T015).
+///
+/// Wraps the [`SaveError`] from the atomic pipeline plus the boundary rejections
+/// the export adds: an export target with no parent directory (no place for a
+/// deterministic sibling sidecar) and a sidecar path that would escape the
+/// target's directory (defensive — the suffix derivation makes this impossible,
+/// but it is checked rather than assumed, FR-008).
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum ExportError {
+    /// The atomic write of the JSON/JSONC target failed; the original (if any) is
+    /// byte-identical (the atomic pipeline only swaps on a committed replace).
+    Save(SaveError),
+    /// The atomic write of the sibling sidecar comment map failed; the JSON target
+    /// was written successfully, but its companion comment map was not.
+    Sidecar(SaveError),
+    /// The export target has no parent directory, so a deterministic same-directory
+    /// sibling sidecar cannot be placed (and the atomic save cannot run either).
+    NoParentDirectory,
+    /// The derived sidecar path would resolve outside the target's own directory
+    /// (via `..`, an absolute component, or a name separator) — refused so the
+    /// converter never widens scope beyond the chosen target (FR-008).
+    SidecarEscapesDirectory,
+}
+
+impl std::fmt::Display for ExportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ExportError::Save(e) => write!(f, "JSON export failed: {e}"),
+            ExportError::Sidecar(e) => write!(f, "comment sidecar write failed: {e}"),
+            ExportError::NoParentDirectory => f.write_str("export target has no parent directory"),
+            ExportError::SidecarEscapesDirectory => {
+                f.write_str("comment sidecar path would escape the target directory")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ExportError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ExportError::Save(e) | ExportError::Sidecar(e) => Some(e),
+            ExportError::NoParentDirectory | ExportError::SidecarEscapesDirectory => None,
+        }
+    }
+}
+
+/// Derive the deterministic sibling sidecar path for an export `target`, refusing
+/// any path that would escape the target's directory (FR-008, E010 US1 — T015).
+///
+/// The sidecar is the target's file name plus [`SIDECAR_SUFFIX`], placed in the
+/// **same directory** as the target: `dir/world.json` →
+/// `dir/world.json.comments.json`. The derivation is purely lexical on the target's
+/// own file name, so it can never be taken from document content. As a defensive
+/// belt-and-suspenders check it verifies the result stays in the target's directory
+/// — a target file name containing a separator / `..` / an absolute component
+/// (which a legitimate `file_name()` cannot, but a hostile path might) is refused.
+///
+/// # Errors
+///
+/// * [`ExportError::NoParentDirectory`] when `target` has no parent directory.
+/// * [`ExportError::SidecarEscapesDirectory`] when the derived sidecar would not be
+///   a direct child of the target's directory.
+pub fn sidecar_path(target: &Path) -> Result<std::path::PathBuf, ExportError> {
+    let dir = target.parent().ok_or(ExportError::NoParentDirectory)?;
+    let file_name = target
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or(ExportError::SidecarEscapesDirectory)?;
+    // The sibling name is purely the target's own file name + the fixed suffix.
+    let sidecar_name = format!("{file_name}{SIDECAR_SUFFIX}");
+    // Defensive: the sibling name must be a single path component (no separator,
+    // no `..`, not absolute) so it can only land directly in the target's dir.
+    let candidate = Path::new(&sidecar_name);
+    if candidate.is_absolute() || candidate.components().count() != 1 || sidecar_name.contains("..")
+    {
+        return Err(ExportError::SidecarEscapesDirectory);
+    }
+    let sidecar = dir.join(&sidecar_name);
+    // Final guard: the resolved sidecar's parent must be the target's directory.
+    if sidecar.parent() != Some(dir) {
+        return Err(ExportError::SidecarEscapesDirectory);
+    }
+    Ok(sidecar)
+}
+
+/// Export converted JSON/JSONC `text` to `target` atomically (source untouched),
+/// optionally writing the strict-mode comment sidecar (E010 US1 — T015, FR-003/008).
+///
+/// The non-destructive RON→JSON export seam:
+///
+/// 1. **Atomic JSON write.** The converted `text` is written to `target` through
+///    [`save_atomic`] — the same crash-safe temp-write + durable-flush + atomic-
+///    replace pipeline a RON save uses. The byte-fidelity profile is derived from
+///    the converted text itself (it is fresh output, valid UTF-8, LF), so the bytes
+///    reach disk verbatim. The SOURCE document is never opened — only `target` is
+///    written (FR-003).
+/// 2. **Sidecar comment map (strict mode only).** When `sidecar` is `Some` (the
+///    caller passes the carrier's [`sidecar_map`](crate::interop::CommentCarrier::sidecar_map)
+///    in strict-with-sidecar mode), it is serialized to deterministic JSON and
+///    written — also atomically — to the deterministic sibling
+///    [`sidecar_path`] (`<target>.comments.json`, same directory). A `None` / empty
+///    sidecar writes nothing (JSONC carries comments inline; pure-JSON drops them).
+///
+/// # Errors
+///
+/// * [`ExportError::Save`] if the JSON target write fails (the original target, if
+///   any, is byte-identical — atomic guarantee).
+/// * [`ExportError::Sidecar`] if the sidecar write fails (the JSON target was
+///   written successfully).
+/// * [`ExportError::NoParentDirectory`] / [`ExportError::SidecarEscapesDirectory`]
+///   from [`sidecar_path`] when a sidecar is requested but its path is unsafe.
+pub fn export_json(
+    text: &str,
+    target: &Path,
+    sidecar: Option<&std::collections::BTreeMap<String, Vec<String>>>,
+) -> Result<(), ExportError> {
+    // The export is non-destructive over the source: only `target` is written.
+    // The converted text is fresh output — build its fidelity profile from its own
+    // bytes so the atomic re-emission writes it verbatim (no reflow).
+    let bytes = text.as_bytes().to_vec();
+    let profile = ByteFidelityProfile::from_bytes(&bytes);
+    save_atomic(text, &profile, target).map_err(ExportError::Save)?;
+
+    // Strict-mode sidecar: write the comment map as a deterministic sibling. An
+    // empty map writes nothing (the carrier supplied no comments to preserve).
+    if let Some(map) = sidecar {
+        if !map.is_empty() {
+            let sidecar = sidecar_path(target)?;
+            // The sidecar is canonical pretty JSON (deterministic; map key order is
+            // the BTreeMap's sorted order, so the file is reproducible).
+            let json = serde_json::to_string_pretty(map).unwrap_or_else(|_| "{}".to_string());
+            let json_with_newline = format!("{json}\n");
+            let sidecar_bytes = json_with_newline.as_bytes().to_vec();
+            let sidecar_profile = ByteFidelityProfile::from_bytes(&sidecar_bytes);
+            save_atomic(&json_with_newline, &sidecar_profile, &sidecar)
+                .map_err(ExportError::Sidecar)?;
+        }
+    }
+    Ok(())
+}
+
+// ===========================================================================
+// E010 US2 — JSON/JSONC import → reconstructed RON (T022, FR-002/008/009/013).
+// ===========================================================================
+//
+// The import path reads a JSON / JSONC file, validates UTF-8 at the boundary
+// (rejecting non-UTF-8 with no document created, like `open_path`), parses it
+// JSONC-tolerantly (stripping + anchoring inline comments), reads comments back
+// from BOTH the JSONC inline stream AND a deterministic sibling sidecar
+// (`<input>.comments.json`) when present (round-trip symmetry, FR-008), and
+// reconstructs RON via `json_to_ron` — schema-aware when a binding consultation is
+// supplied, deterministic best-effort otherwise (FR-009). Malformed JSON degrades
+// to a clear error and NO document (FR-013).
+
+use crate::binding::JsonToRonConsultation;
+use crate::interop::comments::{Comment, CommentCarrier, CommentKind, CommentMode};
+use crate::interop::{json_to_ron, JsonToRon};
+
+/// Why a JSON/JSONC import failed (E010 US2 — T022, FR-013).
+///
+/// Every variant creates **no** document and corrupts nothing — the source JSON is
+/// only read (FR-013). `NotUtf8` rejects a non-UTF-8 file at the boundary;
+/// `MalformedJson` carries the JSONC reader's parse message; `Io` wraps a read
+/// failure.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum ImportError {
+    /// The input file's bytes are not valid UTF-8; no document was created.
+    NotUtf8,
+    /// The input could not be parsed as JSON/JSONC; no document was created.
+    MalformedJson(String),
+    /// A filesystem read error occurred reading the input file.
+    Io(std::io::Error),
+}
+
+impl std::fmt::Display for ImportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ImportError::NotUtf8 => f.write_str("not valid UTF-8"),
+            ImportError::MalformedJson(msg) => write!(f, "malformed JSON: {msg}"),
+            ImportError::Io(e) => write!(f, "I/O error: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for ImportError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ImportError::NotUtf8 | ImportError::MalformedJson(_) => None,
+            ImportError::Io(e) => Some(e),
+        }
+    }
+}
+
+/// The successful outcome of a JSON/JSONC import: the reconstructed RON text plus
+/// the converter's residual-ambiguity notes (E010 US2 — T022, FR-002/009).
+#[derive(Debug)]
+pub struct ImportedRon {
+    /// The reconstructed RON source text (ready to open in a new tab or commit in
+    /// place).
+    pub ron_text: String,
+    /// Residual-ambiguity notes from the best-effort / unbound reconstruction
+    /// (FR-009). Empty on a fully schema-aware import.
+    pub notes: Vec<String>,
+}
+
+/// Read + reconstruct RON from the bytes of a JSON/JSONC document, honouring an
+/// optional sidecar comment map (E010 US2 — T022, FR-002/008/009/013).
+///
+/// * `raw` — the input file bytes (UTF-8 validated here).
+/// * `sidecar` — the deterministic sibling sidecar map (JSON-Pointer → comment
+///   texts) when one exists beside the input, else `None` (FR-008).
+/// * `consultation` — the bound `TypeModel` + root type for schema-aware
+///   reconstruction, or `None` for best-effort (FR-009).
+///
+/// Comments are read back from BOTH the JSONC inline stream AND the sidecar (their
+/// anchored pointers merge into one carrier), so a RON→JSON→RON round trip restores
+/// comments in either carrier (FR-008).
+///
+/// # Errors
+///
+/// * [`ImportError::NotUtf8`] when the bytes are not valid UTF-8 (no document).
+/// * [`ImportError::MalformedJson`] when the JSONC reader rejects the input (no
+///   document) — degrade-safe (FR-013).
+pub fn reconstruct_ron_from_bytes(
+    raw: &[u8],
+    sidecar: Option<&std::collections::BTreeMap<String, Vec<String>>>,
+    consultation: Option<&JsonToRonConsultation>,
+) -> Result<ImportedRon, ImportError> {
+    // Validate UTF-8 at the boundary; reject without creating anything (FR-013).
+    if ron_core::validate_utf8(raw).is_err() {
+        return Err(ImportError::NotUtf8);
+    }
+    let text = std::str::from_utf8(raw).map_err(|_| ImportError::NotUtf8)?;
+
+    // Parse JSONC: strip + anchor inline comments; serde_json validates the JSON.
+    let parsed =
+        crate::interop::parse_jsonc(text).map_err(|e| ImportError::MalformedJson(e.to_string()))?;
+
+    // Merge inline comments with any sidecar comments into one anchored list. JSONC
+    // is the primary carrier; the sidecar supplies anchors a strict-JSON file kept
+    // separately (FR-008). Both are read back (round-trip symmetry).
+    let mut comments: Vec<Comment> = parsed.comments;
+    if let Some(map) = sidecar {
+        for (pointer, texts) in map {
+            for ct in texts {
+                comments.push(Comment {
+                    text: ct.clone(),
+                    kind: classify_comment(ct),
+                    source_range: ron_core::TextRange::new(0usize, 0usize),
+                    anchor_pointer: pointer.clone(),
+                });
+            }
+        }
+    }
+    let carrier = CommentCarrier::from_comments(CommentMode::JsoncInline, comments);
+
+    // Reconstruct RON — schema-aware when bound, best-effort otherwise (FR-009).
+    let binding = consultation.map(JsonToRonConsultation::as_binding);
+    let JsonToRon {
+        text: ron_text,
+        notes,
+        ..
+    } = json_to_ron(&parsed.value, binding, Some(&carrier));
+    Ok(ImportedRon { ron_text, notes })
+}
+
+/// Read a JSON/JSONC file from `path`, consult its deterministic sibling sidecar
+/// when present, and reconstruct RON (E010 US2 — T022, FR-002/008/009/013).
+///
+/// The on-disk entry point: reads `path`, looks for `<path>.comments.json` beside it
+/// (the deterministic sibling derived by [`sidecar_path`]), and forwards both to
+/// [`reconstruct_ron_from_bytes`]. The input JSON is never modified — only read
+/// (FR-002). A missing / unreadable / malformed sidecar is simply ignored (the
+/// inline JSONC comments still round-trip); the input itself failing is an error
+/// with no document created (FR-013).
+///
+/// # Errors
+///
+/// * [`ImportError::Io`] when the input file cannot be read.
+/// * [`ImportError::NotUtf8`] / [`ImportError::MalformedJson`] from
+///   [`reconstruct_ron_from_bytes`].
+pub fn import_json(
+    path: &Path,
+    consultation: Option<&JsonToRonConsultation>,
+) -> Result<ImportedRon, ImportError> {
+    let raw = std::fs::read(path).map_err(ImportError::Io)?;
+    // Read the deterministic sibling sidecar comment map when one exists (FR-008).
+    let sidecar = read_sidecar(path);
+    reconstruct_ron_from_bytes(&raw, sidecar.as_ref(), consultation)
+}
+
+/// Read the deterministic sibling sidecar comment map for an input `path`, when one
+/// exists and parses (E010 US2 — T022, FR-008).
+///
+/// The sidecar consulted on read is the deterministic sibling of the input file
+/// (`<input>.comments.json`, same directory) — the exact path [`export_json`] writes
+/// in strict mode. A missing / unreadable / malformed sidecar returns `None` (the
+/// inline JSONC comments still round-trip); the sidecar never widens the read scope
+/// beyond the input's directory (the path is derived purely from the input name).
+#[must_use]
+pub fn read_sidecar(path: &Path) -> Option<std::collections::BTreeMap<String, Vec<String>>> {
+    let sidecar = sidecar_path(path).ok()?;
+    let bytes = std::fs::read(&sidecar).ok()?;
+    serde_json::from_slice::<std::collections::BTreeMap<String, Vec<String>>>(&bytes).ok()
+}
+
+/// Classify a sidecar comment's text into line vs block by its delimiters (FR-008).
+fn classify_comment(text: &str) -> CommentKind {
+    if text.trim_start().starts_with("/*") {
+        CommentKind::Block
+    } else {
+        CommentKind::Line
+    }
+}
+
+#[cfg(test)]
+mod export_tests {
+    //! T015 — non-destructive JSON/JSONC export + deterministic sidecar (FR-003/008).
+
+    use super::*;
+    use std::collections::BTreeMap;
+
+    /// A fresh unique temp directory for an export test.
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "ronin_export_{tag}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    #[test]
+    fn sidecar_path_is_a_deterministic_same_dir_sibling() {
+        let target = Path::new("/some/dir/world.json");
+        let sidecar = sidecar_path(target).expect("derived");
+        assert_eq!(
+            sidecar,
+            Path::new("/some/dir/world.json.comments.json"),
+            "the sidecar is `<target>.comments.json` in the same directory"
+        );
+    }
+
+    #[test]
+    fn sidecar_path_rejects_a_target_with_no_parent() {
+        // A bare relative file name with no directory component has a parent of "",
+        // which is still a (current-dir) parent; a root has no parent.
+        assert!(matches!(
+            sidecar_path(Path::new("/")),
+            Err(ExportError::NoParentDirectory)
+        ));
+    }
+
+    #[test]
+    fn export_writes_json_and_leaves_no_source_touched() {
+        let dir = temp_dir("json_only");
+        let target = dir.join("out.json");
+        export_json("{\n  \"a\": 1\n}\n", &target, None).expect("export ok");
+        let written = std::fs::read_to_string(&target).expect("target written");
+        assert!(written.contains("\"a\": 1"));
+        // No sidecar was requested → none exists.
+        assert!(
+            !dir.join("out.json.comments.json").exists(),
+            "no sidecar without a comment map"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn strict_export_writes_the_deterministic_sidecar() {
+        let dir = temp_dir("with_sidecar");
+        let target = dir.join("strict.json");
+        let mut map: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        map.insert("/a".to_string(), vec!["// about a".to_string()]);
+        export_json("{\n  \"a\": 1\n}\n", &target, Some(&map)).expect("export ok");
+        let sidecar = dir.join("strict.json.comments.json");
+        assert!(sidecar.exists(), "the deterministic sidecar is written");
+        let body = std::fs::read_to_string(&sidecar).expect("sidecar readable");
+        assert!(body.contains("/a") && body.contains("// about a"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn empty_sidecar_map_writes_nothing() {
+        let dir = temp_dir("empty_sidecar");
+        let target = dir.join("strict.json");
+        let map: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        export_json("{}\n", &target, Some(&map)).expect("export ok");
+        assert!(
+            !dir.join("strict.json.comments.json").exists(),
+            "an empty comment map writes no sidecar"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod import_tests {
+    //! T022 — JSON/JSONC import → reconstructed RON + sidecar read-back (FR-002/008/013).
+
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "ronin_import_{tag}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    #[test]
+    fn imports_plain_json_to_ron() {
+        let r = reconstruct_ron_from_bytes(b"{ \"name\": \"hero\", \"level\": 3 }", None, None)
+            .expect("import ok");
+        assert!(r.ron_text.contains("name: \"hero\""), "got: {}", r.ron_text);
+        assert!(r.ron_text.contains("level: 3"));
+    }
+
+    #[test]
+    fn imports_jsonc_and_reattaches_inline_comments() {
+        let jsonc = "{\n  // about a\n  \"a\": 1\n}";
+        let r = reconstruct_ron_from_bytes(jsonc.as_bytes(), None, None).expect("import ok");
+        assert!(
+            r.ron_text.contains("// about a"),
+            "inline comment re-attached: {}",
+            r.ron_text
+        );
+    }
+
+    #[test]
+    fn malformed_json_is_rejected_with_no_document() {
+        let err = reconstruct_ron_from_bytes(b"{ \"a\": }", None, None)
+            .expect_err("malformed JSON is rejected");
+        assert!(matches!(err, ImportError::MalformedJson(_)));
+    }
+
+    #[test]
+    fn non_utf8_is_rejected_with_no_document() {
+        // An invalid UTF-8 byte sequence is rejected at the boundary (FR-013).
+        let err = reconstruct_ron_from_bytes(&[0xff, 0xfe, 0x00], None, None)
+            .expect_err("non-UTF-8 is rejected");
+        assert!(matches!(err, ImportError::NotUtf8));
+    }
+
+    #[test]
+    fn sidecar_comments_are_read_back() {
+        let mut map: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        map.insert("/a".to_string(), vec!["// sidecar note".to_string()]);
+        let r = reconstruct_ron_from_bytes(b"{ \"a\": 1 }", Some(&map), None).expect("import ok");
+        assert!(
+            r.ron_text.contains("// sidecar note"),
+            "sidecar comment read back: {}",
+            r.ron_text
+        );
+    }
+
+    #[test]
+    fn import_json_reads_the_deterministic_sibling_sidecar() {
+        let dir = temp_dir("sidecar_readback");
+        let input = dir.join("in.json");
+        std::fs::write(&input, b"{ \"a\": 1 }").expect("write json");
+        // Write the deterministic sibling sidecar the strict-mode export would write.
+        let sidecar = dir.join("in.json.comments.json");
+        std::fs::write(&sidecar, b"{ \"/a\": [\"// from sidecar\"] }").expect("write sidecar");
+        let r = import_json(&input, None).expect("import ok");
+        assert!(
+            r.ron_text.contains("// from sidecar"),
+            "the sibling sidecar is read back: {}",
+            r.ron_text
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn import_json_missing_sidecar_is_fine() {
+        let dir = temp_dir("no_sidecar");
+        let input = dir.join("in.json");
+        std::fs::write(&input, b"{ \"a\": 1 }").expect("write json");
+        let r = import_json(&input, None).expect("import ok");
+        assert!(r.ron_text.contains("a: 1"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

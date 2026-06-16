@@ -1,0 +1,5 @@
+---
+source: src/ronin-app/tests/interop_derive.rs
+expression: s.text
+---
+(count: 0, ratio: 0.0, name: "", enabled: false, tags: [], pos: (0, 0), initial: '\0', limit: None, nothing: (), mode: Fast)

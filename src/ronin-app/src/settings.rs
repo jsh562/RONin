@@ -88,6 +88,25 @@ const DEFAULT_COALESCE_WINDOW_MS: u64 = 500;
 const MIN_COALESCE_WINDOW_MS: u64 = 50;
 const MAX_COALESCE_WINDOW_MS: u64 = 5_000;
 
+// --- E010 RON⇄JSON interop NEW-CONFIG (FR-008) ------------------------------
+//
+// The ONLY persisted artifact E010 adds (data-model §ConversionSettings): the
+// RON→JSON output-format default (JSONC vs strict JSON), the JSON pretty-print
+// indent, and the strict-mode comment carrier default. It rides this existing
+// settings store — no new store. Each value is a *default* overridable per
+// conversion by the convert/loss-report dialog (the override is applied by the
+// caller later — US1 T016). An absent / corrupt / out-of-range on-disk value
+// falls back to JSONC + a default indent and never crashes (data-model
+// §ConversionSettings "Absent/corrupt → safe defaults").
+
+/// Default JSON pretty-print indent width for RON→JSON: 2 spaces (NEW-CONFIG).
+const DEFAULT_JSON_INDENT: u32 = 2;
+/// Sane range for the JSON indent width: `0..=16`. Zero means a compact /
+/// minimally-indented output; the upper bound mirrors the formatter's clamp so a
+/// hand-edited value can never produce an absurd indent.
+const MIN_JSON_INDENT: u32 = 0;
+const MAX_JSON_INDENT: u32 = 16;
+
 /// How the formatter treats runs of blank lines between elements (FR-007).
 ///
 /// Mirrors `ron_core::BlankLinePolicy`; kept as its own type so `ronin-app` does
@@ -101,6 +120,137 @@ pub enum BlankLinePolicy {
     Collapse,
     /// Preserve the original blank-line count between elements.
     Preserve,
+}
+
+/// The RON→JSON output form (FR-008, NEW-CONFIG).
+///
+/// JSONC (JSON-with-comments) is the default and primary comment carrier; strict
+/// standard JSON is also available, carrying comments via a sibling sidecar map
+/// by default (see [`StrictCommentCarrier`]). Kept as `ronin-app`'s own enum so
+/// the persisted JSON schema is owned here and no interop type leaks into the
+/// settings file.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum JsonFormat {
+    /// JSON-with-comments — comments preserved inline (the default/primary
+    /// carrier, FR-008).
+    #[default]
+    Jsonc,
+    /// Strict standard JSON — comments carried via a sibling sidecar by default,
+    /// or dropped (and reported) only when the sidecar is also declined (FR-008).
+    StrictJson,
+}
+
+impl JsonFormat {
+    /// The stable lowercase label for this format.
+    #[inline]
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            JsonFormat::Jsonc => "jsonc",
+            JsonFormat::StrictJson => "strict-json",
+        }
+    }
+
+    /// `true` when this is the JSONC (comment-preserving) form.
+    #[inline]
+    #[must_use]
+    pub fn is_jsonc(self) -> bool {
+        matches!(self, JsonFormat::Jsonc)
+    }
+}
+
+/// How comments are carried when the output form is strict standard JSON
+/// (FR-008, NEW-CONFIG).
+///
+/// In strict mode JSONC inline comments are not permitted, so comments survive in
+/// a **sibling sidecar map** by default; only [`PureNoComments`](Self::PureNoComments)
+/// drops them — and then each dropped comment is reported as a loss (FR-007).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StrictCommentCarrier {
+    /// Carry comments in a deterministic sibling sidecar comment map (the strict
+    /// default so comments survive strict mode, FR-008).
+    #[default]
+    Sidecar,
+    /// Pure standard JSON: comments are dropped and each drop is reported as a
+    /// [`DroppedComment`](crate::interop::LossKind::DroppedComment) loss (FR-008,
+    /// FR-007).
+    PureNoComments,
+}
+
+impl StrictCommentCarrier {
+    /// The stable lowercase label for this carrier.
+    #[inline]
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StrictCommentCarrier::Sidecar => "sidecar",
+            StrictCommentCarrier::PureNoComments => "pure-no-comments",
+        }
+    }
+}
+
+/// RON⇄JSON conversion preferences persisted with the app settings — the **only**
+/// on-disk artifact E010 adds (FR-008, NEW-CONFIG, data-model §ConversionSettings).
+///
+/// Holds the RON→JSON output-format default ([`JsonFormat`]), the JSON
+/// pretty-print indent, and the strict-mode comment-carrier default. Every value
+/// is a **default, not a lock**: the convert/loss-report dialog overrides it for a
+/// single run without changing the persisted default (the override is applied by
+/// the caller later, US1 T016). Robustness contract (data-model
+/// §ConversionSettings, project-instructions §I): an absent / corrupt block falls
+/// back to JSONC + a default indent (serde `default`), and an out-of-range indent
+/// is clamped on load and via the setter — a hand-edited settings file can never
+/// produce an unusable conversion config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ConversionSettings {
+    /// The persisted RON→JSON output default (JSONC by default, FR-008).
+    pub default_format: JsonFormat,
+    /// The persisted JSON pretty-print indent width (default 2, clamped to
+    /// `0..=16`).
+    pub json_indent: u32,
+    /// The persisted strict-mode comment-carrier default (sidecar by default so
+    /// comments survive strict mode, FR-008).
+    pub strict_default_comment_carrier: StrictCommentCarrier,
+}
+
+impl Default for ConversionSettings {
+    fn default() -> Self {
+        Self {
+            default_format: JsonFormat::default(),
+            json_indent: DEFAULT_JSON_INDENT,
+            strict_default_comment_carrier: StrictCommentCarrier::default(),
+        }
+    }
+}
+
+impl ConversionSettings {
+    /// The JSON indent width clamped to the sane `0..=16` range (NEW-CONFIG).
+    ///
+    /// Read the indent through this rather than the raw field so a corrupt /
+    /// hand-edited value can never push the effective indent out of range.
+    #[must_use]
+    pub fn effective_json_indent(&self) -> u32 {
+        self.json_indent.clamp(MIN_JSON_INDENT, MAX_JSON_INDENT)
+    }
+
+    /// Set the JSON indent width, clamping to the sane `0..=16` range
+    /// (NEW-CONFIG).
+    pub fn set_json_indent(&mut self, width: u32) {
+        self.json_indent = width.clamp(MIN_JSON_INDENT, MAX_JSON_INDENT);
+    }
+
+    /// The smallest permitted JSON indent width (0).
+    #[must_use]
+    pub const fn min_json_indent() -> u32 {
+        MIN_JSON_INDENT
+    }
+
+    /// The largest permitted JSON indent width (16).
+    #[must_use]
+    pub const fn max_json_indent() -> u32 {
+        MAX_JSON_INDENT
+    }
 }
 
 /// Saved window position and size (logical pixels).
@@ -374,6 +524,11 @@ pub struct AppSettings {
     /// debounce and edit-count trigger. Defaults on absent / corrupt; clamped on
     /// load so autosave is never disabled (TR-026).
     pub autosave: AutosaveConfig,
+    /// RON⇄JSON conversion preferences (E010 NEW-CONFIG / FR-008): the output
+    /// format default (JSONC vs strict), JSON indent, and strict-mode comment
+    /// carrier. Defaults on absent / corrupt (JSONC + default indent); the indent
+    /// is clamped on load. The only on-disk artifact E010 adds.
+    pub conversion: ConversionSettings,
 }
 
 impl Default for AppSettings {
@@ -385,6 +540,7 @@ impl Default for AppSettings {
             formatting: FormattingConfig::default(),
             undo: UndoConfig::default(),
             autosave: AutosaveConfig::default(),
+            conversion: ConversionSettings::default(),
         }
     }
 }
@@ -430,6 +586,10 @@ impl AppSettings {
         settings.undo.coalesce_window_ms = settings.undo.effective_coalesce_window_ms();
         settings.autosave.idle_debounce_ms = settings.autosave.effective_idle_debounce_ms();
         settings.autosave.edit_count_trigger = settings.autosave.effective_edit_count_trigger();
+        // Enforce the E010 NEW-CONFIG clamp on load (data-model §ConversionSettings):
+        // a corrupt / out-of-range / hand-edited JSON indent is pulled back into the
+        // sane `0..=16` range so the effective conversion config is always usable.
+        settings.conversion.json_indent = settings.conversion.effective_json_indent();
         settings
     }
 
@@ -1067,6 +1227,107 @@ mod tests {
         );
         assert_eq!(rule.mode, Some(Mode::Bevy));
         assert_eq!(rule.expected_bevy_version, Some("0.16.0".to_string()));
+    }
+
+    // --- E010 NEW-CONFIG: ConversionSettings (FR-008) ----------------------
+
+    #[test]
+    fn conversion_settings_defaults() {
+        let c = ConversionSettings::default();
+        assert_eq!(c.default_format, JsonFormat::Jsonc);
+        assert!(c.default_format.is_jsonc());
+        assert_eq!(c.json_indent, 2);
+        assert_eq!(
+            c.strict_default_comment_carrier,
+            StrictCommentCarrier::Sidecar
+        );
+        // The default app settings embed the default conversion config — JSONC.
+        assert_eq!(
+            AppSettings::default().conversion,
+            ConversionSettings::default()
+        );
+    }
+
+    #[test]
+    fn conversion_settings_clamp_json_indent() {
+        let mut c = ConversionSettings::default();
+        // Zero is permitted (compact output) — it is in range, not clamped up.
+        c.set_json_indent(0);
+        assert_eq!(c.json_indent, ConversionSettings::min_json_indent());
+        assert_eq!(c.json_indent, 0);
+        // Absurdly large clamps down to the maximum.
+        c.set_json_indent(9999);
+        assert_eq!(c.json_indent, ConversionSettings::max_json_indent());
+        assert_eq!(c.json_indent, 16);
+        // A normal value is preserved.
+        c.set_json_indent(4);
+        assert_eq!(c.json_indent, 4);
+        assert_eq!(c.effective_json_indent(), 4);
+    }
+
+    #[test]
+    fn load_from_uses_conversion_defaults_when_absent() {
+        // An older settings file with no `conversion` block loads with the
+        // defaults (serde `default`) — JSONC + default indent, never a parse
+        // error (data-model §ConversionSettings, project-instructions §I).
+        let dir = std::env::temp_dir().join("ronin_settings_e010_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("absent.json");
+        std::fs::write(&path, br#"{"large_file_threshold": 1048576}"#).unwrap();
+        let loaded = AppSettings::load_from(&path);
+        assert_eq!(loaded.conversion, ConversionSettings::default());
+        assert_eq!(loaded.conversion.default_format, JsonFormat::Jsonc);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_from_clamps_absurd_json_indent() {
+        // A hand-edited file demanding an absurd indent is pulled into range on
+        // load — never an unusable conversion config (data-model §ConversionSettings).
+        let dir = std::env::temp_dir().join("ronin_settings_e010_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("indent.json");
+        std::fs::write(&path, br#"{"conversion": {"json_indent": 9999}}"#).unwrap();
+        let loaded = AppSettings::load_from(&path);
+        assert_eq!(
+            loaded.conversion.json_indent,
+            ConversionSettings::max_json_indent()
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_from_recovers_corrupt_conversion_block_to_defaults() {
+        // A wholly corrupt settings file (not valid JSON) recovers to defaults —
+        // JSONC + default indent — never a crash (data-model §ConversionSettings).
+        let dir = std::env::temp_dir().join("ronin_settings_e010_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("corrupt.json");
+        std::fs::write(&path, b"{ this is not valid json").unwrap();
+        let loaded = AppSettings::load_from(&path);
+        assert_eq!(loaded.conversion, ConversionSettings::default());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn conversion_settings_round_trip_through_save_and_load() {
+        let dir = std::env::temp_dir().join("ronin_settings_e010_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("roundtrip.json");
+        let mut s = AppSettings::default();
+        s.conversion.default_format = JsonFormat::StrictJson;
+        s.conversion.set_json_indent(4);
+        s.conversion.strict_default_comment_carrier = StrictCommentCarrier::PureNoComments;
+        s.save_to(&path).unwrap();
+        let loaded = AppSettings::load_from(&path);
+        assert_eq!(loaded.conversion, s.conversion);
+        assert_eq!(loaded.conversion.default_format, JsonFormat::StrictJson);
+        assert_eq!(loaded.conversion.json_indent, 4);
+        assert_eq!(
+            loaded.conversion.strict_default_comment_carrier,
+            StrictCommentCarrier::PureNoComments
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
