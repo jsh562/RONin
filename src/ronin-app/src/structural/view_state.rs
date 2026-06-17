@@ -508,6 +508,12 @@ pub struct ViewSelectionAndFocus {
     /// stale-marked rather than inconsistent (FR-015). A user-perceivable marker,
     /// not a silent flag.
     stale: bool,
+    /// The table-view navigator's selected section, keyed to its [`StructuralPath`]
+    /// (E012). Transient/byte-free: it is re-resolved across reparse by path
+    /// identity (the navigator defaults to the largest section when it no longer
+    /// matches any scanned section). `None` until the user picks one (the navigator
+    /// then defaults to the largest).
+    selected_table_section: Option<StructuralPath>,
 }
 
 /// The originating table cell a tree/form drill-in returns to (FR-006).
@@ -619,6 +625,18 @@ impl ViewSelectionAndFocus {
     /// drilled-in node vanished) — FR-006.
     pub fn clear_drill_in_return(&mut self) {
         self.drill_in_return = None;
+    }
+
+    /// The table-view navigator's selected section path, if one is set (E012).
+    #[must_use]
+    pub fn selected_table_section(&self) -> Option<&StructuralPath> {
+        self.selected_table_section.as_ref()
+    }
+
+    /// Set (or clear) the table-view navigator's selected section (E012). Byte-free
+    /// (FR-020): selecting a section in the navigator changes zero document bytes.
+    pub fn set_selected_table_section(&mut self, path: Option<StructuralPath>) {
+        self.selected_table_section = path;
     }
 
     /// `true` when the projection is stale (a reparse is in flight) (FR-015).

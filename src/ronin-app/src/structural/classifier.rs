@@ -145,24 +145,19 @@ impl Verdict {
     }
 }
 
-/// The element-shape signature the classifier compares across a list (AD-002).
-///
-/// Two records are the same shape when they share a record `name` (struct name, or
-/// the empty string for an anonymous struct; the enum-variant name); the field set
-/// is reconciled separately as the union (absent = blank, FR-010).
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum RecordShape {
-    /// A struct / struct-like enum-variant record with `name` (empty for anonymous).
-    Record { name: String },
-}
-
 /// A scalar value's broad type class, used to detect a same-named field appearing
-/// with conflicting value types across elements (FR-010 type-conflict rule).
+/// with conflicting value types across elements (FR-010 type-conflict rule) and to
+/// drive the table view's per-cell / per-column type indicators (E013 — table type
+/// glyphs/colors mirroring the tree view's per-kind icons).
 ///
 /// Nested collections are not assigned a scalar class — they are tracked separately
 /// (a nested cell is a drill-in, never a type-conflict blocker, FR-006/FR-010).
+///
+/// `pub(crate)` so the table view can carry the classifier's verdict per scalar cell
+/// (`Cell::scalar`) and render a consistent type indicator; `Copy` so it threads
+/// through projection + render cheaply.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ScalarClass {
+pub(crate) enum ScalarClass {
     /// An integer literal.
     Integer,
     /// A floating-point literal.
@@ -201,7 +196,7 @@ pub fn classify(list_node: &SyntaxNode) -> Verdict {
     }
 
     // Pass 1 (short-circuiting): every element must be a record of the SAME name.
-    let mut shape: Option<RecordShape> = None;
+    let mut shape: Option<String> = None;
     let mut records: Vec<Vec<(String, ast::Value)>> = Vec::with_capacity(elements.len());
     for elem in &elements {
         let Some(this_shape) = record_shape(elem) else {
@@ -288,17 +283,17 @@ pub fn classify(list_node: &SyntaxNode) -> Verdict {
     Verdict::eligible(columns)
 }
 
-/// The record shape of an element, or `None` when it is not a record (FR-011).
-fn record_shape(elem: &ast::Value) -> Option<RecordShape> {
+/// The record **name** of an element (empty string for an anonymous struct), or
+/// `None` when it is not a record (struct / struct-like enum variant) — FR-011.
+///
+/// `pub(crate)` so the section scanner can reuse the exact same record-detection
+/// rule when classifying a [`SectionShape::RecordMap`](super::sections::SectionShape::RecordMap).
+pub(crate) fn record_shape(elem: &ast::Value) -> Option<String> {
     match elem {
         // A struct: its name (empty for an anonymous `( .. )` struct).
-        ast::Value::Struct(s) => Some(RecordShape::Record {
-            name: s.name_text().unwrap_or_default(),
-        }),
+        ast::Value::Struct(s) => Some(s.name_text().unwrap_or_default()),
         // A struct-like enum variant: its variant name.
-        ast::Value::EnumVariant(v) => Some(RecordShape::Record {
-            name: v.name_text().unwrap_or_default(),
-        }),
+        ast::Value::EnumVariant(v) => Some(v.name_text().unwrap_or_default()),
         // Anything else (scalar, tuple, list, map, unit, error) is not a record.
         _ => None,
     }
@@ -307,8 +302,9 @@ fn record_shape(elem: &ast::Value) -> Option<RecordShape> {
 /// The `(field_name, value)` pairs of a record element, in source order.
 ///
 /// Mirrors [`TableModel::derive`](super::table::TableModel::derive)'s record reader
-/// so the classifier's column union matches the table's exactly.
-fn record_fields(elem: &ast::Value) -> Vec<(String, ast::Value)> {
+/// so the classifier's column union matches the table's exactly. `pub(crate)` so the
+/// section scanner can reuse it for [`SectionShape::RecordMap`](super::sections::SectionShape::RecordMap).
+pub(crate) fn record_fields(elem: &ast::Value) -> Vec<(String, ast::Value)> {
     match elem {
         ast::Value::Struct(s) => s
             .fields()
@@ -341,8 +337,11 @@ fn is_nested(value: &ast::Value) -> bool {
 }
 
 /// The broad scalar class of a non-nested value, for the type-conflict rule
-/// (FR-010), or `None` when the value is nested (which is tracked separately).
-fn scalar_class_of(value: &ast::Value) -> Option<ScalarClass> {
+/// (FR-010) and the table view's per-cell type indicator, or `None` when the value
+/// is nested (which is tracked separately).
+///
+/// `pub(crate)` so [`Cell`](super::table::Cell) can carry it per scalar cell.
+pub(crate) fn scalar_class_of(value: &ast::Value) -> Option<ScalarClass> {
     match value {
         ast::Value::Unit(_) => Some(ScalarClass::Unit),
         ast::Value::Literal(lit) => Some(match lit.token_kind() {

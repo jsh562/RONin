@@ -55,6 +55,7 @@ use crate::diagnostics_map::{map_diagnostic, map_scene_diagnostic, DiagnosticVie
 use crate::editor_view::build_highlight_model;
 use crate::reparse::{BoundScene, BoundType, BoundValidation, ParseResult, ReparseWorker};
 use crate::structural::projection::{derive_projection, DerivedProjection};
+use crate::structural::sections::{scan_table_sections, SectionShape, TableSection};
 use crate::structural::table::TableModel;
 use crate::structural::tree::TreeFormModel;
 use crate::structural::view_state::{StructuralPath, ViewSelectionAndFocus};
@@ -292,11 +293,23 @@ struct StructuralModelCache {
     generation: Option<u64>,
     /// The cached tree/form model, derived on first access for this generation.
     tree: Option<TreeFormModel>,
-    /// Cached table models per requested section. `None` in the value position means
-    /// "derived, but the section is not a list" (a negative cache, so a non-list
-    /// section is not re-derived every frame either). Keyed by [`StructuralPath`]
-    /// since different sections project different tables.
-    tables: Vec<(StructuralPath, Option<TableModel>)>,
+    /// Cached table models per requested `(section, shape)`. `None` in the value
+    /// position means "derived, but the section did not resolve to the expected kind"
+    /// (a negative cache, so a non-resolving section is not re-derived every frame
+    /// either). Keyed by [`StructuralPath`] **and** [`SectionShape`] since a single
+    /// list path can be projected as a record list or a tuple list and they produce
+    /// different grids.
+    tables: Vec<(StructuralPath, SectionShape, Option<TableModel>)>,
+    /// Cached **path-projected** table models (E013 — "open any nested collection as a
+    /// table"), keyed by the drilled-into node's [`StructuralPath`]. `None` in the
+    /// value position means "derived, but the node is not a List/Map" (so a
+    /// non-openable path is not re-derived every frame either). Separate from
+    /// [`tables`](Self::tables) (which is keyed by `(section, shape)` for the scanner's
+    /// strict labeled shapes) since the projection rule differs.
+    tables_any: Vec<(StructuralPath, Option<TableModel>)>,
+    /// The whole-document table-section scan (E012 navigator), derived once per
+    /// landed parse generation on first access. `None` until first scanned.
+    sections: Option<Vec<TableSection>>,
 }
 
 impl StructuralModelCache {
@@ -308,6 +321,8 @@ impl StructuralModelCache {
             self.generation = Some(generation);
             self.tree = None;
             self.tables.clear();
+            self.tables_any.clear();
+            self.sections = None;
         }
     }
 }
@@ -350,6 +365,17 @@ pub struct EditorDocument {
     /// For untitled documents, the workspace-assigned sequence number used to
     /// render a stable `Untitled-N` title. `None` for on-disk documents.
     pub untitled_seq: Option<u32>,
+    /// A display-only tab title that overrides the path/`Untitled-N` default,
+    /// when set.
+    ///
+    /// Used for path-less buffers that should still show a meaningful tab title —
+    /// e.g. a bundled showcase sample opened from embedded text: it carries the
+    /// sample's file name here for display while keeping [`path`](Self::path)
+    /// `None`, so autosave/crash-recovery never writes a `.ronin-recovery` sidecar
+    /// for it (a sidecar is derived from `path`; see
+    /// [`recovery_snapshot`](Self::recovery_snapshot)). Purely cosmetic; never
+    /// persisted and never used as a save target.
+    pub display_title: Option<String>,
     /// Monotonic edit generation: bumped on every buffer mutation (FR-006). A
     /// landed [`ParseResult`] installs only when its generation equals this, so
     /// stale results are discarded.
@@ -562,6 +588,7 @@ impl EditorDocument {
             highlight: None,
             diagnostics: Vec::new(),
             untitled_seq: None,
+            display_title: None,
             edit_generation: 0,
             last_requested_generation: 0,
             pending_cursor_jump: None,
@@ -615,6 +642,7 @@ impl EditorDocument {
             highlight: None,
             diagnostics: Vec::new(),
             untitled_seq: Some(seq),
+            display_title: None,
             edit_generation: 0,
             last_requested_generation: 0,
             pending_cursor_jump: None,
@@ -671,6 +699,7 @@ impl EditorDocument {
             highlight: None,
             diagnostics: Vec::new(),
             untitled_seq,
+            display_title: None,
             edit_generation: 0,
             last_requested_generation: 0,
             pending_cursor_jump: None,
@@ -987,6 +1016,12 @@ impl EditorDocument {
                 return name.to_string();
             }
         }
+        // A path-less buffer may carry a display-only title (e.g. a bundled
+        // showcase sample) so the tab shows the sample name without a real on-disk
+        // path (which would trigger autosave-sidecar writes).
+        if let Some(title) = &self.display_title {
+            return title.clone();
+        }
         match self.untitled_seq {
             Some(n) => format!("Untitled-{n}"),
             // A document with neither a path nor a sequence number is degenerate;
@@ -1052,7 +1087,13 @@ impl EditorDocument {
         } else {
             self.bound_validation()
         };
-        worker.request(self.edit_generation, self.buffer.clone(), bound);
+        // Stamp this document's process-unique id so the shared worker routes the
+        // result back to this document only. The worker serves every open tab; its
+        // result channel is a single FIFO and `generation` is per-document, so two
+        // tabs at the same generation (e.g. two freshly opened files, both at gen 1)
+        // would otherwise be indistinguishable and one tab could install the other's
+        // result — leaving the originating tab blank. `poll_parse` filters on this id.
+        worker.request(self.id, self.edit_generation, self.buffer.clone(), bound);
     }
 
     /// Select the single [`BoundValidation`] for this document under its active
@@ -1116,36 +1157,71 @@ impl EditorDocument {
     pub fn poll_parse(&mut self, worker: &ReparseWorker) -> bool {
         let mut installed = false;
         // Drain everything queued this frame; keep only the latest *current* one.
+        // Used by single-document-per-worker callers (tests, and the prior per-tab
+        // pump). The shared multi-tab App instead routes results centrally via
+        // [`App::dispatch_parse_results`] → [`install_parse`](Self::install_parse) so
+        // one tab never consumes another tab's result; see that method.
         while let Some(result) = worker.poll() {
-            // Stale: an edit happened after this parse was requested. Discard it
-            // but keep the last-good parse/diagnostics/highlight intact.
-            if result.generation != self.edit_generation {
+            // Route by document identity first: a result tagged for a *different*
+            // document is not ours to install (untagged `0` results — from the
+            // standalone constructors — are accepted as a single-doc convenience).
+            if result.doc_id != 0 && result.doc_id != self.id {
                 continue;
             }
-            let generation = result.generation;
-            self.diagnostics = merge_type_diagnostics(&result, &self.buffer);
-            self.highlight = Some(build_highlight_model(&result, generation));
-            // E008 (AD-003/FR-015/FR-026): re-derive the shared structural
-            // projection ONCE per landed current reparse, off the per-frame path.
-            // This is a single read pass over the landed CST (zero bytes, FR-020).
-            self.projection = Some(derive_projection(&result.cst));
-            // E008 performance: invalidate the per-parse structural model cache so the
-            // tree/table surfaces re-derive against the fresh CST on next access (and
-            // only then), instead of re-deriving every render frame. Keying it to the
-            // new generation drops the prior generation's cached models.
-            self.structural_cache.sync_generation(generation);
-            // E008 (T013/FR-016/FR-027): re-resolve edit focus + section overrides
-            // against the fresh CST by structural-path identity. If the focused
-            // node still resolves, focus is kept; if it vanished, edit mode is
-            // dropped gracefully (never edit the wrong node). Cost is proportional
-            // to path depth, not row/node count.
-            self.view_state.reresolve(&result.cst.root());
-            // The current projection now matches the landed CST — clear stale.
-            self.view_state.clear_stale();
-            self.parse = Some(result);
-            installed = true;
+            if self.install_parse(result) {
+                installed = true;
+            }
         }
         installed
+    }
+
+    /// Install a single off-frame [`ParseResult`] into this document if it is current,
+    /// returning whether it was installed (the routing-aware core of
+    /// [`poll_parse`](Self::poll_parse)).
+    ///
+    /// The caller is responsible for routing: this MUST only be handed a result whose
+    /// [`doc_id`](crate::reparse::ParseResult::doc_id) belongs to this document (or the
+    /// untagged `0` sentinel). It then applies the staleness gate — a result whose
+    /// `generation` no longer matches the live [`edit_generation`](Self::edit_generation)
+    /// is discarded (an edit happened after it was requested), keeping the last-good
+    /// parse/diagnostics/highlight intact. On a current result it (1) becomes the
+    /// installed [`parse`](Self::parse), (2) rebuilds [`diagnostics`](Self::diagnostics)
+    /// from both the structural and type sets, (3) recomputes the
+    /// [`highlight`](Self::highlight), (4) re-derives the structural projection and
+    /// invalidates the per-parse model cache, and (5) re-resolves view focus by path
+    /// identity.
+    ///
+    /// Splitting this out of the worker-draining loop lets the multi-tab App drain the
+    /// shared worker **once** and dispatch each result to its owning document by id
+    /// (see [`App::dispatch_parse_results`](crate::app::App::dispatch_parse_results)),
+    /// so one tab can never install another tab's result — the cross-tab contamination
+    /// that left a freshly switched-to tab blank.
+    pub fn install_parse(&mut self, result: crate::reparse::ParseResult) -> bool {
+        // Stale: an edit happened after this parse was requested. Discard it but keep
+        // the last-good parse/diagnostics/highlight intact.
+        if result.generation != self.edit_generation {
+            return false;
+        }
+        let generation = result.generation;
+        self.diagnostics = merge_type_diagnostics(&result, &self.buffer);
+        self.highlight = Some(build_highlight_model(&result, generation));
+        // E008 (AD-003/FR-015/FR-026): re-derive the shared structural projection
+        // ONCE per landed current reparse, off the per-frame path. A single read pass
+        // over the landed CST (zero bytes, FR-020).
+        self.projection = Some(derive_projection(&result.cst));
+        // E008 performance: invalidate the per-parse structural model cache so the
+        // tree/table surfaces re-derive against the fresh CST on next access (and only
+        // then), instead of re-deriving every render frame. Keying it to the new
+        // generation drops the prior generation's cached models.
+        self.structural_cache.sync_generation(generation);
+        // E008 (T013/FR-016/FR-027): re-resolve edit focus + section overrides against
+        // the fresh CST by structural-path identity. If the focused node still
+        // resolves, focus is kept; if it vanished, edit mode is dropped gracefully.
+        self.view_state.reresolve(&result.cst.root());
+        // The current projection now matches the landed CST — clear stale.
+        self.view_state.clear_stale();
+        self.parse = Some(result);
+        true
     }
 
     /// The number of Unicode scalar values (characters) in the buffer.
@@ -1431,18 +1507,23 @@ impl EditorDocument {
         self.structural_cache.tree.as_ref()
     }
 
-    /// The cached table model for `section` within the landed parse, deriving it once
-    /// per parse generation on first access (E008 performance — FR-005/FR-026).
+    /// The cached table model for `(section, shape)` within the landed parse, deriving
+    /// it once per parse generation on first access (E008/E012 — FR-005/FR-026).
     ///
     /// Returns `None` when no parse has landed, or when `section` does not resolve to
-    /// a list (a negative result is cached too, so a non-list section is not
-    /// re-derived every frame either). The model is [`TableModel::derive`]d the
-    /// **first** time it is requested for a given `(generation, section)`, then reused
-    /// on every subsequent frame within that generation — instead of re-deriving from
-    /// the CST every render frame. The cache is invalidated when a newer parse lands.
-    /// Deriving caches the **model**, never row widgets, so the table virtualization is
-    /// unaffected: only viewport-visible rows are still painted. Pure read (FR-020).
-    pub fn cached_table_model(&mut self, section: &StructuralPath) -> Option<&TableModel> {
+    /// the shape's expected kind (a negative result is cached too, so a non-resolving
+    /// section is not re-derived every frame either). The model is
+    /// [`TableModel::derive_section`]d the **first** time it is requested for a given
+    /// `(generation, section, shape)`, then reused on every subsequent frame within
+    /// that generation — instead of re-deriving from the CST every render frame. The
+    /// cache is invalidated when a newer parse lands. Deriving caches the **model**,
+    /// never row widgets, so the table virtualization is unaffected: only
+    /// viewport-visible rows are still painted. Pure read (FR-020).
+    pub fn cached_table_model(
+        &mut self,
+        section: &StructuralPath,
+        shape: SectionShape,
+    ) -> Option<&TableModel> {
         let parse = self.parse.as_ref()?;
         let generation = parse.generation;
         self.structural_cache.sync_generation(generation);
@@ -1450,16 +1531,74 @@ impl EditorDocument {
             .structural_cache
             .tables
             .iter()
-            .any(|(path, _)| path == section)
+            .any(|(path, s, _)| path == section && *s == shape)
         {
-            let model = TableModel::derive(&parse.cst, section, &self.diagnostics);
-            self.structural_cache.tables.push((section.clone(), model));
+            let model = TableModel::derive_section(&parse.cst, section, shape, &self.diagnostics);
+            self.structural_cache
+                .tables
+                .push((section.clone(), shape, model));
         }
         self.structural_cache
             .tables
             .iter()
-            .find(|(path, _)| path == section)
+            .find(|(path, s, _)| path == section && *s == shape)
+            .and_then(|(_, _, model)| model.as_ref())
+    }
+
+    /// The cached **path-projected** table model for the node at `path` within the
+    /// landed parse, deriving it once per parse generation on first access (E013 —
+    /// "open any nested collection as a table").
+    ///
+    /// Returns `None` when no parse has landed, or when `path` does not resolve to a
+    /// List/Map (a negative result is cached too, so a non-openable path is not
+    /// re-derived every frame either). The model is [`TableModel::derive_any`]'d the
+    /// **first** time it is requested for a given `(generation, path)`, then reused on
+    /// every subsequent frame within that generation. The cache is invalidated when a
+    /// newer parse lands. A pure read over the CST — zero bytes (FR-020).
+    pub fn cached_table_model_any(&mut self, path: &StructuralPath) -> Option<&TableModel> {
+        let parse = self.parse.as_ref()?;
+        let generation = parse.generation;
+        self.structural_cache.sync_generation(generation);
+        if !self
+            .structural_cache
+            .tables_any
+            .iter()
+            .any(|(p, _)| p == path)
+        {
+            let model = TableModel::derive_any(&parse.cst, path, &self.diagnostics);
+            self.structural_cache
+                .tables_any
+                .push((path.clone(), model));
+        }
+        self.structural_cache
+            .tables_any
+            .iter()
+            .find(|(p, _)| p == path)
             .and_then(|(_, model)| model.as_ref())
+    }
+
+    /// The whole-document table-section scan for the landed parse, derived once per
+    /// parse generation on first access (E012 — Table view navigator).
+    ///
+    /// Returns `&[]` when no parse has landed. The scan is
+    /// [`scan_table_sections`]ed against the landed CST the **first** time it is
+    /// requested for a given parse generation, then reused on every subsequent frame
+    /// within that generation. The cache is invalidated when a newer parse lands.
+    /// A pure read over the CST — zero bytes (FR-020).
+    pub fn cached_table_sections(&mut self) -> &[TableSection] {
+        let Some(parse) = self.parse.as_ref() else {
+            return &[];
+        };
+        let generation = parse.generation;
+        self.structural_cache.sync_generation(generation);
+        if self.structural_cache.sections.is_none() {
+            let sections = scan_table_sections(&parse.cst);
+            self.structural_cache.sections = Some(sections);
+        }
+        self.structural_cache
+            .sections
+            .as_deref()
+            .unwrap_or(&[])
     }
 
     /// `true` when the structural model cache currently holds a derived tree model for
@@ -1473,10 +1612,10 @@ impl EditorDocument {
     }
 
     /// `true` when the structural model cache currently holds a derived (or negatively
-    /// cached) table model for `section` at the live parse generation (test seam for
-    /// the per-parse cache regression guard).
+    /// cached) table model for `(section, shape)` at the live parse generation (test
+    /// seam for the per-parse cache regression guard).
     #[must_use]
-    pub fn has_cached_table_model(&self, section: &StructuralPath) -> bool {
+    pub fn has_cached_table_model(&self, section: &StructuralPath, shape: SectionShape) -> bool {
         self.parse
             .as_ref()
             .is_some_and(|p| self.structural_cache.generation == Some(p.generation))
@@ -1484,7 +1623,7 @@ impl EditorDocument {
                 .structural_cache
                 .tables
                 .iter()
-                .any(|(path, _)| path == section)
+                .any(|(path, s, _)| path == section && *s == shape)
     }
 
     /// The last structural-op inline error message, if one is showing (E008 —

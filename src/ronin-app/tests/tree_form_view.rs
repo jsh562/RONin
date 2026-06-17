@@ -865,3 +865,119 @@ fn expand_all_then_collapse_all_toggle_every_collection_nodes_stored_state() {
         );
     }
 }
+
+// =============================================================================
+// E013 — Part B: tree readability (per-kind icon + child count; large fixture)
+// =============================================================================
+
+#[test]
+fn tree_headers_include_per_kind_icon_and_child_count() {
+    use ronin_app::structural::TypeIndicator;
+
+    let worker = ReparseWorker::new();
+    // A root struct with two fields → its collapsible header shows the struct icon
+    // and a `(2)` child count.
+    let mut doc = doc_at("Config(name: \"app\", retries: 3)", &worker);
+
+    let mut harness = Harness::new_ui(move |ui| {
+        render_tree_view(ui, &mut doc, &worker);
+    });
+    harness.run();
+
+    // The per-kind struct icon (the shared `TypeIndicator` glyph) is painted in the
+    // root collapsible header.
+    let struct_icon = TypeIndicator::Struct.glyph();
+    assert!(
+        harness
+            .query_all_by_label_contains(struct_icon)
+            .next()
+            .is_some(),
+        "the tree header must paint the per-kind struct icon `{struct_icon}`"
+    );
+    // The collapsed-collection child count `(2)` is painted (the struct has 2 fields).
+    assert!(
+        harness.query_all_by_label_contains("(2)").next().is_some(),
+        "the collection header must paint a `(N)` child count"
+    );
+    // The kind word is still present (icon ADDS to, does not replace, the header).
+    assert!(
+        harness
+            .query_all_by_label_contains("[struct]")
+            .next()
+            .is_some(),
+        "the header still labels the kind word"
+    );
+}
+
+#[test]
+fn kind_icon_is_total_and_distinct_per_collection_kind() {
+    use ronin_app::structural::tree::TreeNodeKind;
+    use ronin_app::structural::TypeIndicator;
+    // Every kind maps (via the shared `TypeIndicator`) to a non-empty icon; the
+    // collection kinds use distinct icons so the user can tell a struct from a
+    // list/map/tuple/enum at a glance.
+    let kinds = [
+        TreeNodeKind::Struct,
+        TreeNodeKind::Map,
+        TreeNodeKind::List,
+        TreeNodeKind::Tuple,
+        TreeNodeKind::EnumVariant,
+        TreeNodeKind::Leaf,
+        TreeNodeKind::Error,
+    ];
+    let mut icons = Vec::new();
+    for k in kinds {
+        let icon = ronin_app::structural::indicators::from_tree_kind(k).glyph();
+        assert!(!icon.is_empty(), "{k:?} must have a non-empty icon");
+        icons.push(icon);
+    }
+    // The five collection kinds (struct/map/list/tuple/enum) are mutually distinct.
+    let distinct: std::collections::HashSet<_> = icons[..5].iter().collect();
+    assert_eq!(distinct.len(), 5, "struct/map/list/tuple/enum icons are distinct");
+
+    // The direct indicator variants and the kind→indicator conversion agree (the
+    // SAME glyph regardless of entry point — cross-view consistency, E014).
+    assert_eq!(
+        ronin_app::structural::indicators::from_tree_kind(TreeNodeKind::List).glyph(),
+        TypeIndicator::List.glyph()
+    );
+    assert_eq!(
+        ronin_app::structural::indicators::from_tree_kind(TreeNodeKind::Tuple).glyph(),
+        TypeIndicator::Tuple.glyph()
+    );
+}
+
+#[test]
+fn large_fixture_tree_renders_within_responsiveness_guard() {
+    // Render the large_ships fixture through the tree view (with all the Part-B
+    // readability work: per-kind icons, child counts, monospace previews, indent
+    // guides, separators, scroll area) and confirm it renders without panicking,
+    // well within a generous responsiveness budget — no regression of structural_perf.
+    let worker = ReparseWorker::new();
+    let path = format!(
+        "{}/tests/fixtures/large_ships.ron",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+    assert!(src.len() > 35_000, "fixture too small to guard ({} bytes)", src.len());
+
+    let mut doc = doc_at(&src, &worker);
+
+    let t0 = Instant::now();
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(900.0, 600.0))
+        .build_ui(move |ui| {
+            render_tree_view(ui, &mut doc, &worker);
+        });
+    harness.run();
+    let render_ms = t0.elapsed().as_secs_f64() * 1000.0;
+    eprintln!("large fixture tree render = {render_ms:.3} ms");
+
+    // A generous guard (the structural_perf suite owns the derive-cost gates; this is a
+    // no-panic + no-gross-regression render guard with the readability work present).
+    const BUDGET_MS: f64 = 2000.0;
+    assert!(
+        render_ms < BUDGET_MS,
+        "large fixture tree render took {render_ms:.3} ms (budget {BUDGET_MS} ms)"
+    );
+}

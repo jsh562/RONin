@@ -31,6 +31,7 @@ use ron_core::Diagnostic;
 use ronin_app::diagnostics_map::{map_diagnostic, DiagnosticView};
 use ronin_app::document::EditorDocument;
 use ronin_app::reparse::ReparseWorker;
+use ronin_app::structural::sections::SectionShape;
 use ronin_app::structural::tree::{TreeFormModel, TreeNode};
 use ronin_app::structural::view_state::StructuralPath;
 
@@ -153,7 +154,7 @@ fn large_document_structural_derive_stays_responsive_with_diagnostics() {
     let section = StructuralPath::root();
     let t1 = Instant::now();
     let table_rows = doc
-        .cached_table_model(&section)
+        .cached_table_model(&section, SectionShape::RecordList)
         .map(|m| m.row_count())
         .expect("the top-level uniform list derives a table model");
     let table_ms = t1.elapsed().as_secs_f64() * 1000.0;
@@ -188,18 +189,18 @@ fn structural_models_are_cached_per_parse_generation() {
 
     // Nothing is cached until the first access (lazy realization, FR-026).
     assert!(!doc.has_cached_tree_model());
-    assert!(!doc.has_cached_table_model(&section));
+    assert!(!doc.has_cached_table_model(&section, SectionShape::RecordList));
 
     // First access derives + caches both models.
     let t_first = Instant::now();
     let _ = doc.cached_tree_model().expect("tree model derives");
     let _ = doc
-        .cached_table_model(&section)
+        .cached_table_model(&section, SectionShape::RecordList)
         .expect("table model derives");
     let first_ms = t_first.elapsed().as_secs_f64() * 1000.0;
     assert!(doc.has_cached_tree_model(), "tree model cached after access");
     assert!(
-        doc.has_cached_table_model(&section),
+        doc.has_cached_table_model(&section, SectionShape::RecordList),
         "table model cached after access"
     );
 
@@ -211,7 +212,7 @@ fn structural_models_are_cached_per_parse_generation() {
     for _ in 0..REPEATS {
         acc += doc.cached_tree_model().map(|m| m.roots.len()).unwrap_or(0);
         acc += doc
-            .cached_table_model(&section)
+            .cached_table_model(&section, SectionShape::RecordList)
             .map(|m| m.row_count())
             .unwrap_or(0);
     }
@@ -249,7 +250,7 @@ fn structural_models_are_cached_per_parse_generation() {
         "a newer parse must invalidate the cached tree model"
     );
     assert!(
-        !doc.has_cached_table_model(&section),
+        !doc.has_cached_table_model(&section, SectionShape::RecordList),
         "a newer parse must invalidate the cached table model"
     );
 }

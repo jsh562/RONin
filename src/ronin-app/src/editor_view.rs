@@ -463,58 +463,73 @@ pub fn editor_view(ui: &mut Ui, doc: &mut EditorDocument, oversize: bool) -> boo
     let pending_jump = doc.take_cursor_jump();
 
     let mut changed = false;
-    ui.horizontal_top(|ui| {
-        render_gutter(ui, line_count, gutter_digits);
+    // Wrap the gutter + editor in a vertical scroll area so long files scroll
+    // instead of clipping (a multiline `TextEdit` auto-grows to full content
+    // height). The gutter and editor live in the SAME `horizontal_top` inside the
+    // scroll area so line numbers stay aligned as they scroll together. The
+    // binding indicator and the oversize label stay ABOVE (outside) the scroll
+    // area. `desired_width(f32::INFINITY)` keeps lines wrapping to width, so only
+    // vertical scrolling is needed.
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.horizontal_top(|ui| {
+                render_gutter(ui, line_count, gutter_digits);
 
-        let output = if oversize {
-            // Plain monospace editor, no layouter (FR-017).
-            egui::TextEdit::multiline(&mut doc.buffer)
-                .font(egui::TextStyle::Monospace)
-                .code_editor()
-                .desired_width(f32::INFINITY)
-                .desired_rows(20)
-                .show(ui)
-        } else {
-            let mut layouter = highlight_layouter(&spans, EDITOR_FONT_SIZE, dark_mode);
-            egui::TextEdit::multiline(&mut doc.buffer)
-                .font(egui::TextStyle::Monospace)
-                .code_editor()
-                .desired_width(f32::INFINITY)
-                .desired_rows(20)
-                .layouter(&mut layouter)
-                .show(ui)
-        };
+                let output = if oversize {
+                    // Plain monospace editor, no layouter (FR-017).
+                    egui::TextEdit::multiline(&mut doc.buffer)
+                        .font(egui::TextStyle::Monospace)
+                        .code_editor()
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(20)
+                        .show(ui)
+                } else {
+                    let mut layouter = highlight_layouter(&spans, EDITOR_FONT_SIZE, dark_mode);
+                    egui::TextEdit::multiline(&mut doc.buffer)
+                        .font(egui::TextStyle::Monospace)
+                        .code_editor()
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(20)
+                        .layouter(&mut layouter)
+                        .show(ui)
+                };
 
-        if output.response.response.changed() {
-            changed = true;
-        }
+                if output.response.response.changed() {
+                    changed = true;
+                }
 
-        // Apply a queued caret jump from the Problems panel (FR-009): set the
-        // TextEdit cursor to the diagnostic's start and scroll it into view.
-        if let Some(offset) = pending_jump {
-            apply_cursor_jump(ui, &output, offset);
-        }
+                // Apply a queued caret jump from the Problems panel (FR-009): set
+                // the TextEdit cursor to the diagnostic's start and scroll it into
+                // view (within this ScrollArea).
+                if let Some(offset) = pending_jump {
+                    apply_cursor_jump(ui, &output, offset);
+                }
 
-        // Inline diagnostic squiggles under each diagnostic char-range (FR-008).
-        // Suppressed already above when oversize (empty `diagnostics`).
-        if !diagnostics.is_empty() {
-            draw_squiggles(ui, &output.galley, output.galley_pos, &diagnostics);
-        }
+                // Inline diagnostic squiggles under each diagnostic char-range
+                // (FR-008). Suppressed already above when oversize (empty
+                // `diagnostics`).
+                if !diagnostics.is_empty() {
+                    draw_squiggles(ui, &output.galley, output.galley_pos, &diagnostics);
+                }
 
-        // Snippet tab-stop navigation (E005 Wave 4, FR-016). Runs BEFORE the
-        // completion popup so an active snippet's `Tab`/`Shift+Tab` drive its stops
-        // rather than the completion accept. A buffer edit drops the session.
-        snippet_navigation(ui, doc, &output);
+                // Snippet tab-stop navigation (E005 Wave 4, FR-016). Runs BEFORE
+                // the completion popup so an active snippet's `Tab`/`Shift+Tab`
+                // drive its stops rather than the completion accept. A buffer edit
+                // drops the session.
+                snippet_navigation(ui, doc, &output);
 
-        // Structural autocomplete popup over the editor (E005 Wave 3, FR-022).
-        // Suppressed on oversize files (the highlight/intelligence layer is off).
-        // Suppressed while a snippet session is active so `Tab` is unambiguous.
-        if completion_enabled(oversize, doc.snippet_session.is_some())
-            && completion_popup(ui, doc, &output)
-        {
-            changed = true;
-        }
-    });
+                // Structural autocomplete popup over the editor (E005 Wave 3,
+                // FR-022). Suppressed on oversize files (the highlight/intelligence
+                // layer is off). Suppressed while a snippet session is active so
+                // `Tab` is unambiguous.
+                if completion_enabled(oversize, doc.snippet_session.is_some())
+                    && completion_popup(ui, doc, &output)
+                {
+                    changed = true;
+                }
+            });
+        });
 
     if changed {
         doc.on_edit();

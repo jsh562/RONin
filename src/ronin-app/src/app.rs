@@ -75,6 +75,47 @@ use ron_core::{FormatResult, SyntaxKind, SyntaxNode};
 /// How long an informational (auto-dismiss) notice stays on screen.
 const INFO_NOTICE_TTL: Duration = Duration::from_secs(4);
 
+/// The bundled showcase samples surfaced under **File ▸ Open Sample ▸** (E015).
+///
+/// Each entry is `(file_name, embedded_text)`: the text is shipped in the binary
+/// via [`include_str!`] (path relative to this file: `../../../samples/<name>` —
+/// `app.rs` is `src/ronin-app/src/`, so three `..` reach the repo-root `samples/`),
+/// so a sample loads one-click in ANY working directory. The `file_name` becomes
+/// the opened document's title and (for `.scn.ron`) drives extension-based Bevy
+/// mode auto-detection. Authored + self-checked by `tests/showcase_samples.rs`.
+const SHOWCASE_SAMPLES: &[(&str, &str)] = &[
+    ("sample.ron", include_str!("../../../samples/sample.ron")),
+    ("ships.ron", include_str!("../../../samples/ships.ron")),
+    (
+        "showcase_tree.ron",
+        include_str!("../../../samples/showcase_tree.ron"),
+    ),
+    (
+        "showcase_tables.ron",
+        include_str!("../../../samples/showcase_tables.ron"),
+    ),
+    (
+        "showcase_fallbacks.ron",
+        include_str!("../../../samples/showcase_fallbacks.ron"),
+    ),
+    (
+        "showcase_interop.ron",
+        include_str!("../../../samples/showcase_interop.ron"),
+    ),
+    (
+        "showcase_highlight.ron",
+        include_str!("../../../samples/showcase_highlight.ron"),
+    ),
+    (
+        "showcase_bevy.scn.ron",
+        include_str!("../../../samples/showcase_bevy.scn.ron"),
+    ),
+    (
+        "showcase_kitchen_sink.ron",
+        include_str!("../../../samples/showcase_kitchen_sink.ron"),
+    ),
+];
+
 /// The severity of a user-facing [`Notice`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NoticeKind {
@@ -598,6 +639,47 @@ pub fn render_tab_strip(ui: &mut egui::Ui, workspace: &EditorWorkspace) -> TabBa
     });
 
     actions
+}
+
+/// Render the always-visible type-indicator **legend strip** (E015).
+///
+/// A compact, glyph-only key for the shared [`TypeIndicator`](crate::structural::TypeIndicator)
+/// system: each concept's canonical glyph at its theme-aware color (reusing
+/// [`TypeIndicator::rich`](crate::structural::TypeIndicator::rich), so the legend uses
+/// the SAME glyphs/colors the tree + table paint), with its full name on hover. It is
+/// meant to be called inside a right-to-left layout on the existing view-switcher row
+/// so it costs **zero** extra vertical space and right-aligns/clips gracefully when the
+/// row is narrow (it never force-wraps into a new row).
+///
+/// In a right-to-left layout widgets are placed from the right edge leftward, so the
+/// groups are emitted in reverse — status, then scalars, then containers — which lands
+/// the containers group on the **left** and the status group on the **right** (the
+/// natural reading order of [`TypeIndicator::ALL`](crate::structural::TypeIndicator::ALL)).
+/// A small [`Ui::add_space`] separates the three groups.
+fn legend_strip(ui: &mut egui::Ui) {
+    use crate::structural::TypeIndicator;
+
+    /// The small gap inserted between the three indicator groups.
+    const GROUP_GAP: f32 = 10.0;
+
+    let containers = TypeIndicator::CONTAINER_COUNT;
+    let scalars = TypeIndicator::SCALAR_COUNT;
+    // Group boundaries within `ALL`: [0, containers) = containers,
+    // [containers, containers+scalars) = scalars, [..] = status.
+    let scalar_end = containers + scalars;
+
+    // Emit right-to-left: iterate `ALL` in reverse so the first group (containers)
+    // ends up leftmost. Insert a gap when crossing a group boundary.
+    let all = TypeIndicator::ALL;
+    for i in (0..all.len()).rev() {
+        let indicator = all[i];
+        ui.label(indicator.rich(ui)).on_hover_text(indicator.word());
+        // A group starts at index `containers` (scalars) and `scalar_end` (status);
+        // when we step left across one of those boundaries, add the inter-group gap.
+        if i == scalar_end || i == containers {
+            ui.add_space(GROUP_GAP);
+        }
+    }
 }
 
 /// The egui font-data keys for the three bundled Noto fallback faces, in the order
@@ -1969,6 +2051,17 @@ impl App {
         &self.notices
     }
 
+    /// The bundled showcase samples surfaced under **File ▸ Open Sample ▸**, as
+    /// `(file_name, embedded_text)` pairs (for tests and host integration).
+    ///
+    /// Exposes the same list the Open Sample menu iterates, so a regression test can
+    /// assert every menu entry opens a rendering tab without littering a recovery
+    /// sidecar (see `tests/all_samples_load.rs`).
+    #[must_use]
+    pub fn showcase_samples() -> &'static [(&'static str, &'static str)] {
+        SHOWCASE_SAMPLES
+    }
+
     /// Push an explanatory authoring notice over the dismissible-notice channel
     /// (FR-024).
     ///
@@ -2370,6 +2463,14 @@ impl App {
     /// (FR-018/FR-020), distinct from the auto-dismiss info notice used for ignored
     /// drops.
     pub fn open_file(&mut self, path: &std::path::Path) {
+        // Blank-proofing invariant (no silent blanks): `open_file` MUST always end
+        // in a *visible* outcome — a focused/created tab, the recovery dialog, or an
+        // error notice. The snapshots below let the debug assertion at the end of
+        // this method catch any future branch that would return having produced
+        // none of those (which is what a "blank view" looks like to the user).
+        let tabs_before = self.workspace.documents().len();
+        let notices_before = self.notices.len();
+
         // FR-025: focus an already-open tab for the same (canonical) path rather
         // than opening a duplicate. Path-less buffers never match (they have no
         // path), so never-saved buffers stay exempt.
@@ -2381,6 +2482,7 @@ impl App {
             // Re-resolve the mode/registry too so the E009 indicator stays accurate
             // (FR-011); preserves any explicit per-document toggle.
             self.apply_mode_to_active();
+            // Outcome: an existing tab is now focused (visible) — done.
             return;
         }
         // E007 OBJ2 (TR-008/SC-003): on reopen, detect a live, content-divergent
@@ -2395,6 +2497,14 @@ impl App {
                     path: path.to_path_buf(),
                     sidecar,
                 });
+                // Outcome: the recovery dialog (rendered unconditionally by
+                // `render_shell` → `render_recovery_offer` whenever `recovery_offer`
+                // is set) shows this frame — a visible outcome, not a blank. The
+                // user's choice then creates a tab via `resolve_recovery_offer`.
+                debug_assert!(
+                    self.recovery_offer.is_some(),
+                    "open_file deferred to recovery but left no offer to render"
+                );
                 return;
             }
         }
@@ -2422,6 +2532,14 @@ impl App {
                 self.push_open_error(&e, path);
             }
         }
+
+        // Enforce the no-silent-blank invariant: by here `open_file` must have
+        // either created a tab or pushed an error notice. (The early returns above
+        // cover the focus-existing and recovery-defer outcomes.)
+        debug_assert!(
+            self.workspace.documents().len() > tabs_before || self.notices.len() > notices_before,
+            "open_file produced neither a tab nor an error notice (silent blank)"
+        );
     }
 
     /// Find the index of an open tab whose file is the same as `path` by canonical
@@ -2532,6 +2650,84 @@ impl App {
         self.apply_binding_to_active();
         // A path-less buffer resolves to Serde mode, no registry; applying it
         // populates the active-mode/registry indicator for the new tab (FR-011).
+        self.apply_mode_to_active();
+    }
+
+    /// Open a bundled showcase sample as a NEW active tab from embedded text
+    /// (path-independent loading).
+    ///
+    /// The sample's RON text is shipped in the binary via `include_str!`, so it
+    /// opens identically in any working directory (fixing the moved-/wrong-cwd
+    /// foot-gun a disk read would have). It mirrors the freshly-opened-document
+    /// seam — a new tab made active, an initial off-frame parse requested so it
+    /// gets diagnostics/highlighting, then binding + mode resolution applied
+    /// (E006 US2 / E009 — FR-011) — but sources the bytes from `text` instead of
+    /// disk.
+    ///
+    /// The opened document is an **untitled buffer with NO on-disk
+    /// [`path`](EditorDocument::path)** — only a display-only
+    /// [`display_title`](EditorDocument::display_title) carrying `file_name` for the
+    /// tab. This is deliberate: a sidecar is derived from `path`, so a path-less
+    /// buffer is never autosaved and never litters a `.ronin-recovery` file into the
+    /// working directory (the prior implementation set `file_name` as a bare on-disk
+    /// path, which dropped stale sidecars into the CWD). The buffer is **dirty**
+    /// (never-saved): the user chooses where, if anywhere, to save it.
+    ///
+    /// Bevy mode is still auto-detected from the sample's **name** (a `.scn.ron`
+    /// sample enters Bevy mode, FR-009): because there is no `path` to key the
+    /// shell's extension auto-detect on, the mode is resolved here from
+    /// `file_name` (the same [`ModeState::resolve`] the shell uses) and set
+    /// explicitly on the document as an auto-detected mode — so Bevy detection is
+    /// preserved WITHOUT a real on-disk path that would trigger sidecar writes.
+    pub fn open_sample(&mut self, file_name: &str, text: &str) {
+        let seq = self.workspace.next_untitled_seq();
+        let mut doc = EditorDocument::new_untitled(seq);
+        doc.buffer = text.to_string();
+        // Display-only title so the tab shows the sample name; `path` stays `None`
+        // so autosave/crash-recovery never writes a sidecar for it (no litter).
+        doc.display_title = Some(file_name.to_string());
+        // Bump the edit generation + request an initial parse exactly as a fresh
+        // open does, so the new tab gets diagnostics/highlighting without an edit.
+        doc.on_edit();
+        doc.request_reparse(&self.worker);
+        self.workspace.open(doc);
+        // Resolve + apply the binding for the new tab so the active-binding
+        // indicator is populated (FR-011).
+        self.apply_binding_to_active();
+        // Preserve extension-based mode auto-detection (e.g. `.scn.ron` → Bevy)
+        // off the sample NAME rather than a real `path` (which would otherwise
+        // drive sidecar writes). Resolve the mode the same way the shell does, mark
+        // it on the active document, then run the standard mode/registry apply +
+        // re-validate so a Bevy sample validates against its registry on open
+        // (E009 — FR-009/FR-011).
+        self.apply_sample_mode(file_name);
+    }
+
+    /// Resolve the auto-detected mode from a bundled sample's `file_name` and set it
+    /// on the active document, then run the standard mode/registry apply.
+    ///
+    /// Used by [`open_sample`](Self::open_sample): a sample opens path-less (so it
+    /// never litters a recovery sidecar), but extension-based mode auto-detect keys
+    /// on a path. This resolves the mode from the sample name via the same
+    /// [`ModeState::resolve`] the shell's [`apply_mode_to_active`](Self::apply_mode_to_active)
+    /// uses, records it as an auto-detected mode override on the active document
+    /// (so the subsequent re-resolve in `apply_mode_to_active` preserves it via the
+    /// `ModeOrigin::Override` carry-through), then applies the mode/registry +
+    /// re-validates. A `.scn.ron` sample thus enters Bevy mode with NO on-disk path.
+    fn apply_sample_mode(&mut self, file_name: &str) {
+        let detected = ModeState::resolve(
+            &self.registry_binding_config,
+            Some(std::path::Path::new(file_name)),
+            None,
+            None,
+        );
+        let mode = detected.active_mode();
+        if let Some(doc) = self.active_document_mut() {
+            // Record the name-detected mode so `apply_mode_to_active`'s
+            // path-less re-resolve (which has no `path` to detect from) carries it
+            // through rather than reverting to the default Serde mode.
+            doc.mode_state_mut().set_mode_override(mode);
+        }
         self.apply_mode_to_active();
     }
 
@@ -3091,23 +3287,50 @@ impl App {
     /// Drain ready parse results into every open document, returning whether any
     /// installed (for tests / host integration of the off-frame pump).
     ///
-    /// This is the same per-document poll the frame loop runs via
+    /// This is the same routing drain the frame loop runs via
     /// [`pump_documents`](Self::pump_documents), exposed so a headless test can drive
     /// the App's *own* off-frame [`ReparseWorker`] to completion (request → poll
     /// until install) and observe binding-driven type diagnostics land on the active
     /// document — the real end-to-end path (E006 US2 — FR-013).
     pub fn poll_documents(&mut self) -> bool {
-        let mut any = false;
-        for doc in self.workspace.documents_mut() {
-            if doc.poll_parse(&self.worker) {
-                any = true;
-            }
-        }
-        any
+        self.dispatch_parse_results()
     }
 
-    /// Drain ready parse results into every document and request reparses for any
-    /// document whose buffer advanced (FR-006).
+    /// Drain the shared worker's ready results **once** and route each to its owning
+    /// document by [`doc_id`](crate::reparse::ParseResult::doc_id) (FR-006).
+    ///
+    /// The [`ReparseWorker`] is shared across every open tab and its result channel is
+    /// a single FIFO; `generation` is a *per-document* edit counter, so two tabs at the
+    /// same generation (e.g. two freshly opened files, each at generation 1) are
+    /// indistinguishable by generation alone. The previous design had each document
+    /// independently drain the worker, so a result could be consumed and installed by
+    /// the **wrong** tab — leaving the originating tab with no parse, i.e. a blank
+    /// view (the user-reported "blank when switching back and forth"). Here the App
+    /// drains the worker once and dispatches each result to the document whose `id`
+    /// matches (via [`EditorDocument::install_parse`]), so no tab ever steals another
+    /// tab's result. Returns `true` if any document installed a fresh result.
+    fn dispatch_parse_results(&mut self) -> bool {
+        let mut any_installed = false;
+        // Drain the shared FIFO once; route each result to its owning document.
+        while let Some(result) = self.worker.poll() {
+            let owner = self
+                .workspace
+                .documents_mut()
+                .iter_mut()
+                .find(|d| d.id() == result.doc_id);
+            if let Some(doc) = owner {
+                if doc.install_parse(result) {
+                    any_installed = true;
+                }
+            }
+            // A result whose owning document has since closed has no home; dropping
+            // it is correct (the document is gone, nothing to render).
+        }
+        any_installed
+    }
+
+    /// Request reparses for any document whose buffer advanced, then drain + route the
+    /// shared worker's ready results to their owning documents (FR-006).
     ///
     /// Returns `true` if any document installed a fresh result (the caller can
     /// repaint to show it). Runs for all documents — not just the active one — so
@@ -3118,16 +3341,14 @@ impl App {
     /// degrade flag against the live buffer size (T040), so type validation degrades
     /// on E003's oversize threshold exactly like highlighting/squiggles and resumes
     /// automatically once an oversize document is edited back below the threshold.
+    /// Result delivery is routed centrally by [`dispatch_parse_results`](Self::dispatch_parse_results)
+    /// so a shared-worker result always lands on the tab that requested it.
     fn pump_documents(&mut self) -> bool {
         self.reconcile_validation_degrade();
-        let mut any_installed = false;
         for doc in self.workspace.documents_mut() {
             doc.request_reparse(&self.worker);
-            if doc.poll_parse(&self.worker) {
-                any_installed = true;
-            }
         }
-        any_installed
+        self.dispatch_parse_results()
     }
 
     /// Reconcile every open document's type-validation degrade flag against the live
@@ -3435,6 +3656,18 @@ impl App {
                         self.open_via_dialog();
                         ui.close();
                     }
+                    // Open Sample ▸ — one-click load of a bundled showcase sample
+                    // from text embedded in the binary (include_str!), so a sample
+                    // opens in ANY working directory (path-independent). Each opens
+                    // as a NEW active tab through the same open seam (open_sample).
+                    ui.menu_button("Open Sample", |ui| {
+                        for (file_name, text) in SHOWCASE_SAMPLES {
+                            if ui.button(*file_name).clicked() {
+                                self.open_sample(file_name, text);
+                                ui.close();
+                            }
+                        }
+                    });
                     // Save / Save As act on the active document (FR-011). Both are
                     // disabled when no document is open so the menu shape is stable.
                     let has_active = self.active_document().is_some();
@@ -3703,16 +3936,28 @@ impl App {
         egui::Panel::bottom("notices").show_inside(ui, |ui| {
             for (idx, notice) in self.notices.iter().enumerate() {
                 ui.horizontal(|ui| {
-                    match notice.kind {
-                        NoticeKind::Error => {
-                            ui.colored_label(ui.visuals().error_fg_color, &notice.message);
-                        }
-                        NoticeKind::Info => {
-                            ui.weak(&notice.message);
-                        }
-                    }
+                    // The Dismiss button is laid out first (right-stable), then the
+                    // message wraps in the remaining width so a long notice never
+                    // overflows the panel (Part C — scrollbars/wrapping).
                     if ui.small_button("Dismiss").clicked() {
                         dismiss = Some(idx);
+                    }
+                    match notice.kind {
+                        NoticeKind::Error => {
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(&notice.message)
+                                        .color(ui.visuals().error_fg_color),
+                                )
+                                .wrap(),
+                            );
+                        }
+                        NoticeKind::Info => {
+                            ui.add(
+                                egui::Label::new(egui::RichText::new(&notice.message).weak())
+                                    .wrap(),
+                            );
+                        }
                     }
                 });
             }
@@ -3918,6 +4163,12 @@ impl App {
                 // FR-015: a user-perceivable stale marker while a reparse is pending.
                 ui.weak("(updating\u{2026})");
             }
+            // The always-visible type-indicator legend (E015): right-aligned on this
+            // SAME row so it costs zero extra vertical space and sits directly above
+            // the views, using the SAME glyphs/colors the tree + table paint.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                legend_strip(ui);
+            });
         });
         if view != doc.view_state().active_view() {
             // Keep any in-progress draft/focus across the switch (FR-017) — we only
@@ -4754,6 +5005,14 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         // Dropped-file intake before any rendering so a new tab shows this frame.
         let ctx = ui.ctx().clone();
+        // Show tooltips instantly (the legend + every hover tooltip): zero egui's
+        // hover-delay and the grace window so a tooltip appears the moment the
+        // pointer rests on a widget, with no wait. Global by intent
+        // (`global_style_mut`, the non-deprecated 0.34 spelling of `style_mut`).
+        ctx.global_style_mut(|s| {
+            s.interaction.tooltip_delay = 0.0;
+            s.interaction.tooltip_grace_time = 0.0;
+        });
         // Fold the live window geometry into settings each frame so the periodic
         // `save` (and the on-exit save) persists the current size/position (FR-016).
         self.capture_geometry(&ctx);

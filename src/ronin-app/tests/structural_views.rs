@@ -716,6 +716,8 @@ fn realized_row_count(src: &str) -> usize {
                 ui,
                 &mut doc,
                 &worker,
+                &ronin_app::structural::view_state::StructuralPath::root(),
+                ronin_app::structural::sections::SectionShape::RecordList,
                 &realized_for_ui,
             );
         });
@@ -961,7 +963,13 @@ fn degrade_safe_table_surface_never_coerces_error_list_into_a_grid() {
     // Rendering the table surface headlessly over the degraded section never panics.
     let render_doc = std::cell::RefCell::new(doc);
     let mut harness = egui_kittest::Harness::new_ui(|ui| {
-        render_table_view(ui, &mut render_doc.borrow_mut(), &worker);
+        render_table_view(
+            ui,
+            &mut render_doc.borrow_mut(),
+            &worker,
+            &StructuralPath::root(),
+            ronin_app::structural::sections::SectionShape::RecordList,
+        );
     });
     harness.run();
 
@@ -1053,4 +1061,339 @@ fn focus_rebind_cost_is_proportional_to_path_depth_not_n() {
         "a shallower path (no trailing field step) visits fewer nodes — cost tracks depth"
     );
     assert_eq!(shallow_visits, 6, "index 5 examines 6 elements");
+}
+
+// =============================================================================
+// E012 — Table view navigator: section list renders; selection switches grid
+// =============================================================================
+
+/// A multi-section document: a `rows` RecordList (3 records, columns a/b), a `coords`
+/// TupleList (3 tuples), and a `hulls` RecordMap (2 same-shape value records).
+const MULTI_SECTION_SRC: &str = concat!(
+    "(\n",
+    "  rows: [(a: 1, b: 2), (a: 3, b: 4), (a: 5, b: 6)],\n",
+    "  coords: [(0, 0), (1, 1), (2, 2)],\n",
+    "  hulls: { (1): (hp: 10), (2): (hp: 20) },\n",
+    ")"
+);
+
+#[test]
+fn navigator_lists_sections_and_selection_switches_grid() {
+    use egui_kittest::kittest::Queryable;
+    use std::cell::RefCell;
+
+    let worker = Rc::new(ReparseWorker::new());
+    let mut doc = EditorDocument::new_untitled(1);
+    doc.buffer = MULTI_SECTION_SRC.to_string();
+    doc.on_edit();
+    drive_reparse(&mut doc, &worker);
+    let before = doc.buffer.clone();
+
+    // The scan finds all three sections (a RecordList, a TupleList, a RecordMap).
+    let sections = ronin_app::structural::sections::scan_table_sections(
+        &doc.parse.as_ref().unwrap().cst,
+    );
+    use ronin_app::structural::sections::SectionShape as Sh;
+    assert!(sections.iter().any(|s| s.shape == Sh::RecordList));
+    assert!(sections.iter().any(|s| s.shape == Sh::TupleList));
+    assert!(sections.iter().any(|s| s.shape == Sh::RecordMap));
+
+    let doc = Rc::new(RefCell::new(doc));
+
+    // Frame 1: the navigator lists every section by label. The default selection is
+    // the largest section; the `rows` RecordList header column `a` renders.
+    {
+        let doc_ui = Rc::clone(&doc);
+        let worker_ui = Rc::clone(&worker);
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(700.0, 360.0))
+            .build_ui(move |ui| {
+                let mut d = doc_ui.borrow_mut();
+                ronin_app::panels::render_table_seam(ui, &mut d, &worker_ui);
+            });
+        harness.run();
+        // The navigator side panel lists each section by its path label + R×C (use
+        // the dimension-bearing labels so they are unambiguous vs. the "N rows" text).
+        assert!(
+            harness
+                .query_all_by_label_contains("rows   (3")
+                .next()
+                .is_some(),
+            "the navigator lists the `rows` RecordList"
+        );
+        assert!(
+            harness
+                .query_all_by_label_contains("coords   (3")
+                .next()
+                .is_some(),
+            "the navigator lists the `coords` TupleList"
+        );
+        assert!(
+            harness
+                .query_all_by_label_contains("hulls   (2")
+                .next()
+                .is_some(),
+            "the navigator lists the `hulls` RecordMap"
+        );
+    }
+
+    // Select the `coords` TupleList section by path (byte-free view-state write).
+    let coords_path =
+        StructuralPath::from_steps(vec![PathStep::Field("coords".to_string())]);
+    doc.borrow_mut()
+        .view_state_mut()
+        .set_selected_table_section(Some(coords_path.clone()));
+
+    // Frame 2: the selected grid is now the TupleList — its positional `.0` column
+    // header renders (it does not exist in the RecordList grid).
+    {
+        let doc_ui = Rc::clone(&doc);
+        let worker_ui = Rc::clone(&worker);
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(700.0, 360.0))
+            .build_ui(move |ui| {
+                let mut d = doc_ui.borrow_mut();
+                ronin_app::panels::render_table_seam(ui, &mut d, &worker_ui);
+            });
+        harness.run();
+        assert!(
+            harness.query_all_by_label_contains(".0").next().is_some(),
+            "the TupleList grid renders positional .0 columns after selecting coords"
+        );
+    }
+
+    // Select the `hulls` RecordMap; its leading read-only `(key)` column renders.
+    let hulls_path = StructuralPath::from_steps(vec![PathStep::Field("hulls".to_string())]);
+    doc.borrow_mut()
+        .view_state_mut()
+        .set_selected_table_section(Some(hulls_path));
+    {
+        let doc_ui = Rc::clone(&doc);
+        let worker_ui = Rc::clone(&worker);
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(700.0, 360.0))
+            .build_ui(move |ui| {
+                let mut d = doc_ui.borrow_mut();
+                ronin_app::panels::render_table_seam(ui, &mut d, &worker_ui);
+            });
+        harness.run();
+        assert!(
+            harness
+                .query_all_by_label_contains("(key)")
+                .next()
+                .is_some(),
+            "the RecordMap grid renders a leading (key) column after selecting hulls"
+        );
+    }
+
+    // The whole navigation was byte-free (FR-020): no edit, only view-state writes.
+    assert_eq!(
+        doc.borrow().buffer,
+        before,
+        "browsing the navigator and switching sections must not mutate bytes"
+    );
+}
+
+#[test]
+fn navigator_shows_empty_state_for_non_tabular_document() {
+    use egui_kittest::kittest::Queryable;
+
+    let worker = ReparseWorker::new();
+    let mut doc = EditorDocument::new_untitled(1);
+    // A scalar-only struct (sample.ron-shaped): no record lists, maps, or tuple lists.
+    doc.buffer = "Config(name: \"x\", retries: 3, mode: Fast)".to_string();
+    doc.on_edit();
+    drive_reparse(&mut doc, &worker);
+
+    assert!(
+        ronin_app::structural::sections::scan_table_sections(
+            &doc.parse.as_ref().unwrap().cst
+        )
+        .is_empty(),
+        "the scalar-only doc has no table-able sections"
+    );
+
+    let render_doc = std::cell::RefCell::new(doc);
+    let mut harness = egui_kittest::Harness::new_ui(|ui| {
+        ronin_app::panels::render_table_seam(ui, &mut render_doc.borrow_mut(), &worker);
+    });
+    harness.run();
+    assert!(
+        harness
+            .query_all_by_label_contains("No table-able sections")
+            .next()
+            .is_some(),
+        "a non-tabular document shows the navigator empty state"
+    );
+}
+
+// =============================================================================
+// E013 — open ANY nested collection as a table: NestedTable cell click switches the
+// grid; breadcrumb navigates back up; grouped side list renders + leaf selects.
+// =============================================================================
+
+/// A doc whose `data.rows` uniform record list has a nested LIST cell (`tags`) per row
+/// — so the grid shows a NestedTable "open as table" cell the user can click into. The
+/// list is nested two levels (`data` → `rows`) so the side-list group key is `data`
+/// while the breadcrumb's clickable `rows` segment is an unambiguous navigation target
+/// (distinct from any side-list label and from the weak `root` segment).
+const NESTED_LIST_SRC: &str = concat!(
+    "(data: (rows: [\n",
+    "  (id: 1, tags: [\"a\", \"b\"]),\n",
+    "  (id: 2, tags: [\"c\", \"d\"]),\n",
+    "  (id: 3, tags: [\"e\", \"f\"]),\n",
+    "]))"
+);
+
+#[test]
+fn clicking_nested_table_cell_switches_grid_to_nested_path_byte_free() {
+    use egui_kittest::kittest::Queryable;
+    use std::cell::RefCell;
+
+    let worker = Rc::new(ReparseWorker::new());
+    let mut doc = EditorDocument::new_untitled(1);
+    doc.buffer = NESTED_LIST_SRC.to_string();
+    doc.on_edit();
+    drive_reparse(&mut doc, &worker);
+    let before = doc.buffer.clone();
+    let doc = Rc::new(RefCell::new(doc));
+
+    // Frame 1: the navigator renders the `rows` RecordList grid; row 0's `tags` cell is
+    // a NestedTable "open as table" button prefixed with the collection icon.
+    {
+        let doc_ui = Rc::clone(&doc);
+        let worker_ui = Rc::clone(&worker);
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(800.0, 400.0))
+            .build_ui(move |ui| {
+                let mut d = doc_ui.borrow_mut();
+                ronin_app::panels::render_table_seam(ui, &mut d, &worker_ui);
+            });
+        harness.run();
+        // The open-as-table button label contains the cell summary (the list preview).
+        // Click the first one (row 0's `tags`).
+        harness.get_by_label_contains("\"a\"").click();
+        harness.run();
+    }
+
+    // The selection switched to the nested `tags` list path (byte-free).
+    let rows_path = StructuralPath::from_steps(vec![
+        PathStep::Field("data".to_string()),
+        PathStep::Field("rows".to_string()),
+    ]);
+    {
+        let d = doc.borrow();
+        let expected = rows_path
+            .child(PathStep::Index(0))
+            .child(PathStep::Field("tags".to_string()));
+        assert_eq!(
+            d.view_state().selected_table_section(),
+            Some(&expected),
+            "clicking a NestedTable cell re-keys the navigator to the nested path"
+        );
+        // STAYS in the table view — drilling a List does NOT switch to tree/form.
+        assert!(
+            d.view_state().drill_in_return().is_none(),
+            "opening a List as a table records no tree drill-in return"
+        );
+        assert_eq!(
+            d.buffer,
+            before,
+            "opening a nested collection as a table changes zero bytes"
+        );
+    }
+
+    // Frame 2: the nested `tags` list now renders as a grid (a scalar list → a single
+    // `value` column), and the breadcrumb shows the ancestor chain
+    // `root ▸ rows ▸ [0] ▸ tags` with `rows` an openable (clickable) segment.
+    {
+        let doc_ui = Rc::clone(&doc);
+        let worker_ui = Rc::clone(&worker);
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(800.0, 400.0))
+            .build_ui(move |ui| {
+                let mut d = doc_ui.borrow_mut();
+                ronin_app::panels::render_table_seam(ui, &mut d, &worker_ui);
+            });
+        harness.run();
+        // The nested grid's single `value` column header renders.
+        assert!(
+            harness.query_all_by_label_contains("value").next().is_some(),
+            "the nested scalar list renders a single `value` column grid"
+        );
+        // The breadcrumb `rows` segment is a clickable button (rows is an openable list).
+        assert!(
+            harness.query_all_by_label_contains("rows").next().is_some(),
+            "the breadcrumb renders the ancestor chain with a `rows` segment"
+        );
+        // Navigate up via the breadcrumb `rows` segment (back to the rows list).
+        harness.get_by_label("rows").click();
+        harness.run();
+    }
+
+    // The breadcrumb navigated the selection back up to the `rows` list (byte-free).
+    {
+        let d = doc.borrow();
+        assert_eq!(
+            d.view_state().selected_table_section(),
+            Some(&rows_path),
+            "clicking the breadcrumb `rows` segment navigates the grid back to the rows list"
+        );
+        assert_eq!(
+            d.buffer,
+            before,
+            "breadcrumb navigation changes zero bytes"
+        );
+    }
+}
+
+#[test]
+fn grouped_navigator_renders_groups_and_leaf_selects_a_section() {
+    use egui_kittest::kittest::Queryable;
+    use std::cell::RefCell;
+
+    let worker = Rc::new(ReparseWorker::new());
+    let mut doc = EditorDocument::new_untitled(1);
+    // Two top-level groups: `rows` (a RecordList) and `coords` (a TupleList).
+    doc.buffer =
+        "(rows: [(a: 1), (a: 2), (a: 3)], coords: [(0, 0), (1, 1), (2, 2)])".to_string();
+    doc.on_edit();
+    drive_reparse(&mut doc, &worker);
+    let doc = Rc::new(RefCell::new(doc));
+
+    let doc_ui = Rc::clone(&doc);
+    let worker_ui = Rc::clone(&worker);
+    let mut harness = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(800.0, 400.0))
+        .build_ui(move |ui| {
+            let mut d = doc_ui.borrow_mut();
+            ronin_app::panels::render_table_seam(ui, &mut d, &worker_ui);
+        });
+    harness.run();
+
+    // The grouped side list renders a collapsible group header per top-level ancestor
+    // (`rows`, `coords`) and a dimension-bearing leaf inside each.
+    assert!(
+        harness.query_all_by_label_contains("rows").next().is_some(),
+        "the grouped navigator renders the `rows` group"
+    );
+    assert!(
+        harness
+            .query_all_by_label_contains("coords   (3")
+            .next()
+            .is_some(),
+        "the grouped navigator renders the `coords` leaf with R\u{00D7}C dims"
+    );
+
+    // Clicking the `coords` leaf selects that section.
+    harness.get_by_label_contains("coords   (3").click();
+    harness.run();
+    let d = doc.borrow();
+    assert_eq!(
+        d.view_state().selected_table_section(),
+        Some(&StructuralPath::from_steps(vec![PathStep::Field(
+            "coords".to_string()
+        )])),
+        "clicking a grouped leaf selects its section"
+    );
 }

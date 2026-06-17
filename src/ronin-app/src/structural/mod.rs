@@ -44,15 +44,20 @@
 //! document-level active view (FR-024).
 
 pub mod classifier;
+pub mod indicators;
 pub mod projection;
+pub mod sections;
 pub mod table;
 pub mod tree;
 pub mod view_state;
 
 pub use classifier::{classify, FallbackReason, Verdict};
+pub use indicators::TypeIndicator;
 pub use projection::{capture_path, derive_projection, ChildOutline, DerivedProjection, NodeKind};
+pub use sections::{scan_table_sections, SectionShape, TableSection};
 pub use table::{
-    render_table_view, render_table_view_counting, Cell, CellClass, Column, ColumnClass, Row,
+    breadcrumb_segments, render_table_view, render_table_view_any, render_table_view_any_counting,
+    render_table_view_counting, BreadcrumbSegment, Cell, CellClass, Column, ColumnClass, Row,
     TableModel,
 };
 pub use tree::{
@@ -126,7 +131,9 @@ pub fn render_structural_view(ui: &mut Ui, doc: &mut EditorDocument, worker: &Re
     // a table only renders when the rendering resolved to a table (and we are not in
     // a drill-in return, which forces tree/form so the back control is reachable).
     if rendering.is_table() && !drilled_in {
-        render_table_view(ui, doc, worker);
+        // The auto-routed embedded table is the document's top-level uniform record
+        // list (US3 behavior unchanged): root section, RecordList shape.
+        render_table_view(ui, doc, worker, &section, SectionShape::RecordList);
     } else {
         render_tree_view(ui, doc, worker);
     }
@@ -179,14 +186,20 @@ fn render_section_boundary(
 ) {
     let mut toggle = false;
     ui.horizontal(|ui| {
-        // The persistent kind badge — perceivable without interaction (FR-012).
-        let (badge, badge_color) = match rendering {
-            SectionRendering::Table { .. } => ("\u{25A6} table", ui.visuals().hyperlink_color),
-            SectionRendering::TreeForm { .. } => {
-                ("\u{25B8} tree/form", ui.visuals().weak_text_color())
-            }
+        // The persistent kind badge — perceivable without interaction (FR-012). The
+        // badge glyph reuses the shared [`TypeIndicator`] so the table/tree boundary
+        // markers match the icons the inner views paint (E014): the table badge is
+        // the Map/table glyph (▦), the tree/form badge the Struct glyph (▢).
+        let (indicator, label) = match rendering {
+            SectionRendering::Table { .. } => (TypeIndicator::Map, "table"),
+            SectionRendering::TreeForm { .. } => (TypeIndicator::Struct, "tree/form"),
         };
-        ui.label(RichText::new(badge).color(badge_color).strong());
+        ui.label(indicator.rich(ui));
+        ui.label(
+            RichText::new(label)
+                .color(indicator.color(ui))
+                .strong(),
+        );
 
         // The auto-vs-forced state marker (FR-012): the user can tell whether the
         // section is showing its automatic rendering or a manual override.

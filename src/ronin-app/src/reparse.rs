@@ -149,6 +149,22 @@ pub struct ParseResult {
     pub source_len: usize,
     /// Monotonic generation tag identifying which edit produced this result.
     pub generation: u64,
+    /// The identity of the document this result was requested for.
+    ///
+    /// The [`ReparseWorker`] is **shared across all open documents**, but its result
+    /// channel is a single FIFO and `generation` is the requesting document's
+    /// per-document edit counter — so two different documents at the same generation
+    /// (e.g. two freshly opened tabs, each at generation 1) would otherwise be
+    /// indistinguishable, and one tab's result could be installed into the other,
+    /// leaving the originating tab **blank** (the "switching back and forth" empty
+    /// view). Stamping each result with the requesting document's process-unique
+    /// [`id`](crate::document::EditorDocument::id) lets the consumer
+    /// ([`poll_parse`](crate::document::EditorDocument::poll_parse)) discard results
+    /// that are not its own, so cross-document contamination — and the blank it
+    /// caused — cannot happen. `0` is the "untagged" sentinel used by the
+    /// standalone [`ParseResult::parse`] / [`parse_with_binding`] constructors (which
+    /// are not routed through the shared worker).
+    pub doc_id: u64,
 }
 
 impl std::fmt::Debug for ParseResult {
@@ -252,6 +268,10 @@ impl ParseResult {
             scene_diagnostics,
             source_len,
             generation,
+            // Untagged by default (these standalone constructors are not routed
+            // through the shared worker); the worker stamps the requesting document's
+            // id onto each result it ships (see `worker_loop`).
+            doc_id: 0,
         }
     }
 
@@ -290,6 +310,10 @@ fn clamp_scene_diagnostic(mut diag: SceneDiagnostic, source_len: usize) -> Scene
 
 /// A reparse job handed to the background worker.
 struct ReparseJob {
+    /// The requesting document's process-unique identity, stamped onto the result so
+    /// the shared worker's output is routed back only to the document that asked for
+    /// it (prevents cross-document result contamination / blank views).
+    doc_id: u64,
     generation: u64,
     text: String,
     /// The resolved validation binding to run against, when any (E006/FR-006,
@@ -373,9 +397,23 @@ impl ReparseWorker {
     /// When `bound` is `None`, only the structural parse runs (no type / scene
     /// diagnostics, FR-015); the [`BoundValidation`] variant selects serde-vs-Bevy
     /// validation per document (FR-013).
-    pub fn request(&self, generation: u64, text: String, bound: Option<BoundValidation>) {
+    ///
+    /// `doc_id` is the requesting document's process-unique
+    /// [`id`](crate::document::EditorDocument::id); the worker stamps it onto the
+    /// shipped [`ParseResult`] so the consumer installs **only** results requested for
+    /// that document. Because the worker is shared across all tabs and `generation` is
+    /// per-document, two tabs at the same generation would otherwise collide and one
+    /// tab could steal the other's result, leaving a blank tab — `doc_id` prevents it.
+    pub fn request(
+        &self,
+        doc_id: u64,
+        generation: u64,
+        text: String,
+        bound: Option<BoundValidation>,
+    ) {
         if let Some(tx) = &self.job_tx {
             let _ = tx.send(ReparseJob {
+                doc_id,
                 generation,
                 text,
                 bound,
@@ -420,6 +458,7 @@ fn worker_loop(
     // `recv` returns `Err` once every `Sender` is dropped — our exit signal.
     while let Ok(job) = job_rx.recv() {
         let ReparseJob {
+            doc_id,
             generation,
             text,
             bound,
@@ -432,7 +471,10 @@ fn worker_loop(
             ParseResult::parse_with_binding(&text, generation, bound.as_ref())
         });
         match parsed {
-            Ok(result) => {
+            Ok(mut result) => {
+                // Stamp the requesting document's identity so the consumer routes
+                // this result back to the right tab only (no cross-tab steal).
+                result.doc_id = doc_id;
                 // If the consumer is gone, stop working.
                 if result_tx.send(result).is_err() {
                     break;

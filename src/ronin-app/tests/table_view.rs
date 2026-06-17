@@ -35,6 +35,7 @@ use egui_kittest::Harness;
 
 use ronin_app::document::EditorDocument;
 use ronin_app::reparse::ReparseWorker;
+use ronin_app::structural::sections::SectionShape;
 use ronin_app::structural::table::{render_table_view, CellClass, ColumnClass, TableModel};
 use ronin_app::structural::tree::render_tree_view;
 use ronin_app::structural::view_state::{ActiveView, FocusSurface, PathStep, StructuralPath};
@@ -112,31 +113,140 @@ fn uniform_list_projects_rows_and_columns() {
 
 #[test]
 fn nested_collection_cell_is_drill_in_not_inline() {
-    // FR-006: a cell whose value is a nested collection is classified Nested (a
-    // drill-in cell), never an inline scalar editor. The column carrying nested
-    // values is classified Nested too.
+    // FR-006 / E013: a cell whose value is a nested collection is NOT an inline scalar
+    // editor. A List/Map cell is classified `NestedTable` (opens AS A TABLE in place);
+    // a struct/tuple/enum cell stays `Nested` (tree/form drill-in). The column carrying
+    // nested values is classified Nested either way.
     let worker = ReparseWorker::new();
     let doc = doc_at(
-        "[\n    (id: 1, tags: [\"x\"]),\n    (id: 2, tags: [\"y\", \"z\"]),\n    (id: 3, tags: []),\n]",
+        "[\n    (id: 1, tags: [\"x\"], pos: (0, 0)),\n    (id: 2, tags: [\"y\", \"z\"], pos: (1, 0)),\n    (id: 3, tags: [], pos: (2, 0)),\n]",
         &worker,
     );
     let model = model_of(&doc);
 
+    // `tags` is a List → NestedTable (open-as-table), column is Nested.
     let tags_col = model
         .columns
         .iter()
         .position(|c| c.field_name == "tags")
         .expect("tags column present");
     assert_eq!(model.columns[tags_col].class, ColumnClass::Nested);
-
-    let cell = model.cell(0, tags_col).expect("row 0 / tags cell");
-    assert_eq!(cell.class, CellClass::Nested);
-
-    // The cell exposes a drill-in path that addresses the nested subtree so it can
-    // open in the tree/form surface (FR-006).
+    let tags_cell = model.cell(0, tags_col).expect("row 0 / tags cell");
+    assert_eq!(
+        tags_cell.class,
+        CellClass::NestedTable,
+        "a List cell opens AS A TABLE (E013)"
+    );
     assert!(
-        cell.value_ref.is_some(),
-        "a nested cell carries a structural path to drill into"
+        tags_cell.value_ref.is_some(),
+        "a nested-table cell carries a structural path to open"
+    );
+
+    // `pos` is a tuple → stays Nested (tree/form drill-in), not NestedTable.
+    let pos_col = model
+        .columns
+        .iter()
+        .position(|c| c.field_name == "pos")
+        .expect("pos column present");
+    let pos_cell = model.cell(0, pos_col).expect("row 0 / pos cell");
+    assert_eq!(
+        pos_cell.class,
+        CellClass::Nested,
+        "a tuple cell stays a tree/form drill-in (Nested), never NestedTable"
+    );
+    assert!(pos_cell.value_ref.is_some());
+}
+
+// =============================================================================
+// E013 — per-cell / per-column type indicators
+// =============================================================================
+
+#[test]
+fn scalar_cells_carry_their_type_for_the_indicator() {
+    // FR-006 / E013: each present scalar cell carries its broad type (exposed via the
+    // public `scalar_type_name` accessor) so the per-cell type glyph can render; a
+    // nested-collection cell carries no scalar type. Reuses the standard fixture shape.
+    let worker = ReparseWorker::new();
+    let doc = doc_at(
+        "[\n    (i: 1, f: 1.5, s: \"x\", b: true, tags: [\"a\"]),\n    (i: 2, f: 2.5, s: \"y\", b: false, tags: []),\n    (i: 3, f: 3.5, s: \"z\", b: true, tags: [\"c\"]),\n]",
+        &worker,
+    );
+    let model = model_of(&doc);
+    let col = |name: &str| {
+        model
+            .columns
+            .iter()
+            .position(|c| c.field_name == name)
+            .unwrap_or_else(|| panic!("column {name} present"))
+    };
+
+    assert_eq!(model.cell(0, col("i")).unwrap().scalar_type_name(), Some("integer"));
+    assert_eq!(model.cell(0, col("f")).unwrap().scalar_type_name(), Some("float"));
+    assert_eq!(model.cell(0, col("s")).unwrap().scalar_type_name(), Some("string"));
+    assert_eq!(model.cell(0, col("b")).unwrap().scalar_type_name(), Some("bool"));
+
+    // A nested-LIST cell stays NestedTable and carries no scalar type indicator.
+    let tags = model.cell(0, col("tags")).unwrap();
+    assert_eq!(tags.class, CellClass::NestedTable);
+    assert_eq!(tags.scalar_type_name(), None, "a nested cell carries no scalar type");
+}
+
+#[test]
+fn struct_cell_stays_nested_and_carries_no_scalar_type() {
+    // A struct cell stays a tree/form drill-in (`Nested`), never inline, and carries
+    // no scalar type indicator.
+    let worker = ReparseWorker::new();
+    let doc = doc_at(
+        "[\n    (id: 1, meta: (k: \"x\")),\n    (id: 2, meta: (k: \"y\")),\n    (id: 3, meta: (k: \"z\")),\n]",
+        &worker,
+    );
+    let model = model_of(&doc);
+    let meta = model
+        .columns
+        .iter()
+        .position(|c| c.field_name == "meta")
+        .expect("meta column");
+    let cell = model.cell(0, meta).expect("row 0 / meta cell");
+    assert_eq!(cell.class, CellClass::Nested, "a struct cell stays a drill-in");
+    assert_eq!(cell.scalar_type_name(), None);
+}
+
+#[test]
+fn column_headers_render_with_type_glyphs() {
+    // E013: the column header markup prefixes the field name with the column's type
+    // glyph (scalar type glyph for a Scalar column, ▦/▸ for a Nested column). Render
+    // the table headlessly and confirm the header glyphs are present in the UI tree.
+    let worker = ReparseWorker::new();
+    let mut doc = doc_at(
+        "[\n    (i: 1, tags: [\"a\"]),\n    (i: 2, tags: []),\n    (i: 3, tags: [\"c\"]),\n]",
+        &worker,
+    );
+
+    let mut harness = Harness::new_ui(move |ui| {
+        render_table_view(
+            ui,
+            &mut doc,
+            &worker,
+            &StructuralPath::root(),
+            SectionShape::RecordList,
+        );
+    });
+    harness.run();
+
+    // The `i` column is integer → its header carries the `#` integer glyph.
+    assert!(
+        harness.query_all_by_label_contains("#").next().is_some(),
+        "the integer column header shows the # type glyph"
+    );
+    // The `tags` column is a List column → its header carries the shared list glyph
+    // (▤ U+25A4 — the SAME glyph the tree paints for a list, E014). The list icon is
+    // itself the open-as-table affordance; there is no separate ▸ drill marker.
+    assert!(
+        harness
+            .query_all_by_label_contains("\u{25A4}")
+            .next()
+            .is_some(),
+        "the nested-collection (list) column header shows the ▤ list glyph"
     );
 }
 
@@ -272,7 +382,13 @@ fn table_view_renders_headlessly() {
     );
 
     let mut harness = Harness::new_ui(move |ui| {
-        render_table_view(ui, &mut doc, &worker);
+        render_table_view(
+            ui,
+            &mut doc,
+            &worker,
+            &StructuralPath::root(),
+            SectionShape::RecordList,
+        );
     });
     harness.run();
 }
@@ -314,7 +430,13 @@ fn tab_commits_and_advances_focus_to_next_cell() {
     let worker_ui = Rc::clone(&worker);
     let mut harness = Harness::new_ui(move |ui| {
         let mut d = doc_ui.borrow_mut();
-        render_table_view(ui, &mut d, &worker_ui);
+        render_table_view(
+            ui,
+            &mut d,
+            &worker_ui,
+            &StructuralPath::root(),
+            SectionShape::RecordList,
+        );
     });
     // First frame: the `name` cell renders its inline editor (focus is on it).
     harness.run();
@@ -352,16 +474,18 @@ fn drill_in_then_back_returns_to_table_with_origin_cell_focused() {
     use std::rc::Rc;
 
     let worker = Rc::new(ReparseWorker::new());
-    // A uniform list whose `tags` column holds nested collections (drill-in cells).
+    // A uniform list whose `meta` column holds nested STRUCTS — a struct cell stays
+    // `Nested` (a tree/form drill-in), unlike a List/Map cell which opens as a table
+    // in place (E013). This pins the tree drill-in + back round-trip.
     let doc = Rc::new(RefCell::new(doc_at(
-        "[\n    (id: 1, tags: [\"x\"]),\n    (id: 2, tags: [\"y\", \"z\"]),\n]",
+        "[\n    (id: 1, meta: (k: \"x\")),\n    (id: 2, meta: (k: \"y\")),\n]",
         &worker,
     )));
 
-    // The originating cell is row 0 / `tags` (column 1).
+    // The originating cell is row 0 / `meta` (column 1).
     let origin_cell = StructuralPath::root()
         .child(PathStep::Index(0))
-        .child(PathStep::Field("tags".to_string()));
+        .child(PathStep::Field("meta".to_string()));
 
     // Frame 1 — render the table; click the nested cell's drill-in button.
     {
@@ -369,7 +493,13 @@ fn drill_in_then_back_returns_to_table_with_origin_cell_focused() {
         let worker_ui = Rc::clone(&worker);
         let mut harness = Harness::new_ui(move |ui| {
             let mut d = doc_ui.borrow_mut();
-            render_table_view(ui, &mut d, &worker_ui);
+            render_table_view(
+                ui,
+                &mut d,
+                &worker_ui,
+                &StructuralPath::root(),
+                SectionShape::RecordList,
+            );
         });
         harness.run();
         // The nested cell renders a drill-in button labelled with its summary.
@@ -478,6 +608,8 @@ fn realized_row_count(src: &str) -> usize {
                 ui,
                 &mut doc,
                 &worker,
+                &StructuralPath::root(),
+                SectionShape::RecordList,
                 &realized_for_ui,
             );
         });
@@ -550,6 +682,8 @@ fn benchmark_realized_rows(n: usize) -> usize {
                 ui,
                 &mut doc,
                 &worker,
+                &StructuralPath::root(),
+                SectionShape::RecordList,
                 &realized_for_ui,
             );
         });
@@ -590,5 +724,325 @@ fn sc010_benchmark_realized_rows_bounded_and_independent_of_n() {
     assert_eq!(
         baseline, at_100k,
         "SC-010: realized-row count (and thus frame work) is independent of total rows (1k vs 100k)"
+    );
+}
+
+// =============================================================================
+// E012 — Table view navigator: section scan + RecordMap / TupleList models
+// =============================================================================
+
+use ronin_app::structural::sections::{scan_table_sections, SectionShape as Shape, TableSection};
+use ronin_app::structural::view_state::resolve_path;
+use ron_core::ast;
+
+/// Parse `src` and scan it for table-able sections.
+fn scan(src: &str) -> Vec<TableSection> {
+    scan_table_sections(&ron_core::parse(src))
+}
+
+#[test]
+fn scan_finds_nested_cells_lists_and_hulls_record_map() {
+    // A ships.ron-shaped doc: root struct → `hulls` map of same-shape hull structs,
+    // each with a `cells` RecordList of same-shape cell records.
+    let src = concat!(
+        "(hulls: {\n",
+        "  (1): (name: \"a\", cells: [(coord: (0,0), s: true), (coord: (1,0), s: false), (coord: (2,0), s: true)]),\n",
+        "  (2): (name: \"b\", cells: [(coord: (0,0), s: true), (coord: (1,0), s: false), (coord: (2,0), s: true)]),\n",
+        "})"
+    );
+    let sections = scan(src);
+
+    // The `hulls` map is a RecordMap at path `hulls`, 2 rows, 1 key + 2 fields
+    // (`name`, `cells`) = 3 columns.
+    let hulls = sections
+        .iter()
+        .find(|s| s.shape == Shape::RecordMap)
+        .expect("a hulls record map");
+    assert_eq!(
+        hulls.path,
+        StructuralPath::from_steps(vec![PathStep::Field("hulls".to_string())])
+    );
+    assert_eq!(hulls.rows, 2);
+    assert_eq!(hulls.cols, 3, "key column + name + cells");
+
+    // Each hull's `cells` is a RecordList (one per hull) at the expected path, 3 rows.
+    let cells: Vec<_> = sections
+        .iter()
+        .filter(|s| s.shape == Shape::RecordList)
+        .collect();
+    assert_eq!(cells.len(), 2, "one cells RecordList per hull");
+    assert!(cells.iter().all(|c| c.rows == 3));
+    assert!(cells.iter().any(|c| c.path
+        == StructuralPath::from_steps(vec![
+            PathStep::Field("hulls".to_string()),
+            PathStep::Key("(1)".to_string()),
+            PathStep::Field("cells".to_string()),
+        ])));
+}
+
+#[test]
+fn scan_finds_tuple_list_with_positional_columns() {
+    let sections = scan("(coords: [(1, 2, 3), (4, 5, 6), (7, 8, 9)])");
+    let t = sections
+        .iter()
+        .find(|s| s.shape == Shape::TupleList)
+        .expect("a tuple list section");
+    assert_eq!(t.rows, 3);
+    assert_eq!(t.cols, 3, "positional .0/.1/.2 columns");
+}
+
+#[test]
+fn scan_scalar_only_struct_has_no_sections() {
+    // A sample.ron-shaped doc: scalar struct with scalar/tuple/enum fields. The
+    // `position` tuple is a single tuple (not a list-of-tuples) and `tags` is a list
+    // of scalars (not records) → zero table-able sections.
+    let src = "Config(name: \"x\", retries: 3, position: (1.0, 2.0, 3.0), tags: [\"a\", \"b\"])";
+    assert!(scan(src).is_empty(), "scalar-only doc has no sections");
+}
+
+#[test]
+fn record_map_model_has_leading_readonly_key_column() {
+    let cst = ron_core::parse("(hulls: { (1): (hp: 1, name: \"a\"), (2): (hp: 2, name: \"b\") })");
+    let section = StructuralPath::from_steps(vec![PathStep::Field("hulls".to_string())]);
+    let model = TableModel::derive_section(&cst, &section, Shape::RecordMap, &[])
+        .expect("record map derives a model");
+
+    // The leading column is the read-only `(key)` column.
+    assert_eq!(model.columns[0].field_name, "(key)");
+    let key_cell = model.cell(0, 0).expect("row 0 key cell");
+    assert_eq!(key_cell.class, CellClass::ReadOnly);
+    assert!(key_cell.value_ref.is_none(), "read-only key carries no value_ref");
+    assert_eq!(key_cell.text.as_deref(), Some("(1)"));
+
+    // The value-field columns follow (union of value record fields).
+    let names: Vec<_> = model.columns.iter().map(|c| c.field_name.clone()).collect();
+    assert_eq!(names, vec!["(key)", "hp", "name"]);
+
+    // A value-field cell is an editable Scalar whose value_ref is under the entry key.
+    let hp = model.cell(0, 1).expect("row 0 hp cell");
+    assert_eq!(hp.class, CellClass::Scalar);
+    assert_eq!(
+        hp.value_ref,
+        Some(StructuralPath::from_steps(vec![
+            PathStep::Field("hulls".to_string()),
+            PathStep::Key("(1)".to_string()),
+            PathStep::Field("hp".to_string()),
+        ]))
+    );
+}
+
+#[test]
+fn tuple_list_model_has_positional_editable_scalar_cells() {
+    let cst = ron_core::parse("(coords: [(1, 2), (3, 4), (5, 6)])");
+    let section = StructuralPath::from_steps(vec![PathStep::Field("coords".to_string())]);
+    let model = TableModel::derive_section(&cst, &section, Shape::TupleList, &[])
+        .expect("tuple list derives a model");
+
+    let names: Vec<_> = model.columns.iter().map(|c| c.field_name.clone()).collect();
+    assert_eq!(names, vec![".0", ".1"]);
+
+    // Each cell is an editable scalar addressed by Index/Index.
+    let c01 = model.cell(0, 1).expect("row 0 / .1 cell");
+    assert_eq!(c01.class, CellClass::Scalar);
+    assert_eq!(c01.text.as_deref(), Some("2"));
+    assert_eq!(
+        c01.value_ref,
+        Some(StructuralPath::from_steps(vec![
+            PathStep::Field("coords".to_string()),
+            PathStep::Index(0),
+            PathStep::Index(1),
+        ]))
+    );
+}
+
+#[test]
+fn record_list_model_unchanged_via_derive_section() {
+    // RecordList through the dispatcher is identical to the legacy derive path.
+    let cst = ron_core::parse("[(a: 1, b: 2), (a: 3, c: 4)]");
+    let section = StructuralPath::root();
+    let via_section = TableModel::derive_section(&cst, &section, Shape::RecordList, &[])
+        .expect("record list derives via derive_section");
+    let via_legacy = TableModel::derive(&cst, &section, &[]).expect("legacy derive");
+    assert_eq!(via_section, via_legacy);
+    let cols: Vec<_> = via_section
+        .columns
+        .iter()
+        .map(|c| c.field_name.clone())
+        .collect();
+    assert_eq!(cols, vec!["a", "b", "c"]);
+}
+
+#[test]
+fn resolve_path_index_step_descends_into_a_tuple() {
+    // The TupleList cell path is `section / Index(row) / Index(pos)`; the second
+    // Index must descend into the row tuple (not only a list) so a tuple-cell edit /
+    // drill-in resolves. This pins resolve_path's PathStep::Index tuple arm.
+    let cst = ron_core::parse("(coords: [(10, 20), (30, 40)])");
+    let root = cst.root();
+    let cell_path = StructuralPath::from_steps(vec![
+        PathStep::Field("coords".to_string()),
+        PathStep::Index(1),
+        PathStep::Index(0),
+    ]);
+    let node = resolve_path(&root, &cell_path).expect("tuple cell resolves");
+    assert_eq!(node.text(), "30", "Index descends into the tuple element");
+    // And it is a value-position node (a literal scalar).
+    assert!(ast::Value::cast(node).is_some());
+}
+
+// =============================================================================
+// E013 — `derive_any`: open ANY nested collection as a table (reach = both;
+// openable = Lists & Maps). NestedTable vs Nested cell classification. Breadcrumb.
+// =============================================================================
+
+use ronin_app::structural::table::{breadcrumb_segments, TableModel as AnyTableModel};
+
+/// Field-name column list of a model (excluding nothing — verbatim, in order).
+fn col_names(model: &AnyTableModel) -> Vec<String> {
+    model.columns.iter().map(|c| c.field_name.clone()).collect()
+}
+
+#[test]
+fn derive_any_over_a_map_has_leading_readonly_key_column() {
+    // A Map projects a leading read-only `(key)` column + value projection. Here every
+    // value is a record (mixed names allowed for reach), so the value columns are the
+    // union of their fields.
+    let cst = ron_core::parse("(m: { (1): A(hp: 1), (2): B(mp: 2) })");
+    let path = StructuralPath::from_steps(vec![PathStep::Field("m".to_string())]);
+    let model = AnyTableModel::derive_any(&cst, &path, &[]).expect("a map projects a table");
+
+    // Leading (key) column, then the UNION of value fields (mixed record names — A/B).
+    assert_eq!(col_names(&model), vec!["(key)", "hp", "mp"]);
+    let key_cell = model.cell(0, 0).expect("row 0 key");
+    assert_eq!(key_cell.class, CellClass::ReadOnly);
+    assert!(key_cell.value_ref.is_none());
+    assert_eq!(key_cell.text.as_deref(), Some("(1)"));
+}
+
+#[test]
+fn derive_any_over_a_scalar_list_has_single_value_column() {
+    // A list of scalars (not records, not tuples) projects a single `value` column.
+    let cst = ron_core::parse("(xs: [10, 20, 30])");
+    let path = StructuralPath::from_steps(vec![PathStep::Field("xs".to_string())]);
+    let model = AnyTableModel::derive_any(&cst, &path, &[]).expect("a scalar list projects");
+
+    assert_eq!(col_names(&model), vec!["value"]);
+    assert_eq!(model.row_count(), 3);
+    let cell = model.cell(1, 0).expect("row 1 value");
+    assert_eq!(cell.class, CellClass::Scalar);
+    assert_eq!(cell.text.as_deref(), Some("20"));
+    // The value cell IS the element itself (path / Index(1)).
+    assert_eq!(
+        cell.value_ref,
+        Some(path.child(PathStep::Index(1)))
+    );
+}
+
+#[test]
+fn derive_any_over_a_tuple_list_has_positional_columns() {
+    // A list whose every element is a tuple projects positional `.0/.1/…` columns.
+    let cst = ron_core::parse("(c: [(1, 2), (3, 4)])");
+    let path = StructuralPath::from_steps(vec![PathStep::Field("c".to_string())]);
+    let model = AnyTableModel::derive_any(&cst, &path, &[]).expect("a tuple list projects");
+
+    assert_eq!(col_names(&model), vec![".0", ".1"]);
+    let c01 = model.cell(0, 1).expect("row 0 / .1");
+    assert_eq!(c01.class, CellClass::Scalar);
+    assert_eq!(c01.text.as_deref(), Some("2"));
+}
+
+#[test]
+fn derive_any_over_a_mixed_name_record_list_unions_columns() {
+    // Permissive for reach: a list of records with MIXED struct names still tables,
+    // with the union of their fields in first-seen order (unlike the strict classifier).
+    let cst = ron_core::parse("[A(a: 1, b: 2), B(a: 3, c: 4)]");
+    let model = AnyTableModel::derive_any(&cst, &StructuralPath::root(), &[])
+        .expect("a mixed-name record list projects");
+    assert_eq!(col_names(&model), vec!["a", "b", "c"]);
+    assert_eq!(model.row_count(), 2);
+}
+
+#[test]
+fn derive_any_returns_none_for_a_lone_struct_or_tuple() {
+    // A lone struct / tuple is NOT openable as a table (the chosen scope).
+    let struct_cst = ron_core::parse("Point(x: 1, y: 2)");
+    assert!(
+        AnyTableModel::derive_any(&struct_cst, &StructuralPath::root(), &[]).is_none(),
+        "a lone struct is not openable as a table"
+    );
+    let tuple_cst = ron_core::parse("(1, 2, 3)");
+    assert!(
+        AnyTableModel::derive_any(&tuple_cst, &StructuralPath::root(), &[]).is_none(),
+        "a lone tuple is not openable as a table"
+    );
+}
+
+#[test]
+fn list_cell_is_nested_table_while_struct_cell_stays_nested() {
+    // E013: a cell whose value is a List/Map is `NestedTable` (open as table); a cell
+    // whose value is a struct stays `Nested` (tree/form drill-in).
+    let cst = ron_core::parse("[(items: [1, 2], meta: (k: 1))]");
+    let model = AnyTableModel::derive_any(&cst, &StructuralPath::root(), &[]).expect("projects");
+
+    let items = model.columns.iter().position(|c| c.field_name == "items").unwrap();
+    assert_eq!(
+        model.cell(0, items).unwrap().class,
+        CellClass::NestedTable,
+        "a List cell opens as a table"
+    );
+    let meta = model.columns.iter().position(|c| c.field_name == "meta").unwrap();
+    assert_eq!(
+        model.cell(0, meta).unwrap().class,
+        CellClass::Nested,
+        "a struct cell stays a tree/form drill-in"
+    );
+}
+
+#[test]
+fn breadcrumb_prefix_chain_marks_list_map_segments_clickable() {
+    // The breadcrumb for a deep path yields one segment per prefix; a segment is
+    // clickable iff its prefix resolves to a List or Map (the openable kinds).
+    // Doc: root struct → `hulls` MAP → key (1) → struct → `cells` LIST → index 0 →
+    // struct → `coord` TUPLE.
+    let cst = ron_core::parse(
+        "(hulls: { (1): (cells: [(coord: (0, 0))]) })",
+    );
+    // Path down to the `coord` tuple value.
+    let deep = StructuralPath::from_steps(vec![
+        PathStep::Field("hulls".to_string()),  // map (openable)
+        PathStep::Key("(1)".to_string()),      // struct (not openable)
+        PathStep::Field("cells".to_string()),  // list (openable)
+        PathStep::Index(0),                    // struct (not openable)
+        PathStep::Field("coord".to_string()),  // tuple (not openable)
+    ]);
+    let segs = breadcrumb_segments(&cst, &deep);
+
+    // One segment per prefix: root + 5 steps = 6 segments.
+    let labels: Vec<_> = segs.iter().map(|s| s.label.clone()).collect();
+    assert_eq!(labels, vec!["root", "hulls", "(1)", "cells", "[0]", "coord"]);
+
+    // Clickability: root (the top struct) is NOT a list/map; `hulls` is a map; `(1)`
+    // is a struct; `cells` is a list; `[0]` is a struct; `coord` is a tuple.
+    let clickable: Vec<bool> = segs.iter().map(|s| s.clickable).collect();
+    assert_eq!(
+        clickable,
+        vec![false, true, false, true, false, false],
+        "only the List/Map prefixes are clickable navigation targets"
+    );
+
+    // Each clickable segment's path is exactly its prefix (re-navigation target).
+    let hulls_seg = segs.iter().find(|s| s.label == "hulls").unwrap();
+    assert_eq!(
+        hulls_seg.path,
+        StructuralPath::from_steps(vec![PathStep::Field("hulls".to_string())])
+    );
+    let cells_seg = segs.iter().find(|s| s.label == "cells").unwrap();
+    assert_eq!(
+        cells_seg.path,
+        StructuralPath::from_steps(vec![
+            PathStep::Field("hulls".to_string()),
+            PathStep::Key("(1)".to_string()),
+            PathStep::Field("cells".to_string()),
+        ])
     );
 }

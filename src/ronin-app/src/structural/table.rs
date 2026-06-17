@@ -67,12 +67,16 @@ use egui_extras::{Column as TableColumn, TableBuilder};
 
 use ron_core::ast;
 use ron_core::transform::{ParentRef, StructuralOp};
-use ron_core::{BlockedReason, CstDocument, Severity, SyntaxNode};
+use ron_core::{BlockedReason, CstDocument, SyntaxNode};
 
 use crate::byte_to_char::ByteCharIndex;
 use crate::diagnostics_map::DiagnosticView;
 use crate::document::EditorDocument;
 use crate::reparse::ReparseWorker;
+use crate::structural::classifier::{scalar_class_of, ScalarClass};
+use crate::structural::indicators::{self, TypeIndicator};
+use crate::structural::sections::SectionShape;
+use crate::structural::tree::TreeNodeKind;
 use crate::structural::view_state::{resolve_path, FocusSurface, PathStep, StructuralPath};
 
 /// The per-column cell classification across the whole section (data-model
@@ -112,20 +116,31 @@ pub enum CellClass {
     /// A present scalar/simple value — edited inline with a type-appropriate
     /// widget (FR-006).
     Scalar,
-    /// A present nested collection — NOT edited inline; drills into the tree/form
-    /// surface (FR-006/FR-010).
+    /// A present nested struct / tuple / enum-variant — NOT edited inline; drills
+    /// into the tree/form surface (FR-006/FR-010).
     Nested,
+    /// A present nested **multi-element collection** (a List or a Map) — NOT edited
+    /// inline; opens AS A TABLE in place (the navigator re-keys to its path and
+    /// renders the nested collection as a grid), distinct from [`Nested`](Self::Nested)
+    /// (a struct/tuple/enum) which drills into the tree/form surface (E013).
+    NestedTable,
     /// The field is **absent** from this record — a blank cell, visually distinct
     /// from a present-but-empty scalar; editing it adds the absent field (FR-010).
     Blank,
+    /// A read-only value rendered as plain non-editable text: no inline editor, no
+    /// drill-in, no `value_ref`. Used for the leading key column of a
+    /// [`SectionShape::RecordMap`](super::sections::SectionShape) (the map key is
+    /// identity, not an editable field).
+    ReadOnly,
 }
 
 /// One cell of the table projection (data-model `Cell`).
 ///
-/// A [`CellClass::Scalar`]/[`CellClass::Nested`] cell carries its value's
-/// [`StructuralPath`] ([`value_ref`](Self::value_ref)) so an edit / drill-in can
-/// re-resolve it against the live CST; a [`CellClass::Blank`] cell has no
-/// `value_ref` (the field does not exist yet — editing it inserts the field).
+/// A [`CellClass::Scalar`]/[`CellClass::Nested`]/[`CellClass::NestedTable`] cell
+/// carries its value's [`StructuralPath`] ([`value_ref`](Self::value_ref)) so an
+/// edit / drill-in / open-as-table can re-resolve it against the live CST; a
+/// [`CellClass::Blank`] cell has no `value_ref` (the field does not exist yet —
+/// editing it inserts the field).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cell {
     /// The cross-reparse identity of the cell's value node, or `None` for a Blank
@@ -136,8 +151,28 @@ pub struct Cell {
     /// The verbatim value text for a Scalar cell (its literal RON token), a compact
     /// summary for a Nested cell, or `None` for a Blank cell.
     pub text: Option<String>,
+    /// The broad scalar type of a [`CellClass::Scalar`] cell (int / float / string /
+    /// char / bool / unit), driving the per-cell type indicator glyph + color (E013).
+    /// `None` for a nested / blank / read-only cell (those carry no scalar type).
+    ///
+    /// `pub(crate)` (not `pub`) because [`ScalarClass`] is itself `pub(crate)`; external
+    /// callers read the type via the `pub` [`Cell::scalar_type_name`] accessor instead.
+    pub(crate) scalar: Option<ScalarClass>,
     /// Inline diagnostics attached to this cell by CST range (FR-018 / SC-008).
     pub diagnostics: Vec<DiagnosticView>,
+}
+
+impl Cell {
+    /// The cell's scalar type as a short, stable, user-facing word — `Some("integer"
+    /// | "float" | "string" | "char" | "bool" | "unit" | "scalar")` for a Scalar cell
+    /// carrying a [`ScalarClass`], `None` otherwise (nested / blank / read-only). The
+    /// word matches the per-cell indicator's hover text. `pub` so an external test can
+    /// assert a cell's type indicator without naming the `pub(crate)` `ScalarClass`.
+    #[must_use]
+    pub fn scalar_type_name(&self) -> Option<&'static str> {
+        self.scalar
+            .map(|c| indicators::from_scalar_class(c).word())
+    }
 }
 
 /// One row of the table projection (data-model `Row`): a section element addressed
@@ -230,6 +265,411 @@ impl TableModel {
         })
     }
 
+    /// Derive the table model for `section` of `shape` within `cst`, dispatching to
+    /// the per-shape builder (E012 — Table view navigator), or `None` when `section`
+    /// does not resolve to the expected kind.
+    ///
+    /// The produced [`TableModel`] is the **same** `{ section_ref, columns, rows }`
+    /// the renderer already consumes, so rendering is shape-agnostic: a RecordList
+    /// reuses [`TableModel::derive`]; a RecordMap gets a leading read-only key column
+    /// plus the union of its value records' fields; a TupleList gets positional
+    /// `.0/.1/…` columns. A pure read over the CST — zero bytes (FR-020).
+    #[must_use]
+    pub fn derive_section(
+        cst: &CstDocument,
+        section: &StructuralPath,
+        shape: super::sections::SectionShape,
+        diagnostics: &[DiagnosticView],
+    ) -> Option<Self> {
+        use super::sections::SectionShape;
+        match shape {
+            SectionShape::RecordList => Self::derive(cst, section, diagnostics),
+            SectionShape::RecordMap => Self::derive_record_map(cst, section, diagnostics),
+            SectionShape::TupleList => Self::derive_tuple_list(cst, section, diagnostics),
+        }
+    }
+
+    /// Derive a table for the LIVE node at `path`, projecting the best grid for **any**
+    /// drilled-into multi-element collection (E013 — "open any nested collection as a
+    /// table"). Returns `None` when the node is not a List or Map (a lone struct / tuple
+    /// is NOT openable as a table — the chosen scope).
+    ///
+    /// Unlike [`derive_section`](Self::derive_section) (which renders the scanner's
+    /// strict labeled shapes), this is **permissive for reach**: it never requires
+    /// matching record names, and projects whatever grid best fits the live node so the
+    /// navigator can render any collection the user drills into:
+    ///
+    /// * **Map** → a leading read-only `(key)` column (the map key is identity, not
+    ///   data), then: if **every** value is a record, the union of their fields (mixed
+    ///   record names allowed); else a single `value` column showing each value's
+    ///   summary. Rows are keyed by `path / Key(key_text)`.
+    /// * **List** → if **every** element is a record, the union of their fields (mixed
+    ///   names allowed); elif **every** element is a tuple, positional `.0 / .1 / …`
+    ///   columns; else a single `value` column showing each element's summary. Rows are
+    ///   keyed by `path / Index(i)`.
+    ///
+    /// The result is the **same** `{ section_ref, columns, rows }` the grid renderer
+    /// already consumes, so rendering is shape-agnostic. A pure read over the CST —
+    /// zero bytes (FR-020).
+    #[must_use]
+    pub fn derive_any(
+        cst: &CstDocument,
+        path: &StructuralPath,
+        diagnostics: &[DiagnosticView],
+    ) -> Option<Self> {
+        let root = cst.root();
+        let node = resolve_path(&root, path)?;
+        match ast::Value::cast(node.clone())? {
+            ast::Value::Map(map) => Some(Self::project_map(path, &map, diagnostics, &root)),
+            ast::Value::List(list) => Some(Self::project_list(path, &list, diagnostics, &root)),
+            // A lone struct / tuple / enum / scalar is NOT openable as a table.
+            _ => None,
+        }
+    }
+
+    /// Project a Map at `path` into a table: a leading read-only `(key)` column plus a
+    /// value projection (union of record fields when every value is a record, else a
+    /// single `value` column). Permissive — mixed record names are allowed (E013).
+    fn project_map(
+        path: &StructuralPath,
+        map: &ast::Map,
+        diagnostics: &[DiagnosticView],
+        root: &SyntaxNode,
+    ) -> Self {
+        let index = build_byte_char_index(root, diagnostics);
+
+        // Collect each entry's key text + value, in source order.
+        let mut keys: Vec<String> = Vec::new();
+        let mut values: Vec<ast::Value> = Vec::new();
+        for entry in map.entries() {
+            let Some(value) = entry.value() else { continue };
+            let key_text = entry.key().map(|k| k.syntax().text()).unwrap_or_default();
+            keys.push(key_text);
+            values.push(value);
+        }
+
+        // Value projection: union of record fields when EVERY value is a record;
+        // otherwise a single `value` column showing each value's summary.
+        let all_records = !values.is_empty() && values.iter().all(is_record);
+        let records: Vec<Vec<(String, ast::Value)>> =
+            values.iter().map(record_fields).collect();
+
+        // The leading read-only key column.
+        let mut columns = vec![Column {
+            field_name: "(key)".to_string(),
+            class: ColumnClass::Scalar,
+        }];
+        if all_records {
+            columns.extend(union_columns(&records));
+        } else {
+            columns.push(value_column(&values));
+        }
+
+        let rows = keys
+            .iter()
+            .zip(values.iter())
+            .zip(records.iter())
+            .map(|((key_text, value), fields)| {
+                let element_ref = path.child(PathStep::Key(key_text.clone()));
+                let mut cells = vec![Cell {
+                    value_ref: None,
+                    class: CellClass::ReadOnly,
+                    text: Some(key_text.clone()),
+                    scalar: None,
+                    diagnostics: Vec::new(),
+                }];
+                if all_records {
+                    for col in columns.iter().skip(1) {
+                        cells.push(build_cell(&element_ref, col, fields, diagnostics, &index));
+                    }
+                } else {
+                    // The single `value` cell IS the entry value itself (element_ref).
+                    cells.push(value_cell(
+                        element_ref.clone(),
+                        value,
+                        diagnostics,
+                        &index,
+                    ));
+                }
+                Row { element_ref, cells }
+            })
+            .collect();
+
+        Self {
+            section_ref: path.clone(),
+            columns,
+            rows,
+        }
+    }
+
+    /// Project a List at `path` into a table: union of record fields when every element
+    /// is a record (mixed names allowed); positional `.0/.1/…` columns when every
+    /// element is a tuple; else a single `value` column of element summaries (E013).
+    fn project_list(
+        path: &StructuralPath,
+        list: &ast::List,
+        diagnostics: &[DiagnosticView],
+        root: &SyntaxNode,
+    ) -> Self {
+        let index = build_byte_char_index(root, diagnostics);
+        let elements: Vec<ast::Value> = list.items().collect();
+
+        let all_records = !elements.is_empty() && elements.iter().all(is_record);
+        let all_tuples = !elements.is_empty()
+            && elements
+                .iter()
+                .all(|e| matches!(e, ast::Value::Tuple(_)));
+
+        if all_records {
+            // Union of fields, first-seen — permissive (mixed record names allowed).
+            let records: Vec<Vec<(String, ast::Value)>> =
+                elements.iter().map(record_fields).collect();
+            let columns = union_columns(&records);
+            let rows = records
+                .iter()
+                .enumerate()
+                .map(|(row_idx, fields)| {
+                    let element_ref = path.child(PathStep::Index(row_idx));
+                    let cells = columns
+                        .iter()
+                        .map(|col| build_cell(&element_ref, col, fields, diagnostics, &index))
+                        .collect();
+                    Row { element_ref, cells }
+                })
+                .collect();
+            return Self {
+                section_ref: path.clone(),
+                columns,
+                rows,
+            };
+        }
+
+        if all_tuples {
+            // Positional `.0/.1/…` columns; reuse the tuple-list projection inline.
+            let tuples: Vec<ast::Tuple> = elements
+                .iter()
+                .filter_map(|e| match e {
+                    ast::Value::Tuple(t) => Some(t.clone()),
+                    _ => None,
+                })
+                .collect();
+            let arity = tuples
+                .iter()
+                .map(|t| t.items().count())
+                .max()
+                .unwrap_or(0);
+            let columns: Vec<Column> = (0..arity)
+                .map(|pos| Column {
+                    field_name: format!(".{pos}"),
+                    class: ColumnClass::Scalar,
+                })
+                .collect();
+            let rows = tuples
+                .iter()
+                .enumerate()
+                .map(|(row_idx, tuple)| {
+                    let element_ref = path.child(PathStep::Index(row_idx));
+                    let members: Vec<ast::Value> = tuple.items().collect();
+                    let cells = (0..arity)
+                        .map(|pos| match members.get(pos) {
+                            Some(value) => {
+                                let value_ref = element_ref.child(PathStep::Index(pos));
+                                tuple_member_cell(value_ref, value, diagnostics, &index)
+                            }
+                            None => Cell {
+                                value_ref: None,
+                                class: CellClass::Blank,
+                                text: None,
+                                scalar: None,
+                                diagnostics: Vec::new(),
+                            },
+                        })
+                        .collect();
+                    Row { element_ref, cells }
+                })
+                .collect();
+            return Self {
+                section_ref: path.clone(),
+                columns,
+                rows,
+            };
+        }
+
+        // A mixed / scalar list: a single `value` column showing each element's
+        // summary (each cell IS the element itself).
+        let columns = vec![value_column(&elements)];
+        let rows = elements
+            .iter()
+            .enumerate()
+            .map(|(row_idx, value)| {
+                let element_ref = path.child(PathStep::Index(row_idx));
+                let cell = value_cell(element_ref.clone(), value, diagnostics, &index);
+                Row {
+                    element_ref,
+                    cells: vec![cell],
+                }
+            })
+            .collect();
+        Self {
+            section_ref: path.clone(),
+            columns,
+            rows,
+        }
+    }
+
+    /// Derive a [`SectionShape::RecordMap`](super::sections::SectionShape::RecordMap)
+    /// table: a leading read-only `(key)` column whose cells carry the entry key text,
+    /// then the union of the value records' fields. Each row's `element_ref` is the
+    /// map entry's value (`section / Key(text)`); each value-field cell is
+    /// `element_ref / Field(name)`. Returns `None` when `section` is not a map.
+    #[must_use]
+    fn derive_record_map(
+        cst: &CstDocument,
+        section: &StructuralPath,
+        diagnostics: &[DiagnosticView],
+    ) -> Option<Self> {
+        let root = cst.root();
+        let index = build_byte_char_index(&root, diagnostics);
+        let map_node = resolve_path(&root, section)?;
+        let map = ast::Map::cast(map_node)?;
+
+        // Collect each entry's key text + the value record's fields, in source order.
+        let mut keys: Vec<String> = Vec::new();
+        let mut records: Vec<Vec<(String, ast::Value)>> = Vec::new();
+        for entry in map.entries() {
+            let Some(value) = entry.value() else { continue };
+            let key_text = entry
+                .key()
+                .map(|k| k.syntax().text())
+                .unwrap_or_default();
+            keys.push(key_text);
+            records.push(record_fields(&value));
+        }
+
+        // Columns: the leading read-only key column, then the union of value fields.
+        let mut columns = vec![Column {
+            field_name: "(key)".to_string(),
+            class: ColumnClass::Scalar,
+        }];
+        columns.extend(union_columns(&records));
+
+        let rows = keys
+            .iter()
+            .zip(records.iter())
+            .map(|(key_text, fields)| {
+                let element_ref = section.child(PathStep::Key(key_text.clone()));
+                // The leading key cell is read-only (the key is identity, not data).
+                let mut cells = vec![Cell {
+                    value_ref: None,
+                    class: CellClass::ReadOnly,
+                    text: Some(key_text.clone()),
+                    scalar: None,
+                    diagnostics: Vec::new(),
+                }];
+                // Value-field cells reuse the standard record-cell builder.
+                for col in columns.iter().skip(1) {
+                    cells.push(build_cell(&element_ref, col, fields, diagnostics, &index));
+                }
+                Row { element_ref, cells }
+            })
+            .collect();
+
+        Some(Self {
+            section_ref: section.clone(),
+            columns,
+            rows,
+        })
+    }
+
+    /// Derive a [`SectionShape::TupleList`](super::sections::SectionShape::TupleList)
+    /// table: positional `.0/.1/…` columns, one row per tuple element. A scalar tuple
+    /// member is an editable [`CellClass::Scalar`] cell; a nested member is a
+    /// [`CellClass::Nested`] drill-in. Each row's `element_ref` is `section /
+    /// Index(i)`; each cell is `element_ref / Index(pos)`. Returns `None` when
+    /// `section` is not a list.
+    #[must_use]
+    fn derive_tuple_list(
+        cst: &CstDocument,
+        section: &StructuralPath,
+        diagnostics: &[DiagnosticView],
+    ) -> Option<Self> {
+        let root = cst.root();
+        let index = build_byte_char_index(&root, diagnostics);
+        let list_node = resolve_path(&root, section)?;
+        let list = ast::List::cast(list_node)?;
+
+        let tuples: Vec<ast::Tuple> = list
+            .items()
+            .filter_map(|elem| match elem {
+                ast::Value::Tuple(t) => Some(t),
+                _ => None,
+            })
+            .collect();
+
+        // Column count = the max arity across tuples (uniform by construction, but
+        // computed defensively so a degraded shape still projects safely — FR-019).
+        let arity = tuples
+            .iter()
+            .map(|t| t.items().count())
+            .max()
+            .unwrap_or(0);
+        let columns: Vec<Column> = (0..arity)
+            .map(|pos| Column {
+                field_name: format!(".{pos}"),
+                class: ColumnClass::Scalar,
+            })
+            .collect();
+
+        let rows = tuples
+            .iter()
+            .enumerate()
+            .map(|(row_idx, tuple)| {
+                let element_ref = section.child(PathStep::Index(row_idx));
+                let members: Vec<ast::Value> = tuple.items().collect();
+                let cells = (0..arity)
+                    .map(|pos| match members.get(pos) {
+                        Some(value) => {
+                            let value_ref = element_ref.child(PathStep::Index(pos));
+                            let diags = diagnostics_for(value.syntax(), diagnostics, &index);
+                            if is_nested(value) {
+                                Cell {
+                                    value_ref: Some(value_ref),
+                                    class: nested_cell_class(value),
+                                    text: Some(summarize(value.syntax())),
+                                    scalar: None,
+                                    diagnostics: diags,
+                                }
+                            } else {
+                                Cell {
+                                    value_ref: Some(value_ref),
+                                    class: CellClass::Scalar,
+                                    text: Some(value.syntax().text()),
+                                    scalar: scalar_class_of(value),
+                                    diagnostics: diags,
+                                }
+                            }
+                        }
+                        // A short tuple (defensive — uniform by construction) → blank.
+                        None => Cell {
+                            value_ref: None,
+                            class: CellClass::Blank,
+                            text: None,
+                            scalar: None,
+                            diagnostics: Vec::new(),
+                        },
+                    })
+                    .collect();
+                Row { element_ref, cells }
+            })
+            .collect();
+
+        Some(Self {
+            section_ref: section.clone(),
+            columns,
+            rows,
+        })
+    }
+
     /// The number of rows (records) in the section.
     #[must_use]
     pub fn row_count(&self) -> usize {
@@ -295,6 +735,14 @@ fn union_columns(records: &[Vec<(String, ast::Value)>]) -> Vec<Column> {
     columns
 }
 
+/// The number of distinct field names across `records` (the union, first-seen) —
+/// the value-field column count of a [`SectionShape::RecordMap`](super::sections::SectionShape::RecordMap)
+/// (excluding its leading key column). `pub(crate)` for the section scanner's
+/// dimension reporting.
+pub(crate) fn union_field_count(records: &[Vec<(String, ast::Value)>]) -> usize {
+    union_columns(records).len()
+}
+
 /// `true` when `value` is a nested collection (struct / map / list / tuple /
 /// enum-variant payload) — a drill-in cell, not an inline scalar (FR-006/FR-010).
 fn is_nested(value: &ast::Value) -> bool {
@@ -306,6 +754,87 @@ fn is_nested(value: &ast::Value) -> bool {
             | ast::Value::Tuple(_)
             | ast::Value::EnumVariant(_)
     )
+}
+
+/// `true` when `value` is a **multi-element collection** (a List or a Map) — the
+/// only nested kinds that open AS A TABLE in place ([`CellClass::NestedTable`],
+/// E013). A struct / tuple / enum-variant payload is nested but NOT a list/map, so
+/// it stays a tree/form drill-in ([`CellClass::Nested`]).
+fn is_collection_value(value: &ast::Value) -> bool {
+    matches!(value, ast::Value::List(_) | ast::Value::Map(_))
+}
+
+/// The drill-in [`CellClass`] for a nested `value`: [`CellClass::NestedTable`] for a
+/// List/Map (open-as-table), else [`CellClass::Nested`] for a struct/tuple/enum
+/// (tree/form drill-in). Callers must only invoke this when [`is_nested`] is true.
+fn nested_cell_class(value: &ast::Value) -> CellClass {
+    if is_collection_value(value) {
+        CellClass::NestedTable
+    } else {
+        CellClass::Nested
+    }
+}
+
+/// `true` when `value` is a record (a struct or a struct-like enum variant) — the
+/// permissive (name-agnostic) record test [`TableModel::derive_any`] uses to decide
+/// whether a list/map projects union-of-field columns (E013).
+fn is_record(value: &ast::Value) -> bool {
+    matches!(value, ast::Value::Struct(_) | ast::Value::EnumVariant(_))
+}
+
+/// The single fallback `value` column for a heterogeneous/scalar list or map (E013):
+/// it is [`ColumnClass::Nested`] when ANY value is a nested collection (so its cells
+/// drill in / open as a table), else [`ColumnClass::Scalar`] (inline-editable).
+fn value_column(values: &[ast::Value]) -> Column {
+    let any_nested = values.iter().any(is_nested);
+    Column {
+        field_name: "value".to_string(),
+        class: if any_nested {
+            ColumnClass::Nested
+        } else {
+            ColumnClass::Scalar
+        },
+    }
+}
+
+/// Build the single `value` cell for an element/entry value addressed by `value_ref`
+/// (E013): a nested collection becomes a NestedTable/Nested drill-in cell, a scalar
+/// becomes an editable Scalar cell carrying its verbatim text.
+fn value_cell(
+    value_ref: StructuralPath,
+    value: &ast::Value,
+    diagnostics: &[DiagnosticView],
+    index: &ByteCharIndex,
+) -> Cell {
+    let diags = diagnostics_for(value.syntax(), diagnostics, index);
+    if is_nested(value) {
+        Cell {
+            value_ref: Some(value_ref),
+            class: nested_cell_class(value),
+            text: Some(summarize(value.syntax())),
+            scalar: None,
+            diagnostics: diags,
+        }
+    } else {
+        Cell {
+            value_ref: Some(value_ref),
+            class: CellClass::Scalar,
+            text: Some(value.syntax().text()),
+            scalar: scalar_class_of(value),
+            diagnostics: diags,
+        }
+    }
+}
+
+/// Build one positional tuple-member cell addressed by `value_ref` (E013 / TupleList):
+/// a nested member drills in (NestedTable/Nested), a scalar member is inline-editable.
+fn tuple_member_cell(
+    value_ref: StructuralPath,
+    value: &ast::Value,
+    diagnostics: &[DiagnosticView],
+    index: &ByteCharIndex,
+) -> Cell {
+    value_cell(value_ref, value, diagnostics, index)
 }
 
 /// Build one [`Cell`] for `col` within `element_ref`'s record `fields`.
@@ -323,8 +852,9 @@ fn build_cell(
             if is_nested(value) {
                 Cell {
                     value_ref: Some(value_ref),
-                    class: CellClass::Nested,
+                    class: nested_cell_class(value),
                     text: Some(summarize(value.syntax())),
+                    scalar: None,
                     diagnostics: diags,
                 }
             } else {
@@ -332,6 +862,7 @@ fn build_cell(
                     value_ref: Some(value_ref),
                     class: CellClass::Scalar,
                     text: Some(value.syntax().text()),
+                    scalar: scalar_class_of(value),
                     diagnostics: diags,
                 }
             }
@@ -341,6 +872,7 @@ fn build_cell(
             value_ref: None,
             class: CellClass::Blank,
             text: None,
+            scalar: None,
             diagnostics: Vec::new(),
         },
     }
@@ -407,6 +939,81 @@ fn build_byte_char_index(root: &SyntaxNode, diagnostics: &[DiagnosticView]) -> B
         [range.start(), range.end()]
     });
     ByteCharIndex::build(&source, offsets)
+}
+
+// =============================================================================
+// Breadcrumb — stateless, path-derived (E013 / Part A3)
+// =============================================================================
+
+/// One segment of the table-view breadcrumb (E013): a prefix of the selected
+/// section's [`StructuralPath`], its display label, and whether it is a clickable
+/// navigation target (it resolves to a List or Map — the only openable kinds).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BreadcrumbSegment {
+    /// The prefix path this segment addresses (clicking navigates here).
+    pub path: StructuralPath,
+    /// The segment's display label (`root`, a field name, `(key)`, or `[i]`).
+    pub label: String,
+    /// `true` when the prefix resolves to a List or Map (an openable table target):
+    /// the segment is clickable; otherwise it is shown weak / non-clickable.
+    pub clickable: bool,
+}
+
+/// Compute the breadcrumb segments for the selected section `path` against `cst`
+/// (E013 / Part A3) — stateless, derived each frame from the path (no new state).
+///
+/// Produces one segment per prefix of `path` (from the root down to `path` itself):
+/// the root prefix is labeled `root`; each subsequent segment is labeled from its
+/// trailing [`PathStep`] (a field name, `(key)` for a map key, `[i]` for an index).
+/// A segment is **clickable** iff its prefix resolves to a List or Map (the only
+/// openable kinds) — so the breadcrumb only offers navigation to table-able ancestors.
+#[must_use]
+pub fn breadcrumb_segments(
+    cst: &CstDocument,
+    path: &StructuralPath,
+) -> Vec<BreadcrumbSegment> {
+    let root = cst.root();
+    let steps = path.steps();
+    let mut out = Vec::with_capacity(steps.len() + 1);
+
+    // The root prefix.
+    out.push(BreadcrumbSegment {
+        path: StructuralPath::root(),
+        label: "root".to_string(),
+        clickable: prefix_is_openable(&root, &StructuralPath::root()),
+    });
+
+    // Each deeper prefix, labeled from its trailing step.
+    let mut acc: Vec<PathStep> = Vec::new();
+    for step in steps {
+        acc.push(step.clone());
+        let prefix = StructuralPath::from_steps(acc.clone());
+        out.push(BreadcrumbSegment {
+            label: step_label(step),
+            clickable: prefix_is_openable(&root, &prefix),
+            path: prefix,
+        });
+    }
+    out
+}
+
+/// The display label for one [`PathStep`] in a breadcrumb (E013): a field/variant
+/// field by its name, a map key as `(text)`-normalized text, an index as `[i]`.
+fn step_label(step: &PathStep) -> String {
+    match step {
+        PathStep::Field(name) | PathStep::VariantField(name) => name.clone(),
+        PathStep::Key(text) => text.clone(),
+        PathStep::Index(i) => format!("[{i}]"),
+    }
+}
+
+/// `true` when `prefix` resolves to a List or Map within `root` (an openable table
+/// target — the breadcrumb-clickability test, E013).
+fn prefix_is_openable(root: &SyntaxNode, prefix: &StructuralPath) -> bool {
+    matches!(
+        resolve_path(root, prefix).and_then(ast::Value::cast),
+        Some(ast::Value::List(_) | ast::Value::Map(_))
+    )
 }
 
 // =============================================================================
@@ -498,6 +1105,80 @@ impl EditorDocument {
         }
     }
 
+    /// Set the value of the cell addressed by `value_ref` (its value node's
+    /// structural path) as one undo unit (E012 — RecordMap / TupleList cell edits).
+    ///
+    /// Unlike [`apply_table_set_cell`](Self::apply_table_set_cell) (which is keyed by
+    /// `(row, field)` and supports the RecordList blank-cell "add absent field"), this
+    /// is a shape-agnostic in-place replace of an **existing** cell value: it
+    /// re-resolves the value node against the live buffer, derives its parent
+    /// collection + child index, and issues a [`StructuralOp::SetValue`]. This covers
+    /// a RecordMap value-field cell (parent = the value struct/variant) and a
+    /// TupleList positional cell (parent = the tuple). Returns
+    /// [`BlockedReason::TargetNotFound`] when the node vanished and
+    /// [`BlockedReason::InvalidPayload`] when its parent is not an editable collection.
+    pub fn apply_table_set_cell_at(
+        &mut self,
+        value_ref: &StructuralPath,
+        value: String,
+        worker: &ReparseWorker,
+        now: Instant,
+    ) -> Result<(), BlockedReason> {
+        let cst = ron_core::parse(&self.buffer);
+        let node = resolve_path(&cst.root(), value_ref).ok_or(BlockedReason::TargetNotFound)?;
+        let (parent, index) = Self::parent_and_index_of(&node).ok_or(BlockedReason::InvalidPayload)?;
+        self.apply_structural_edit(
+            StructuralOp::SetValue {
+                parent,
+                index,
+                value,
+            },
+            worker,
+            now,
+        )
+    }
+
+    /// Derive the enclosing collection [`ParentRef`] + the 0-based child index of the
+    /// value node `node` within it (the address [`StructuralOp::SetValue`] needs), or
+    /// `None` when `node` is not a value-position child of an editable collection.
+    fn parent_and_index_of(node: &SyntaxNode) -> Option<(ParentRef, usize)> {
+        use ron_core::SyntaxKind;
+        let immediate = node.parent()?;
+        match immediate.kind() {
+            // A struct field / map entry / enum-variant payload entry wraps the value.
+            SyntaxKind::StructField | SyntaxKind::MapEntry => {
+                let collection = immediate.parent()?;
+                let index = collection
+                    .children()
+                    .filter(|c| {
+                        matches!(c.kind(), SyntaxKind::StructField | SyntaxKind::MapEntry)
+                    })
+                    .position(|c| c == immediate)?;
+                let parent = match collection.kind() {
+                    SyntaxKind::Struct => ParentRef::Struct(collection),
+                    SyntaxKind::Map => ParentRef::Map(collection),
+                    SyntaxKind::EnumVariant => ParentRef::EnumVariant(collection),
+                    _ => return None,
+                };
+                Some((parent, index))
+            }
+            // A list / tuple element: the parent IS the collection; index by position.
+            SyntaxKind::List | SyntaxKind::Tuple => {
+                let index = immediate
+                    .children()
+                    .filter(|c| ast::Value::cast(c.clone()).is_some())
+                    .position(|c| &c == node)?;
+                let parent = if immediate.kind() == SyntaxKind::List {
+                    ParentRef::List(immediate)
+                } else {
+                    ParentRef::Tuple(immediate)
+                };
+                Some((parent, index))
+            }
+            _ => None,
+        }
+    }
+
     /// Append a row (record element) to the table section, adopting the section's
     /// sibling style, as one undo unit (FR-007 / SC-003).
     ///
@@ -551,11 +1232,14 @@ enum PendingAction {
     /// Commit a cell edit: set (or add) the `field` cell of `row` to `value`. When
     /// `advance` is set, focus moves in that direction on commit (FR-009) — and when
     /// a forward advance leaves the LAST cell of the LAST row, a new row is appended
-    /// and focus lands in its first cell.
+    /// and focus lands in its first cell. `value_ref` is the cell's value path (when
+    /// known) used to commit a RecordMap / TupleList cell in place by path; for a
+    /// RecordList blank cell it is `None` (the commit adds the absent field by name).
     SetCell {
         row: usize,
         field: String,
         value: String,
+        value_ref: Option<StructuralPath>,
         advance: Option<CellNav>,
     },
     /// Append a new placeholder row to the section.
@@ -571,6 +1255,10 @@ enum PendingAction {
         row: usize,
         column: usize,
     },
+    /// Open a nested List/Map cell **as a table in place** (E013): re-key the
+    /// navigator's selected section to the cell's path and STAY in the Table view (no
+    /// switch to tree/form). Byte-free — it only writes view state.
+    OpenAsTable { path: StructuralPath },
 }
 
 /// A keyboard cell-navigation intent collected during the render walk (FR-009).
@@ -590,22 +1278,28 @@ enum CellNav {
     Down,
 }
 
-/// Render the virtualized table view for `doc`, driving cell edits + row ops
-/// through the one-undo-unit pipeline (E008 / US2 — FR-005..FR-009/FR-018).
+/// Render the virtualized table view for the `section` of `shape` within `doc`,
+/// driving cell edits + row ops through the one-undo-unit pipeline (E008/E012 —
+/// FR-005..FR-009/FR-018).
 ///
-/// Renders the document's top-level uniform list as a grid: one column per field,
-/// one row per record, with [`TableBody::rows`] virtualization (only visible rows
-/// realized — AD-001/HINT-004/FR-008). Scalar cells edit inline; a nested cell
-/// shows a summary + a drill-in button that opens the subtree in the tree/form
-/// surface (FR-006). Row add/remove and a blank-cell "add field" route through the
-/// transforms (FR-007/FR-010). A blocked op surfaces inline (FR-003).
-///
-/// For US2 the table projects the document's top-level value when it is a list (the
-/// classifier + per-section routing land in US3); a non-list document shows a
-/// fallback notice.
-pub fn render_table_view(ui: &mut Ui, doc: &mut EditorDocument, worker: &ReparseWorker) {
+/// Renders the section as a grid: one column per field (or positional `.N` / leading
+/// `(key)`), one row per record/entry/tuple, with [`TableBody::rows`] virtualization
+/// (only visible rows realized — AD-001/HINT-004/FR-008). Scalar cells edit inline; a
+/// nested cell shows a summary + a drill-in button that opens the subtree in the
+/// tree/form surface (FR-006). For a [`SectionShape::RecordList`] section, row
+/// add/remove and a blank-cell "add field" route through the transforms
+/// (FR-007/FR-010); for RecordMap / TupleList those row-op controls are suppressed
+/// (no well-defined uniform append yet) but scalar cells stay editable. A blocked op
+/// surfaces inline (FR-003).
+pub fn render_table_view(
+    ui: &mut Ui,
+    doc: &mut EditorDocument,
+    worker: &ReparseWorker,
+    section: &StructuralPath,
+    shape: SectionShape,
+) {
     let counter = Rc::new(StdCell::new(0usize));
-    render_table_view_counting(ui, doc, worker, &counter);
+    render_table_view_counting(ui, doc, worker, section, shape, &counter);
 }
 
 /// Identical to [`render_table_view`] but increments `realized_rows` once per row
@@ -619,6 +1313,8 @@ pub fn render_table_view_counting(
     ui: &mut Ui,
     doc: &mut EditorDocument,
     worker: &ReparseWorker,
+    section: &StructuralPath,
+    shape: SectionShape,
     realized_rows: &Rc<StdCell<usize>>,
 ) {
     // Stale marker (FR-015): a user-perceivable notice while a reparse is pending.
@@ -631,15 +1327,18 @@ pub fn render_table_view_counting(
         return;
     }
 
-    // For US2 the section is the document's top-level value (must be a list).
-    let section = StructuralPath::root();
+    // Row add/remove + blank-cell "add absent field" are RecordList-only: the other
+    // shapes have no well-defined uniform append yet, so their row-op controls are
+    // suppressed (cell edits still commit in place).
+    let row_ops = shape == SectionShape::RecordList;
+    let section = section.clone();
     // Reuse the per-parse cached model (derived once per parse generation), instead of
     // re-deriving from the CST every render frame (zero bytes, FR-020). The clone is a
     // cheap structural copy taken so the borrow on `doc` is released before the mutable
     // view-state writes later in this function; the table virtualization still paints
     // only viewport-visible rows below (the cache holds the model, not row widgets).
-    let Some(model) = doc.cached_table_model(&section).cloned() else {
-        ui.weak("(not a uniform list section)");
+    let Some(model) = doc.cached_table_model(&section, shape).cloned() else {
+        ui.weak("(this section is no longer table-able)");
         return;
     };
     if model.columns.is_empty() {
@@ -647,6 +1346,25 @@ pub fn render_table_view_counting(
         return;
     }
 
+    render_table_grid(ui, doc, worker, &section, &model, row_ops, realized_rows);
+}
+
+/// Render `model`'s virtualized grid for the section at `section`, driving cell edits,
+/// keyboard navigation, drill-in / open-as-table, and (when `row_ops`) row add/remove
+/// through the one-undo-unit pipeline. The shared rendering core both the shape-based
+/// ([`render_table_view_counting`]) and the path-based navigator
+/// ([`render_table_view_any_counting`]) entry points call once they have resolved a
+/// [`TableModel`].
+fn render_table_grid(
+    ui: &mut Ui,
+    doc: &mut EditorDocument,
+    worker: &ReparseWorker,
+    section: &StructuralPath,
+    model: &TableModel,
+    row_ops: bool,
+    realized_rows: &Rc<StdCell<usize>>,
+) {
+    let section = section.clone();
     // The current draft for an in-progress cell edit (carried on the view-state).
     let mut draft: Option<(StructuralPath, String)> = doc
         .view_state()
@@ -658,16 +1376,17 @@ pub fn render_table_view_counting(
     let active_cell: Option<(usize, usize)> = doc
         .view_state()
         .edit_focus()
-        .and_then(|f| cell_coords_of(&model, &f.path));
+        .and_then(|f| cell_coords_of(model, &f.path));
     let mut pending: Option<PendingAction> = None;
     let mut new_focus: Option<(StructuralPath, FocusSurface, String)> = None;
     let mut clear_focus = false;
     // A keyboard cell-navigation intent captured this frame (FR-009).
     let mut nav: Option<CellNav> = None;
 
-    // Discoverable add-row affordance (FR-009): a visible control above the grid.
+    // Discoverable add-row affordance (FR-009): a visible control above the grid —
+    // RecordList only (the other shapes have no well-defined uniform append yet).
     ui.horizontal(|ui| {
-        if ui.button("+ row").on_hover_text("Append a row").clicked() {
+        if row_ops && ui.button("+ row").on_hover_text("Append a row").clicked() {
             pending = Some(PendingAction::AppendRow);
         }
         ui.weak(format!("{} rows", model.row_count()));
@@ -678,70 +1397,95 @@ pub fn render_table_view_counting(
     let rows = &model.rows;
     let realized = Rc::clone(realized_rows);
 
-    let mut builder = TableBuilder::new(ui)
-        .id_salt(("ronin_table", section.depth()))
-        .striped(true)
-        .resizable(true)
+    // HORIZONTAL SCROLL (E013): a wide table (e.g. the `hulls` RecordMap = key column
+    // + 12 fields ≈ 13 columns) exceeds the viewport width. egui_extras 0.34's
+    // `TableBuilder` only scrolls VERTICALLY (its body's internal `ScrollArea` is
+    // hard-coded `[false, vscroll]`), so to make every column reachable we (a) give
+    // each column an INTRINSIC width via `TableColumn::initial(..)` — an *absolute*
+    // size that `Sizing::to_lengths` keeps verbatim regardless of available width, so
+    // the columns' total can exceed the viewport — and (b) wrap the whole table in a
+    // HORIZONTAL-ONLY outer `ScrollArea`. The outer area scrolls X only (vertical is
+    // disabled), so it does NOT take over the body's VERTICAL virtualization: the
+    // Table body keeps its own vertical `ScrollArea` + `TableBody::rows`, so the
+    // realized-row count stays bounded by the viewport (SC-010 unchanged).
+    egui::ScrollArea::horizontal()
+        .id_salt(("ronin_table_hscroll", section.depth()))
         .auto_shrink([false, false])
-        .cell_layout(egui::Layout::left_to_right(egui::Align::Center));
-    for _ in columns {
-        builder = builder.column(TableColumn::auto().at_least(80.0).clip(true));
-    }
-    // A trailing column for per-row controls (delete).
-    builder = builder.column(TableColumn::auto().at_least(40.0));
-
-    builder
-        .header(row_height, |mut header| {
-            for col in columns {
-                header.col(|ui| {
-                    let glyph = match col.class {
-                        ColumnClass::Nested => "\u{25B8} ", // drill-in marker
-                        ColumnClass::Scalar => "",
-                    };
-                    ui.strong(format!("{glyph}{}", col.field_name));
-                });
+        .show(ui, |ui| {
+            let mut builder = TableBuilder::new(ui)
+                .id_salt(("ronin_table", section.depth()))
+                .striped(true)
+                .resizable(true)
+                .auto_shrink([false, false])
+                .cell_layout(egui::Layout::left_to_right(egui::Align::Center));
+            for _ in columns {
+                // An intrinsic (absolute, resizable) width per column: it keeps this
+                // width regardless of available width, so wide tables overflow the
+                // viewport and the outer horizontal scrollbar appears. NOT clipped — a
+                // clipped/auto column would shrink to fit and never overflow.
+                builder = builder.column(TableColumn::initial(140.0).at_least(80.0));
             }
-            header.col(|ui| {
-                ui.strong("");
-            });
-        })
-        .body(|body| {
-            // VIRTUALIZED: `TableBody::rows` realizes only viewport-visible rows
-            // (NOT `::row` per element — AD-001/HINT-004/FR-008).
-            body.rows(row_height, rows.len(), |mut table_row| {
-                let row_idx = table_row.index();
-                realized.set(realized.get() + 1);
-                let row = &rows[row_idx];
-                for (col_idx, col) in columns.iter().enumerate() {
-                    let cell = &row.cells[col_idx];
-                    table_row.col(|ui| {
-                        render_cell(
-                            ui,
-                            CellPos {
-                                row: row_idx,
-                                column: col_idx,
-                            },
-                            col,
-                            cell,
-                            &mut draft,
-                            &mut pending,
-                            &mut new_focus,
-                            &mut clear_focus,
-                            &mut nav,
-                        );
-                    });
-                }
-                // The per-row delete control (discoverable row removal, FR-007).
-                table_row.col(|ui| {
-                    if ui
-                        .small_button("\u{2716}")
-                        .on_hover_text("Delete row")
-                        .clicked()
-                    {
-                        pending = Some(PendingAction::DeleteRow { row: row_idx });
+            // A trailing column for per-row controls (delete) — only when row-ops apply.
+            if row_ops {
+                builder = builder.column(TableColumn::initial(40.0).at_least(40.0));
+            }
+
+            builder
+                .header(row_height, |mut header| {
+                    for (col_idx, col) in columns.iter().enumerate() {
+                        header.col(|ui| {
+                            render_column_header(ui, col, rows, col_idx);
+                        });
                     }
+                    if row_ops {
+                        header.col(|ui| {
+                            ui.strong("");
+                        });
+                    }
+                })
+                .body(|body| {
+                    // VIRTUALIZED: `TableBody::rows` realizes only viewport-visible rows
+                    // (NOT `::row` per element — AD-001/HINT-004/FR-008).
+                    body.rows(row_height, rows.len(), |mut table_row| {
+                        let row_idx = table_row.index();
+                        realized.set(realized.get() + 1);
+                        let row = &rows[row_idx];
+                        for (col_idx, col) in columns.iter().enumerate() {
+                            let cell = &row.cells[col_idx];
+                            table_row.col(|ui| {
+                                render_cell(
+                                    ui,
+                                    &section,
+                                    CellPos {
+                                        row: row_idx,
+                                        column: col_idx,
+                                    },
+                                    col,
+                                    cell,
+                                    row_ops,
+                                    &mut draft,
+                                    &mut pending,
+                                    &mut new_focus,
+                                    &mut clear_focus,
+                                    &mut nav,
+                                );
+                            });
+                        }
+                        // The per-row delete control (discoverable row removal, FR-007)
+                        // — RecordList only.
+                        if row_ops {
+                            table_row.col(|ui| {
+                                if ui
+                                    .small_button("\u{2716}")
+                                    .on_hover_text("Delete row")
+                                    .clicked()
+                                {
+                                    pending = Some(PendingAction::DeleteRow { row: row_idx });
+                                }
+                            });
+                        }
+                    });
                 });
-            });
         });
 
     // Apply view-state focus changes (byte-free — FR-020).
@@ -762,8 +1506,8 @@ pub fn render_table_view_counting(
     // cell (its focus path survives a virtualization scroll, FR-016/FR-027).
     if pending.is_none() {
         if let (Some(dir), Some((row, col))) = (nav, active_cell) {
-            if let Some((nr, nc)) = neighbour_cell(&model, row, col, dir) {
-                if let Some(target) = focus_target_for(&model, nr, nc) {
+            if let Some((nr, nc)) = neighbour_cell(model, row, col, dir) {
+                if let Some(target) = focus_target_for(model, nr, nc) {
                     doc.view_state_mut().set_focus(
                         target.0,
                         FocusSurface::TableCell {
@@ -786,10 +1530,19 @@ pub fn render_table_view_counting(
                 row,
                 field,
                 value,
+                value_ref,
                 advance,
             } => {
                 doc.view_state_mut().clear_focus();
-                let res = doc.apply_table_set_cell(&section, row, &field, value, worker, now);
+                // RecordList commits by `(row, field)` (and adds an absent field for a
+                // blank cell); RecordMap / TupleList commit the existing cell value in
+                // place by its structural path (FR-006).
+                let res = match (row_ops, &value_ref) {
+                    (false, Some(path)) => {
+                        doc.apply_table_set_cell_at(path, value, worker, now)
+                    }
+                    _ => doc.apply_table_set_cell(&section, row, &field, value, worker, now),
+                };
                 // On a successful commit, move focus per the keyboard model (FR-009):
                 // Next → next cell; last column → next row; last cell of last row →
                 // append a row + land in its first cell. Prev → previous cell.
@@ -798,13 +1551,13 @@ pub fn render_table_view_counting(
                         advance,
                         model.columns.iter().position(|c| c.field_name == field),
                     ) {
-                        advance_focus(doc, &model, row, col, dir, worker, now);
+                        advance_focus(doc, model, row_ops, row, col, dir, worker, now);
                     }
                 }
                 res
             }
             PendingAction::AppendRow => {
-                let value = default_row_text(&model);
+                let value = default_row_text(model);
                 doc.apply_table_append_row(&section, value, worker, now)
             }
             PendingAction::DeleteRow { row } => {
@@ -829,6 +1582,13 @@ pub fn render_table_view_counting(
                     .set_active_view(crate::structural::view_state::ActiveView::TreeForm);
                 Ok(())
             }
+            PendingAction::OpenAsTable { path } => {
+                // Open the nested List/Map as a table in place: re-key the navigator's
+                // selected section and STAY in the Table view (E013). Byte-free.
+                doc.view_state_mut().clear_focus();
+                doc.view_state_mut().set_selected_table_section(Some(path));
+                Ok(())
+            }
         };
         if let Err(reason) = result {
             doc.set_tree_error(blocked_message(reason));
@@ -840,6 +1600,91 @@ pub fn render_table_view_counting(
     // Surface the last inline error consistently with the diagnostics model (FR-003).
     if let Some(msg) = doc.tree_error() {
         ui.colored_label(error_color(ui), msg);
+    }
+}
+
+/// Render the **path-projected** table for the LIVE node at `path` (E013 — "open any
+/// nested collection as a table"), driving the same cell edits / drill-in /
+/// open-as-table / (RecordList-only) row ops as [`render_table_view`].
+///
+/// Unlike [`render_table_view`] (keyed by `(section, shape)` for the scanner's strict
+/// labeled shapes), this projects the node permissively through
+/// [`TableModel::derive_any`] so the navigator can render any drilled-into List/Map.
+/// Row add/remove + blank-cell "add field" stay RecordList-only — they are enabled
+/// only when the node is a List of records (the [`apply_table_append_row`] /
+/// blank-cell pipeline is well-defined only there); other projected shapes (a map, a
+/// tuple list, a scalar/mixed list) render with editable scalar cells but no row ops.
+pub fn render_table_view_any(
+    ui: &mut Ui,
+    doc: &mut EditorDocument,
+    worker: &ReparseWorker,
+    path: &StructuralPath,
+) {
+    let counter = Rc::new(StdCell::new(0usize));
+    render_table_view_any_counting(ui, doc, worker, path, &counter);
+}
+
+/// Identical to [`render_table_view_any`] but increments `realized_rows` once per row
+/// the virtualization realizes (the headless test seam, mirroring
+/// [`render_table_view_counting`]).
+pub fn render_table_view_any_counting(
+    ui: &mut Ui,
+    doc: &mut EditorDocument,
+    worker: &ReparseWorker,
+    path: &StructuralPath,
+    realized_rows: &Rc<StdCell<usize>>,
+) {
+    // Stale marker (FR-015): a user-perceivable notice while a reparse is pending.
+    if doc.view_state().is_stale() {
+        ui.weak("(updating\u{2026})");
+    }
+    if doc.parse.is_none() {
+        ui.weak("Parsing\u{2026}");
+        return;
+    }
+
+    // Row ops are RecordList-only — enable them only when the live node is a List of
+    // records (where the append / blank-cell pipeline is well-defined). Computed off
+    // the live CST before the model borrow / mutable view-state writes below.
+    let row_ops = path_is_record_list(doc, path);
+
+    let path = path.clone();
+    let Some(model) = doc.cached_table_model_any(&path).cloned() else {
+        ui.weak("(this is not a table-able collection)");
+        return;
+    };
+    if model.columns.is_empty() {
+        ui.weak("(empty table)");
+        return;
+    }
+
+    render_table_grid(ui, doc, worker, &path, &model, row_ops, realized_rows);
+}
+
+/// `true` when the live node at `path` is a List whose **every** element is a record
+/// (struct / struct-like enum variant) — the only [`derive_any`](TableModel::derive_any)
+/// projection where RecordList row ops (append / delete / blank-cell add) are
+/// well-defined (E013 / Part A5). A pure read over the CST.
+fn path_is_record_list(doc: &EditorDocument, path: &StructuralPath) -> bool {
+    let Some(parse) = doc.parse.as_ref() else {
+        return false;
+    };
+    let root = parse.cst.root();
+    let Some(node) = resolve_path(&root, path) else {
+        return false;
+    };
+    match ast::Value::cast(node) {
+        Some(ast::Value::List(list)) => {
+            let mut any = false;
+            for elem in list.items() {
+                any = true;
+                if !is_record(&elem) {
+                    return false;
+                }
+            }
+            any
+        }
+        _ => false,
     }
 }
 
@@ -868,23 +1713,35 @@ fn default_row_text(model: &TableModel) -> String {
 /// Recover a focus path's grid `(row, column)` within `model`, or `None` when the
 /// path is not a cell of this section.
 ///
-/// The cell path is `section / Index(row) / Field(name)`; we read the row index
-/// from the penultimate step and map the field name to its column index. This is a
-/// path-keyed lookup (cost proportional to path depth + a column-schema scan, not
-/// the section's row count — FR-027), so the active cell survives a virtualization
-/// scroll (FR-016).
+/// Matches `path` against each cell's authoritative [`Cell::value_ref`] (and the
+/// RecordList blank-cell path `section / Index(row) / Field(name)` for a not-yet-
+/// present field). This is model-driven so it works across all section shapes
+/// (RecordList `Field`, RecordMap `Key`/`Field`, TupleList `Index`/`Index`). The
+/// active cell survives a virtualization scroll (FR-016): focus is keyed to the
+/// path, not a screen row.
 fn cell_coords_of(model: &TableModel, path: &StructuralPath) -> Option<(usize, usize)> {
-    let steps = path.steps();
-    let field = match steps.last()? {
-        PathStep::Field(name) => name.clone(),
-        _ => return None,
-    };
-    let row = match steps.get(steps.len().checked_sub(2)?)? {
-        PathStep::Index(i) => *i,
-        _ => return None,
-    };
-    let column = model.columns.iter().position(|c| c.field_name == field)?;
-    Some((row, column))
+    for (r, row) in model.rows.iter().enumerate() {
+        for (c, cell) in row.cells.iter().enumerate() {
+            // A present cell matches by its value_ref.
+            if cell.value_ref.as_ref() == Some(path) {
+                return Some((r, c));
+            }
+            // A RecordList blank cell has no value_ref yet; match the prospective
+            // field path the editor uses (section / Index(row) / Field(name)).
+            if cell.class == CellClass::Blank {
+                if let Some(col) = model.columns.get(c) {
+                    let blank_path = model
+                        .section_ref
+                        .child(PathStep::Index(r))
+                        .child(PathStep::Field(col.field_name.clone()));
+                    if &blank_path == path {
+                        return Some((r, c));
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 /// The grid neighbour of `(row, col)` in direction `dir`, or `None` at a boundary.
@@ -929,22 +1786,40 @@ fn neighbour_cell(
 }
 
 /// The `(focus_path, seed_draft)` for the cell at `(row, col)` of `model`, or
-/// `None` when out of range. The seed draft is the cell's current text (so editing
-/// continues from its value) or empty for a blank cell.
+/// `None` when out of range or not editable (a read-only key cell). The seed draft
+/// is the cell's current text (so editing continues from its value) or empty for a
+/// blank cell.
+///
+/// The path is the cell's authoritative [`Cell::value_ref`] when present (works for
+/// RecordMap `Field` cells and TupleList `Index` cells); for a RecordList blank cell
+/// (no value_ref yet) it is the prospective `section / Index(row) / Field(name)`
+/// path the editor adds the field at.
 fn focus_target_for(
     model: &TableModel,
     row: usize,
     col: usize,
 ) -> Option<(StructuralPath, String)> {
-    let column = model.columns.get(col)?;
-    let path = model
-        .section_ref
-        .child(PathStep::Index(row))
-        .child(PathStep::Field(column.field_name.clone()));
-    let seed = model
-        .cell(row, col)
-        .and_then(|c| c.text.clone())
-        .unwrap_or_default();
+    let cell = model.cell(row, col)?;
+    // A read-only key cell and a nested drill-in / open-as-table cell are not
+    // inline-editable — never a keyboard-nav focus target (E013).
+    if matches!(
+        cell.class,
+        CellClass::ReadOnly | CellClass::Nested | CellClass::NestedTable
+    ) {
+        return None;
+    }
+    let path = match &cell.value_ref {
+        Some(p) => p.clone(),
+        // A blank cell: the prospective add-field path (RecordList only).
+        None => {
+            let column = model.columns.get(col)?;
+            model
+                .section_ref
+                .child(PathStep::Index(row))
+                .child(PathStep::Field(column.field_name.clone()))
+        }
+    };
+    let seed = cell.text.clone().unwrap_or_default();
     Some((path, seed))
 }
 
@@ -952,9 +1827,11 @@ fn focus_target_for(
 /// to the next cell — last column → next row, and the last cell of the last row
 /// **appends a new row** and lands focus in its first cell; backward (`Prev`) moves
 /// to the previous cell. Byte-free except the explicit append.
+#[allow(clippy::too_many_arguments)]
 fn advance_focus(
     doc: &mut EditorDocument,
     model: &TableModel,
+    row_ops: bool,
     row: usize,
     col: usize,
     dir: CellNav,
@@ -964,7 +1841,7 @@ fn advance_focus(
     let section = &model.section_ref;
     if let Some((nr, nc)) = neighbour_cell(model, row, col, dir) {
         // A neighbour exists: re-key focus to it (its path survives the reparse the
-        // commit triggered — FR-016).
+        // commit triggered — FR-016). A read-only key cell yields no focus target.
         if let Some((path, seed)) = focus_target_for(model, nr, nc) {
             doc.view_state_mut().set_focus(
                 path,
@@ -975,7 +1852,7 @@ fn advance_focus(
                 seed,
             );
         }
-    } else if matches!(dir, CellNav::Next) {
+    } else if row_ops && matches!(dir, CellNav::Next) {
         // Past the last cell of the last row → append a new row (one undo unit) and
         // land focus in its first cell (FR-009). The appended row is a separate undo
         // unit from the cell commit, matching the "append a row" action.
@@ -1012,13 +1889,20 @@ struct CellPos {
 }
 
 /// Render one cell: an inline editor for a Scalar cell, a drill-in for a Nested
-/// cell, or an "add field" affordance for a Blank cell (FR-006/FR-010).
+/// cell, an "add field" affordance for a Blank cell (RecordList only — FR-006/
+/// FR-010), or plain read-only text for a ReadOnly key cell (E012).
+///
+/// `section` addresses the table section (for building a blank cell's prospective
+/// add-field path); `row_ops` is true only for a RecordList section (the only shape
+/// where a blank cell becomes an editable add-field affordance).
 #[allow(clippy::too_many_arguments)]
 fn render_cell(
     ui: &mut Ui,
+    section: &StructuralPath,
     pos: CellPos,
     col: &Column,
     cell: &Cell,
+    row_ops: bool,
     draft: &mut Option<(StructuralPath, String)>,
     pending: &mut Option<PendingAction>,
     new_focus: &mut Option<(StructuralPath, FocusSurface, String)>,
@@ -1026,10 +1910,19 @@ fn render_cell(
     nav: &mut Option<CellNav>,
 ) {
     match cell.class {
+        CellClass::ReadOnly => {
+            // A read-only value (e.g. a RecordMap key) — plain non-editable text,
+            // no inline editor, no drill-in (E012).
+            ui.label(cell.text.clone().unwrap_or_default());
+        }
         CellClass::Nested => {
-            // A nested cell is NOT edited inline — it drills into the tree/form
-            // surface (FR-006). Show the summary + a drill-in button.
+            // A nested struct / tuple / enum cell is NOT edited inline — it drills
+            // into the tree/form surface (FR-006). Show the value's KIND icon via the
+            // shared [`TypeIndicator`] (▢ struct / ◇ tuple / ◈ enum — E014, the same
+            // glyph the tree paints) + the summary + a drill-in button.
             ui.horizontal(|ui| {
+                let indicator = indicators::from_tree_kind(nested_cell_kind(cell));
+                indicator.show(ui);
                 if let Some(path) = &cell.value_ref {
                     if ui
                         .button(cell.text.clone().unwrap_or_default())
@@ -1046,16 +1939,44 @@ fn render_cell(
                 render_cell_diagnostics(ui, cell);
             });
         }
+        CellClass::NestedTable => {
+            // A nested List/Map cell opens AS A TABLE in place (E013): the list/map
+            // icon itself (▤ / ▦ via the shared [`TypeIndicator`] — E014) prefixes the
+            // clickable "open as table" button; there is no separate drill marker.
+            // Clicking re-keys the navigator's selected section to this cell's path and
+            // STAYS in the Table view (no switch to tree/form).
+            ui.horizontal(|ui| {
+                let indicator = indicators::from_tree_kind(nested_cell_kind(cell));
+                if let Some(path) = &cell.value_ref {
+                    let summary = cell.text.clone().unwrap_or_default();
+                    if ui
+                        .button(format!("{} {summary}", indicator.glyph()))
+                        .on_hover_text("Open as table")
+                        .clicked()
+                    {
+                        *pending = Some(PendingAction::OpenAsTable { path: path.clone() });
+                    }
+                }
+                render_cell_diagnostics(ui, cell);
+            });
+        }
         CellClass::Blank => {
             // A blank (absent-field) cell is visually distinct (an empty/dim
             // affordance) from a present-but-empty scalar (FR-010). Clicking it
-            // begins editing, which ADDS the previously-absent field.
-            let value_path = StructuralPath::root()
+            // begins editing, which ADDS the previously-absent field. This add-field
+            // affordance is RecordList-only; for other shapes a blank cell renders
+            // as inert text (no well-defined add yet).
+            let value_path = section
                 .child(PathStep::Index(pos.row))
                 .child(PathStep::Field(col.field_name.clone()));
+            if !row_ops {
+                ui.weak("\u{2014}");
+                return;
+            }
             let editing = draft.as_ref().is_some_and(|(p, _)| p == &value_path);
             if editing {
-                edit_inline(ui, &value_path, pos, col, draft, pending, clear_focus, nav);
+                // A blank cell has no existing value_ref — commit adds the field.
+                edit_inline(ui, &value_path, None, pos, col, draft, pending, clear_focus, nav);
             } else if ui
                 .add(egui::Button::new(RichText::new("\u{2014}").weak()))
                 .on_hover_text("Add this field")
@@ -1078,8 +1999,22 @@ fn render_cell(
             };
             let editing = draft.as_ref().is_some_and(|(p, _)| p == path);
             ui.horizontal(|ui| {
+                // A small, weak, theme-aware type glyph immediately left of the value
+                // (E013) — a prefix label inside the cell's existing horizontal layout,
+                // so it never breaks the inline editor / focus / keyboard navigation.
+                render_scalar_type_indicator(ui, cell);
                 if editing {
-                    edit_inline(ui, path, pos, col, draft, pending, clear_focus, nav);
+                    edit_inline(
+                        ui,
+                        path,
+                        Some(path.clone()),
+                        pos,
+                        col,
+                        draft,
+                        pending,
+                        clear_focus,
+                        nav,
+                    );
                 } else if ui.button(cell.text.clone().unwrap_or_default()).clicked() {
                     *new_focus = Some((
                         path.clone(),
@@ -1099,10 +2034,16 @@ fn render_cell(
 /// Render the inline text editor for a scalar/blank cell (FR-006/FR-009): commit on
 /// Enter / Tab (advancing focus to the next cell), cancel on Esc; Shift-Tab and the
 /// arrow keys move the active cell without committing.
+///
+/// `value_ref` is the cell's existing value path (`Some` for a present scalar,
+/// `None` for a RecordList blank cell whose commit adds the absent field). It is
+/// carried into the [`PendingAction::SetCell`] so a RecordMap / TupleList cell
+/// commits in place by path.
 #[allow(clippy::too_many_arguments)]
 fn edit_inline(
     ui: &mut Ui,
     path: &StructuralPath,
+    value_ref: Option<StructuralPath>,
     pos: CellPos,
     col: &Column,
     draft: &mut Option<(StructuralPath, String)>,
@@ -1137,6 +2078,7 @@ fn edit_inline(
             row: pos.row,
             field: col.field_name.clone(),
             value: text,
+            value_ref,
             advance: Some(if shift { CellNav::Prev } else { CellNav::Next }),
         });
     } else if up {
@@ -1153,53 +2095,143 @@ fn edit_inline(
 /// text view — no view downgrades or omits a finding the others show.
 fn render_cell_diagnostics(ui: &mut Ui, cell: &Cell) {
     for diag in &cell.diagnostics {
-        let color = severity_color(ui, diag.severity);
-        let glyph = match diag.severity {
-            Severity::Error => "\u{2716}",
-            Severity::Warning => "\u{26A0}",
-        };
-        ui.label(RichText::new(glyph).color(color))
-            .on_hover_text(format!(
-                "{} [{}]: {}",
-                severity_word(diag.severity),
-                diag.code.code(),
-                diag.message
-            ));
+        // Route the glyph + color + word through the shared [`TypeIndicator`] (E014)
+        // so the cell diagnostic indicator matches the tree's and the text view's.
+        let indicator = indicators::from_severity(diag.severity);
+        ui.label(indicator.rich(ui)).on_hover_text(format!(
+            "{} [{}]: {}",
+            indicator.word(),
+            diag.code.code(),
+            diag.message
+        ));
     }
 }
 
-/// The severity word for a diagnostic detail string.
-fn severity_word(severity: Severity) -> &'static str {
-    match severity {
-        Severity::Error => "error",
-        Severity::Warning => "warning",
-    }
-}
-
-/// The theme-aware indicator colour for a severity (matches the text + tree views).
-fn severity_color(ui: &Ui, severity: Severity) -> egui::Color32 {
-    let dark = ui.visuals().dark_mode;
-    match severity {
-        Severity::Error => {
-            if dark {
-                egui::Color32::from_rgb(0xF4, 0x47, 0x47)
-            } else {
-                egui::Color32::from_rgb(0xCD, 0x31, 0x31)
-            }
-        }
-        Severity::Warning => {
-            if dark {
-                egui::Color32::from_rgb(0xCC, 0xA7, 0x00)
-            } else {
-                egui::Color32::from_rgb(0xBF, 0x83, 0x03)
-            }
-        }
-    }
-}
-
-/// The inline-error text colour (re-uses the error severity colour for FR-003).
+/// The inline-error text colour (re-uses the shared error indicator's colour for FR-003).
 fn error_color(ui: &Ui) -> egui::Color32 {
-    severity_color(ui, Severity::Error)
+    TypeIndicator::Error.color(ui)
+}
+
+// =============================================================================
+// Type indicators (E013/E014) — per-cell / per-column type glyphs + colors via the
+// single shared [`TypeIndicator`] system, so the table and the tree draw the SAME
+// glyph + color for the same concept (`structural::indicators`).
+// =============================================================================
+
+/// The [`TreeNodeKind`] a [`CellClass::Nested`] / [`CellClass::NestedTable`] cell's
+/// nested value belongs to, so the table reuses the shared [`TypeIndicator`] for
+/// nested type indicators (E014).
+///
+/// `NestedTable` is only ever produced for a List or a Map (open-as-table); `Nested`
+/// for a struct / tuple / enum-variant (tree/form drill-in). A column's
+/// representative nested cell is consulted, defaulting safely to a generic kind.
+#[must_use]
+fn nested_cell_kind(cell: &Cell) -> TreeNodeKind {
+    match cell.class {
+        // A NestedTable cell is a List or a Map; resolve which from the live value if
+        // available, else default to List (the more common open-as-table case).
+        CellClass::NestedTable => nested_value_kind(cell).unwrap_or(TreeNodeKind::List),
+        CellClass::Nested => nested_value_kind(cell).unwrap_or(TreeNodeKind::Struct),
+        _ => TreeNodeKind::Leaf,
+    }
+}
+
+/// Best-effort: the [`TreeNodeKind`] of a nested cell's value, parsed from its summary
+/// text's leading delimiter (the cell carries a compact summary, not the live node).
+/// `[` → list, `{` → map, `(` → struct/tuple, an identifier → enum/struct.
+#[must_use]
+fn nested_value_kind(cell: &Cell) -> Option<TreeNodeKind> {
+    let text = cell.text.as_deref()?.trim_start();
+    let first = text.chars().next()?;
+    Some(match first {
+        '[' => TreeNodeKind::List,
+        '{' => TreeNodeKind::Map,
+        // A bare `( .. )` is an anonymous struct/tuple; with a leading Ident it is a
+        // named struct or enum variant. The exact split is not load-bearing for the
+        // indicator color — both map onto the struct/tuple/enum palette.
+        '(' => TreeNodeKind::Tuple,
+        _ => TreeNodeKind::Struct,
+    })
+}
+
+/// Render the per-cell type indicator immediately left of a [`CellClass::Scalar`]
+/// cell's value (E014). A no-op when the cell carries no scalar class. The glyph is
+/// drawn via the shared [`TypeIndicator`] (same glyph/size/color as the tree — NEVER
+/// `.small()`), as a prefix label inside the cell's existing horizontal layout, so it
+/// never interferes with the inline editor / focus / keyboard navigation.
+fn render_scalar_type_indicator(ui: &mut Ui, cell: &Cell) {
+    if let Some(class) = cell.scalar {
+        let indicator = indicators::from_scalar_class(class);
+        ui.label(indicator.rich(ui)).on_hover_text(indicator.word());
+    }
+}
+
+/// The representative [`ScalarClass`] of a Scalar `column` across `rows` (E013): the
+/// dominant present scalar type (most frequent), tie-broken by first appearance. Used
+/// to color/glyph the column header. `None` when no scalar cell is present.
+#[must_use]
+fn column_scalar_class(rows: &[Row], col_idx: usize) -> Option<ScalarClass> {
+    // first-seen order of classes + their counts, so we can pick the dominant one and
+    // tie-break by first appearance deterministically.
+    let mut seen: Vec<(ScalarClass, usize)> = Vec::new();
+    for row in rows {
+        if let Some(cell) = row.cells.get(col_idx) {
+            if cell.class == CellClass::Scalar {
+                if let Some(class) = cell.scalar {
+                    if let Some(entry) = seen.iter_mut().find(|(c, _)| *c == class) {
+                        entry.1 += 1;
+                    } else {
+                        seen.push((class, 1));
+                    }
+                }
+            }
+        }
+    }
+    // Max by count; `max_by_key` keeps the FIRST max on ties (stable), which is the
+    // first-present class — exactly the documented tie-break.
+    seen.iter().max_by_key(|(_, n)| *n).map(|(c, _)| *c)
+}
+
+/// The representative nested [`TreeNodeKind`] of a [`ColumnClass::Nested`] column, for
+/// its header [`TypeIndicator`] (E014): the kind of the column's first nested cell,
+/// defaulting safely to List.
+#[must_use]
+fn column_nested_kind(rows: &[Row], col_idx: usize) -> TreeNodeKind {
+    rows.iter()
+        .filter_map(|row| row.cells.get(col_idx))
+        .find(|c| matches!(c.class, CellClass::Nested | CellClass::NestedTable))
+        .map(nested_cell_kind)
+        .unwrap_or(TreeNodeKind::List)
+}
+
+/// The header [`TypeIndicator`] for one `column` over `rows` (E014): a Scalar column
+/// uses its dominant cell type's indicator ([`from_scalar_class`](indicators::from_scalar_class));
+/// a Nested column uses its representative nested kind's indicator
+/// ([`from_tree_kind`](indicators::from_tree_kind) — ▤/▦ for a list/map column, ▢/◇/◈
+/// for a struct/tuple/enum drill-in column). `None` when no representative type is
+/// derivable (an all-blank scalar column).
+#[must_use]
+fn column_type_indicator(
+    column: &Column,
+    rows: &[Row],
+    col_idx: usize,
+) -> Option<TypeIndicator> {
+    match column.class {
+        ColumnClass::Scalar => column_scalar_class(rows, col_idx).map(indicators::from_scalar_class),
+        ColumnClass::Nested => Some(indicators::from_tree_kind(column_nested_kind(rows, col_idx))),
+    }
+}
+
+/// Render one column header (E014): the column's shared [`TypeIndicator`] glyph (same
+/// glyph/size/color as the tree paints) + the field name (strong).
+fn render_column_header(ui: &mut Ui, column: &Column, rows: &[Row], col_idx: usize) {
+    let indicator = column_type_indicator(column, rows, col_idx);
+    ui.horizontal(|ui| {
+        if let Some(indicator) = indicator {
+            ui.label(indicator.rich(ui));
+        }
+        ui.strong(&column.field_name);
+    });
 }
 
 /// A user-facing message for a blocked op (FR-003 inline error).
@@ -1254,7 +2286,21 @@ mod tests {
             .position(|c| c.field_name == "tags")
             .unwrap();
         assert_eq!(m.columns[tags].class, ColumnClass::Nested);
-        assert_eq!(m.cell(0, tags).unwrap().class, CellClass::Nested);
+        // A List value cell opens AS A TABLE in place (E013), distinct from a
+        // struct/tuple/enum cell which stays a tree/form drill-in (`Nested`).
+        assert_eq!(m.cell(0, tags).unwrap().class, CellClass::NestedTable);
+    }
+
+    #[test]
+    fn struct_and_tuple_cells_stay_nested_while_list_map_cells_open_as_table() {
+        // E013: only List/Map value cells become NestedTable; struct/tuple/enum stay
+        // Nested (tree/form drill-in).
+        let m = model_of("[(l: [1], m: {1: 2}, s: (k: 1), t: (1, 2))]");
+        let col = |name: &str| m.columns.iter().position(|c| c.field_name == name).unwrap();
+        assert_eq!(m.cell(0, col("l")).unwrap().class, CellClass::NestedTable);
+        assert_eq!(m.cell(0, col("m")).unwrap().class, CellClass::NestedTable);
+        assert_eq!(m.cell(0, col("s")).unwrap().class, CellClass::Nested);
+        assert_eq!(m.cell(0, col("t")).unwrap().class, CellClass::Nested);
     }
 
     #[test]
@@ -1275,5 +2321,94 @@ mod tests {
     #[test]
     fn non_list_section_has_no_table() {
         assert!(TableModel::derive(&parse("Point(x: 1)"), &StructuralPath::root(), &[]).is_none());
+    }
+
+    // =========================================================================
+    // E013 — per-cell / per-column type indicators
+    // =========================================================================
+
+    #[test]
+    fn scalar_cells_carry_their_scalar_class() {
+        // Each present scalar cell carries the classifier's broad type so the per-cell
+        // indicator can glyph/color it; a nested/blank cell carries none.
+        let m = model_of("[(i: 1, f: 1.5, s: \"x\", c: 'q', b: true, n: [1])]");
+        let col = |name: &str| m.columns.iter().position(|c| c.field_name == name).unwrap();
+
+        assert_eq!(m.cell(0, col("i")).unwrap().scalar, Some(ScalarClass::Integer));
+        assert_eq!(m.cell(0, col("f")).unwrap().scalar, Some(ScalarClass::Float));
+        assert_eq!(m.cell(0, col("s")).unwrap().scalar, Some(ScalarClass::Str));
+        assert_eq!(m.cell(0, col("c")).unwrap().scalar, Some(ScalarClass::Char));
+        assert_eq!(m.cell(0, col("b")).unwrap().scalar, Some(ScalarClass::Bool));
+        // A nested-list cell (NestedTable) carries NO scalar class.
+        assert_eq!(m.cell(0, col("n")).unwrap().scalar, None);
+    }
+
+    #[test]
+    fn blank_and_readonly_cells_carry_no_scalar_class() {
+        let m = model_of("[(a: 1, b: 2), (a: 3)]");
+        let b_col = m.columns.iter().position(|c| c.field_name == "b").unwrap();
+        // Row 1 lacks `b` → Blank, no scalar class.
+        assert_eq!(m.cell(1, b_col).unwrap().class, CellClass::Blank);
+        assert_eq!(m.cell(1, b_col).unwrap().scalar, None);
+    }
+
+    #[test]
+    fn scalar_type_name_exposes_the_word() {
+        let m = model_of("[(i: 1, s: \"x\")]");
+        assert_eq!(m.cell(0, 0).unwrap().scalar_type_name(), Some("integer"));
+        assert_eq!(m.cell(0, 1).unwrap().scalar_type_name(), Some("string"));
+    }
+
+    #[test]
+    fn each_scalar_type_has_a_distinct_font_covered_glyph() {
+        // The scalar classes map (via the shared `TypeIndicator`) to distinct glyphs.
+        // `Other` collapses onto the generic `Scalar` indicator (•), so the six
+        // typed classes (integer/float/str/char/bool/unit) must be mutually distinct.
+        let classes = [
+            ScalarClass::Integer,
+            ScalarClass::Float,
+            ScalarClass::Str,
+            ScalarClass::Char,
+            ScalarClass::Bool,
+            ScalarClass::Unit,
+        ];
+        let mut glyphs: Vec<&str> = classes
+            .iter()
+            .map(|c| indicators::from_scalar_class(*c).glyph())
+            .collect();
+        glyphs.sort_unstable();
+        glyphs.dedup();
+        assert_eq!(glyphs.len(), classes.len(), "every typed scalar glyph is distinct");
+    }
+
+    #[test]
+    fn column_representative_scalar_class_is_the_dominant_type() {
+        // Column `a` is integer in 2 of 3 rows, string in 1 → dominant = integer.
+        let m = model_of("[(a: 1), (a: 2), (a: \"x\")]");
+        // (this list is non-uniform for the classifier, but `derive` is permissive)
+        let a = m.columns.iter().position(|c| c.field_name == "a").unwrap();
+        assert_eq!(column_scalar_class(&m.rows, a), Some(ScalarClass::Integer));
+    }
+
+    #[test]
+    fn nested_column_indicator_uses_the_shared_kind_glyph() {
+        // A column whose cells are Lists carries the List indicator (▤, the list icon
+        // is itself the open-as-table affordance); a column whose cells are structs
+        // carries the Struct indicator (▢ tree/form drill-in) — the SAME glyphs the
+        // tree paints (E014).
+        let m = model_of("[(items: [1], meta: Meta(k: 1)), (items: [2], meta: Meta(k: 2)), (items: [3], meta: Meta(k: 3))]");
+        let items = m.columns.iter().position(|c| c.field_name == "items").unwrap();
+        let meta = m.columns.iter().position(|c| c.field_name == "meta").unwrap();
+        assert_eq!(column_nested_kind(&m.rows, items), TreeNodeKind::List);
+        assert_eq!(
+            column_type_indicator(&m.columns[items], &m.rows, items),
+            Some(TypeIndicator::List),
+            "List column → list indicator (▤)"
+        );
+        assert_eq!(
+            column_type_indicator(&m.columns[meta], &m.rows, meta),
+            Some(TypeIndicator::Struct),
+            "struct column → struct indicator (▢)"
+        );
     }
 }

@@ -48,12 +48,14 @@ use egui::{Key, RichText, Ui};
 
 use ron_core::ast;
 use ron_core::transform::{ParentRef, StructuralOp};
-use ron_core::{BlockedReason, CstDocument, Severity, SyntaxNode};
+use ron_core::{BlockedReason, CstDocument, SyntaxNode};
 
 use crate::byte_to_char::ByteCharIndex;
 use crate::diagnostics_map::DiagnosticView;
 use crate::document::EditorDocument;
 use crate::reparse::ReparseWorker;
+use crate::structural::classifier::{scalar_class_of, ScalarClass};
+use crate::structural::indicators::{self, TypeIndicator};
 use crate::structural::view_state::{resolve_path, FocusSurface, PathStep, StructuralPath};
 
 /// The structural classification a [`TreeNode`] projects (mirrors the CST shape).
@@ -184,6 +186,12 @@ pub struct TreeNode {
     pub editable: TreeEditable,
     /// The inline-editor widget for a scalar leaf, or `None` for a non-leaf.
     pub leaf_widget: Option<LeafWidget>,
+    /// The broad scalar type of a [`TreeNodeKind::Leaf`] node (int / float / string /
+    /// char / bool / unit), driving the leading type-indicator glyph (E014). `None`
+    /// for a non-leaf node or an unclassifiable leaf (rendered as a generic scalar).
+    ///
+    /// `pub(crate)` because [`ScalarClass`] is itself `pub(crate)`.
+    pub(crate) scalar: Option<ScalarClass>,
     /// For an enum-variant node: its current variant name (FR-002/FR-003). `None`
     /// for a non-variant node.
     pub variant_name: Option<String>,
@@ -317,6 +325,16 @@ fn build_node(
     let option_shape = option_shape_of(node);
     let (editable, leaf_widget) = classify_editable(node, kind, option_shape.as_ref());
     let (variant_name, variant_candidates) = variant_info_of(node, kind, peer_variants);
+    // The leaf's broad scalar class drives its specific leading type icon (E014):
+    // reuse the classifier so the tree and the table glyph the same value identically.
+    // Only a Leaf carries a scalar class (a collection / error node is `None`).
+    let scalar = if kind == TreeNodeKind::Leaf {
+        ast::Value::cast(node.clone())
+            .as_ref()
+            .and_then(scalar_class_of)
+    } else {
+        None
+    };
 
     let children = if kind.is_collection() {
         build_children(node, kind, &path, diagnostics, index)
@@ -333,6 +351,7 @@ fn build_node(
         node_ref: path,
         editable,
         leaf_widget,
+        scalar,
         variant_name,
         variant_candidates,
         option_shape,
@@ -1074,9 +1093,20 @@ pub fn render_tree_view(ui: &mut Ui, doc: &mut EditorDocument, worker: &ReparseW
         clear_rename: &mut clear_rename,
     };
 
-    for root in &model.roots {
-        render_node(ui, root, None, &mut ctx);
-    }
+    // Scroll the node-render loop so tall/wide trees scroll (Part C). The back /
+    // Expand-All / Collapse-All controls above are intentionally OUTSIDE this scroll
+    // area so they stay pinned and discoverable.
+    egui::ScrollArea::both()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            for (i, root) in model.roots.iter().enumerate() {
+                // A visual separator between top-level roots (Part B — readability).
+                if i > 0 {
+                    ui.separator();
+                }
+                render_node(ui, root, None, 0, &mut ctx);
+            }
+        });
 
     // Apply rename-draft changes (byte-free — FR-020).
     if clear_rename {
@@ -1285,9 +1315,21 @@ pub fn set_subtree_open(ctx: &egui::Context, doc_id: u64, node: &TreeNode, open:
 
 /// Render one tree node row + (recursively) its expanded children. `sibling` is
 /// `Some` for a child within a collection (it then offers reorder/remove controls),
-/// `None` for the root.
-fn render_node(ui: &mut Ui, node: &TreeNode, sibling: Option<&SiblingCtx>, ctx: &mut RenderCtx) {
-    let header = node_header(node);
+/// `None` for the root; `depth` is the node's nesting level (root = 0), used to draw
+/// the per-level indent guides in the left margin (visual only).
+fn render_node(
+    ui: &mut Ui,
+    node: &TreeNode,
+    sibling: Option<&SiblingCtx>,
+    depth: usize,
+    ctx: &mut RenderCtx,
+) {
+    // Indent guides: a thin vertical line per nesting level in the left margin,
+    // painted across this node row's vertical extent (visual only — no model change).
+    let row_top = ui.cursor().top();
+
+    let header = node_header(node, ui);
+    let summary = node_summary_text(node);
     // An Option value (`Some(x)` / `None`) edits inline as a Some/None selector
     // regardless of its underlying variant/tuple shape (FR-002) — render it as a
     // leaf-style row, never a collapsible collection. A *bare* enum variant (no
@@ -1307,6 +1349,12 @@ fn render_node(ui: &mut Ui, node: &TreeNode, sibling: Option<&SiblingCtx>, ctx: 
         )
         .show_header(ui, |ui| {
             ui.label(header);
+            // The collapsed-collection child count (N) + a monospace, weak value
+            // preview — readability polish (visual only).
+            ui.weak(format!("({})", node.children.len()));
+            if !summary.is_empty() {
+                ui.monospace(RichText::new(summary).weak());
+            }
             render_node_diagnostics(ui, node);
             // The inline variant selector (FR-002) for a struct-like enum variant
             // sits in its header so the user can swap the variant in place.
@@ -1323,18 +1371,45 @@ fn render_node(ui: &mut Ui, node: &TreeNode, sibling: Option<&SiblingCtx>, ctx: 
                     index: i,
                     count,
                 };
-                render_node(ui, child, Some(&sib), ctx);
+                render_node(ui, child, Some(&sib), depth + 1, ctx);
             }
         });
     } else {
         // A leaf row: label + inline editor (or read-only summary) + sibling ops.
         ui.horizontal(|ui| {
-            ui.label(format!("{}:", node.label));
+            ui.label(header);
             render_leaf_editor(ui, node, ctx);
             render_node_diagnostics(ui, node);
             render_rename_control(ui, node, sibling, ctx);
             render_sibling_controls(ui, node, sibling, ctx.pending);
         });
+    }
+
+    // Paint the indent guides over this row's vertical extent (after layout so the
+    // row's height is known). One thin vertical line per ancestor level (depth), in a
+    // weak theme color, in the left margin.
+    let row_bottom = ui.cursor().top();
+    draw_indent_guides(ui, depth, row_top, row_bottom);
+}
+
+/// Draw `depth` thin vertical guide lines in the left margin spanning `[top, bottom)`
+/// (E013 / Part B — indent guides). Visual only: it paints over already-laid-out rows
+/// and reads nothing from the model. A weak theme color keeps the guides subtle.
+fn draw_indent_guides(ui: &Ui, depth: usize, top: f32, bottom: f32) {
+    if depth == 0 || bottom <= top {
+        return;
+    }
+    /// Horizontal spacing between adjacent indent guide lines (px).
+    const STEP: f32 = 14.0;
+    let left = ui.max_rect().left() + 4.0;
+    let color = ui.visuals().weak_text_color().gamma_multiply(0.5);
+    let painter = ui.painter();
+    for level in 0..depth {
+        let x = left + level as f32 * STEP;
+        painter.line_segment(
+            [egui::pos2(x, top), egui::pos2(x, bottom)],
+            egui::Stroke::new(1.0, color),
+        );
     }
 }
 
@@ -1489,18 +1564,35 @@ fn render_sibling_controls(
     }
 }
 
-/// The collapsed-row header text for a collection node.
-fn node_header(node: &TreeNode) -> String {
-    let kind = match node.kind {
-        TreeNodeKind::Struct => "struct",
-        TreeNodeKind::Map => "map",
-        TreeNodeKind::List => "list",
-        TreeNodeKind::Tuple => "tuple",
-        TreeNodeKind::EnumVariant => "enum",
-        TreeNodeKind::Leaf => "leaf",
-        TreeNodeKind::Error => "error",
-    };
-    format!("{} [{kind}] {}", node.label, node.value_summary)
+/// The shared [`TypeIndicator`] for a node (E014): a [`TreeNodeKind::Leaf`] uses its
+/// specific scalar icon when the leaf's class is known, falling back to the generic
+/// [`TypeIndicator::Scalar`] (`•`); every other kind uses its kind icon. This is the
+/// single source of truth the tree, the table, and the boundary badges all share.
+#[must_use]
+fn node_indicator(node: &TreeNode) -> TypeIndicator {
+    match node.kind {
+        TreeNodeKind::Leaf => node
+            .scalar
+            .map(indicators::from_scalar_class)
+            .unwrap_or(TypeIndicator::Scalar),
+        other => indicators::from_tree_kind(other),
+    }
+}
+
+/// The colored, icon-prefixed header [`RichText`] for a node row (Part B): the shared
+/// [`TypeIndicator`] glyph (E014) + the label + the bracketed kind word, colored by
+/// the indicator's theme-aware color. The value preview is rendered separately in
+/// monospace by the caller (so it can be weak/monospaced).
+fn node_header(node: &TreeNode, ui: &Ui) -> RichText {
+    let indicator = node_indicator(node);
+    RichText::new(format!("{} {} [{}]", indicator.glyph(), node.label, indicator.word()))
+        .color(indicator.color(ui))
+}
+
+/// The value-preview text for a node row (Part B), rendered by the caller in
+/// monospace + weak. Empty when there is nothing to preview.
+fn node_summary_text(node: &TreeNode) -> String {
+    node.value_summary.clone()
 }
 
 /// Render the inline leaf editor for a node (FR-002), or a read-only summary.
@@ -1508,7 +1600,8 @@ fn render_leaf_editor(ui: &mut Ui, node: &TreeNode, ctx: &mut RenderCtx) {
     match (node.editable, node.leaf_widget) {
         (TreeEditable::ReadOnly, _) => {
             // `()` / empty / error: a non-editable structural leaf (FR-002/019).
-            ui.weak(&node.value_summary);
+            // A monospace, weak value preview (Part B — readability).
+            ui.monospace(RichText::new(&node.value_summary).weak());
         }
         (TreeEditable::ScalarLeaf, Some(LeafWidget::Bool)) => {
             // A bool toggle: flipping commits immediately (a one-shot edit).
@@ -1536,7 +1629,7 @@ fn render_leaf_editor(ui: &mut Ui, node: &TreeNode, ctx: &mut RenderCtx) {
             // Unreachable for a leaf row (only non-collection nodes reach here), but
             // handled defensively: a structural node shows its summary, never a leaf
             // editor.
-            ui.weak(&node.value_summary);
+            ui.monospace(RichText::new(&node.value_summary).weak());
         }
         (TreeEditable::ScalarLeaf, _) => {
             // A text field over the literal token. The draft is held on the view
@@ -1560,8 +1653,11 @@ fn render_leaf_editor(ui: &mut Ui, node: &TreeNode, ctx: &mut RenderCtx) {
                     *ctx.clear_focus = true;
                 }
             } else {
-                // Click the value summary to begin editing.
-                if ui.button(&node.value_summary).clicked() {
+                // Click the (monospace, weak) value summary to begin editing.
+                if ui
+                    .button(RichText::new(&node.value_summary).monospace().weak())
+                    .clicked()
+                {
                     *ctx.new_focus = Some((node.node_ref.clone(), leaf_draft_text_for(node)));
                 }
             }
@@ -1672,53 +1768,21 @@ fn render_node_ops(ui: &mut Ui, node: &TreeNode, pending: &mut Option<PendingAct
 /// text view — no view downgrades or omits a finding the others show.
 fn render_node_diagnostics(ui: &mut Ui, node: &TreeNode) {
     for diag in &node.diagnostics {
-        let color = severity_color(ui, diag.severity);
-        let glyph = match diag.severity {
-            Severity::Error => "\u{2716}",   // heavy multiplication x
-            Severity::Warning => "\u{26A0}", // warning sign
-        };
-        ui.label(RichText::new(glyph).color(color))
-            .on_hover_text(format!(
-                "{} [{}]: {}",
-                severity_word(diag.severity),
-                diag.code.code(),
-                diag.message
-            ));
+        // Route the glyph + color + word through the shared [`TypeIndicator`] (E014)
+        // so the tree diagnostic indicator matches the table's and the text view's.
+        let indicator = indicators::from_severity(diag.severity);
+        ui.label(indicator.rich(ui)).on_hover_text(format!(
+            "{} [{}]: {}",
+            indicator.word(),
+            diag.code.code(),
+            diag.message
+        ));
     }
 }
 
-/// The severity word for a diagnostic detail string.
-fn severity_word(severity: Severity) -> &'static str {
-    match severity {
-        Severity::Error => "error",
-        Severity::Warning => "warning",
-    }
-}
-
-/// The theme-aware indicator colour for a severity (matches the text view).
-fn severity_color(ui: &Ui, severity: Severity) -> egui::Color32 {
-    let dark = ui.visuals().dark_mode;
-    match severity {
-        Severity::Error => {
-            if dark {
-                egui::Color32::from_rgb(0xF4, 0x47, 0x47)
-            } else {
-                egui::Color32::from_rgb(0xCD, 0x31, 0x31)
-            }
-        }
-        Severity::Warning => {
-            if dark {
-                egui::Color32::from_rgb(0xCC, 0xA7, 0x00)
-            } else {
-                egui::Color32::from_rgb(0xBF, 0x83, 0x03)
-            }
-        }
-    }
-}
-
-/// The inline-error text colour (re-uses the error severity colour for FR-003).
+/// The inline-error text colour (re-uses the shared error indicator's colour for FR-003).
 fn error_color(ui: &Ui) -> egui::Color32 {
-    severity_color(ui, Severity::Error)
+    TypeIndicator::Error.color(ui)
 }
 
 /// A user-facing message for a blocked op (FR-003 inline error).

@@ -104,10 +104,11 @@ fn stale_results_are_discarded() {
     assert_eq!(doc.edit_generation(), 2);
 
     let worker = ReparseWorker::new();
-    // Request only the *stale* generation-1 text directly. The doc's current
-    // generation is 2, so whatever the worker delivers for gen 1 must be
-    // discarded by `poll_parse` — it can never install.
-    worker.request(1, "(a: 1)".to_string(), None);
+    // Request only the *stale* generation-1 text directly (tagged with this
+    // document's id so it routes back here). The doc's current generation is 2, so
+    // whatever the worker delivers for gen 1 must be discarded by `poll_parse` — it
+    // can never install.
+    worker.request(doc.id(), 1, "(a: 1)".to_string(), None);
 
     // Poll across a bounded window; a stale result must never install, regardless
     // of when (or whether) the worker has delivered it yet.
