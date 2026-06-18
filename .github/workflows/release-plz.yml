@@ -90,7 +90,7 @@ jobs:
         # Installed via the already-SHA-pinned taiki-e/install-action so NO new
         # un-pinnable GitHub Action is introduced (T018). Versions are pinned for
         # reproducibility (Dependabot/maintainer bumps the tool versions).
-        uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
+        uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
         with:
           tool: release-plz@0.3.135,cargo-semver-checks@0.42.0
       # --- BLOCKING semver gate (OR-004 / T015 / [COMPLETES OR-004]): run
@@ -144,7 +144,7 @@ jobs:
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - name: Install release-plz (pinned, prebuilt)
         # Same pinned install path as the release-pr job (T018) — no new action.
-        uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
+        uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
         with:
           tool: release-plz@0.3.135
       # --- THE SINGLE crates.io PUBLISH STEP (OR-005 / T019 — exactly one).
