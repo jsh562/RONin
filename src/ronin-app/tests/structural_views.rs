@@ -1100,8 +1100,9 @@ fn navigator_lists_sections_and_selection_switches_grid() {
 
     let doc = Rc::new(RefCell::new(doc));
 
-    // Frame 1: the navigator lists every section by label. The default selection is
-    // the largest section; the `rows` RecordList header column `a` renders.
+    // Frame 1: the tree-outline navigator lists every container node by its label. The
+    // default selection is the document root (never empty); the outline lists the
+    // root's container fields (`rows`, `coords`, `hulls`).
     {
         let doc_ui = Rc::clone(&doc);
         let worker_ui = Rc::clone(&worker);
@@ -1112,28 +1113,18 @@ fn navigator_lists_sections_and_selection_switches_grid() {
                 ronin_app::panels::render_table_seam(ui, &mut d, &worker_ui);
             });
         harness.run();
-        // The navigator side panel lists each section by its path label + R×C (use
-        // the dimension-bearing labels so they are unambiguous vs. the "N rows" text).
+        // The outline lists each container node by its tree label (the icon + name).
         assert!(
-            harness
-                .query_all_by_label_contains("rows   (3")
-                .next()
-                .is_some(),
-            "the navigator lists the `rows` RecordList"
+            harness.query_all_by_label_contains("rows").next().is_some(),
+            "the outline lists the `rows` list node"
         );
         assert!(
-            harness
-                .query_all_by_label_contains("coords   (3")
-                .next()
-                .is_some(),
-            "the navigator lists the `coords` TupleList"
+            harness.query_all_by_label_contains("coords").next().is_some(),
+            "the outline lists the `coords` list node"
         );
         assert!(
-            harness
-                .query_all_by_label_contains("hulls   (2")
-                .next()
-                .is_some(),
-            "the navigator lists the `hulls` RecordMap"
+            harness.query_all_by_label_contains("hulls").next().is_some(),
+            "the outline lists the `hulls` map node"
         );
     }
 
@@ -1195,22 +1186,27 @@ fn navigator_lists_sections_and_selection_switches_grid() {
 }
 
 #[test]
-fn navigator_shows_empty_state_for_non_tabular_document() {
+fn scalar_only_document_renders_root_as_field_value_grid_never_empty() {
     use egui_kittest::kittest::Queryable;
 
     let worker = ReparseWorker::new();
     let mut doc = EditorDocument::new_untitled(1);
-    // A scalar-only struct (sample.ron-shaped): no record lists, maps, or tuple lists.
+    // A scalar-only struct (sample.ron-shaped): no record lists, maps, or tuple lists,
+    // so the OLD navigator showed an empty state. The tree-outline navigator now
+    // defaults to the root and renders the root struct as a field/value grid (Part A3 —
+    // never empty).
     doc.buffer = "Config(name: \"x\", retries: 3, mode: Fast)".to_string();
     doc.on_edit();
     drive_reparse(&mut doc, &worker);
 
+    // The root struct DOES project a field/value table via `derive_any` even though the
+    // scanner finds no strict table-able section.
     assert!(
         ronin_app::structural::sections::scan_table_sections(
             &doc.parse.as_ref().unwrap().cst
         )
         .is_empty(),
-        "the scalar-only doc has no table-able sections"
+        "the scalar-only doc has no strict table-able section"
     );
 
     let render_doc = std::cell::RefCell::new(doc);
@@ -1218,12 +1214,18 @@ fn navigator_shows_empty_state_for_non_tabular_document() {
         ronin_app::panels::render_table_seam(ui, &mut render_doc.borrow_mut(), &worker);
     });
     harness.run();
+    // The root renders as a field/value grid: a leading read-only `(field)` column +
+    // the field rows (`name`, `retries`, …) — content, not an empty state.
     assert!(
         harness
-            .query_all_by_label_contains("No table-able sections")
+            .query_all_by_label_contains("(field)")
             .next()
             .is_some(),
-        "a non-tabular document shows the navigator empty state"
+        "the root struct renders a field/value grid (leading (field) column)"
+    );
+    assert!(
+        harness.query_all_by_label_contains("name").next().is_some(),
+        "the root struct's `name` field row renders"
     );
 }
 
@@ -1256,6 +1258,14 @@ fn clicking_nested_table_cell_switches_grid_to_nested_path_byte_free() {
     doc.on_edit();
     drive_reparse(&mut doc, &worker);
     let before = doc.buffer.clone();
+    // Select the `data.rows` RecordList in the outline so the grid renders it (the
+    // navigator now defaults to the root, so we pick the nested list to exercise its
+    // NestedTable `tags` cell — selecting an outline node is byte-free).
+    doc.view_state_mut()
+        .set_selected_table_section(Some(StructuralPath::from_steps(vec![
+            PathStep::Field("data".to_string()),
+            PathStep::Field("rows".to_string()),
+        ])));
     let doc = Rc::new(RefCell::new(doc));
 
     // Frame 1: the navigator renders the `rows` RecordList grid; row 0's `tags` cell is
@@ -1347,53 +1357,209 @@ fn clicking_nested_table_cell_switches_grid_to_nested_path_byte_free() {
     }
 }
 
+// =============================================================================
+// E016 — Table view Back / Forward / Up navigation buttons in the seam
+// =============================================================================
+
 #[test]
-fn grouped_navigator_renders_groups_and_leaf_selects_a_section() {
+fn table_view_back_forward_up_navigation_is_byte_free() {
     use egui_kittest::kittest::Queryable;
     use std::cell::RefCell;
 
     let worker = Rc::new(ReparseWorker::new());
     let mut doc = EditorDocument::new_untitled(1);
-    // Two top-level groups: `rows` (a RecordList) and `coords` (a TupleList).
-    doc.buffer =
-        "(rows: [(a: 1), (a: 2), (a: 3)], coords: [(0, 0), (1, 1), (2, 2)])".to_string();
+    doc.buffer = NESTED_LIST_SRC.to_string();
+    doc.on_edit();
+    drive_reparse(&mut doc, &worker);
+    let before = doc.buffer.clone();
+
+    let rows_path = StructuralPath::from_steps(vec![
+        PathStep::Field("data".to_string()),
+        PathStep::Field("rows".to_string()),
+    ]);
+    let tags_path = rows_path
+        .child(PathStep::Index(0))
+        .child(PathStep::Field("tags".to_string()));
+
+    // Select `data.rows` so the grid shows its NestedTable `tags` cells. Use the raw
+    // setter (a non-navigational seed) so the history starts empty.
+    doc.view_state_mut()
+        .set_selected_table_section(Some(rows_path.clone()));
+    let doc = Rc::new(RefCell::new(doc));
+
+    // Helper: render one frame of the seam.
+    let render_frame = |doc: &Rc<RefCell<EditorDocument>>, worker: &Rc<ReparseWorker>| {
+        let doc_ui = Rc::clone(doc);
+        let worker_ui = Rc::clone(worker);
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(900.0, 460.0))
+            .build_ui(move |ui| {
+                let mut d = doc_ui.borrow_mut();
+                ronin_app::panels::render_table_seam(ui, &mut d, &worker_ui);
+            });
+        harness.run();
+        harness
+    };
+
+    // Frame 1: render the rows grid and click row 0's `tags` NestedTable cell to open
+    // it as a table (records the level change in history — E016).
+    {
+        let mut harness = render_frame(&doc, &worker);
+        harness.get_by_label_contains("\"a\"").click();
+        harness.run();
+    }
+    assert_eq!(
+        doc.borrow().view_state().selected_table_section(),
+        Some(&tags_path),
+        "clicking the NestedTable cell navigates the grid to the nested `tags` path"
+    );
+    assert!(
+        doc.borrow().view_state().can_go_back(),
+        "the drill-in recorded a back entry"
+    );
+
+    // Frame 2: the Back button (◀) returns to the prior `rows` path.
+    {
+        let mut harness = render_frame(&doc, &worker);
+        harness.get_by_label_contains("\u{25C0}").click();
+        harness.run();
+    }
+    assert_eq!(
+        doc.borrow().view_state().selected_table_section(),
+        Some(&rows_path),
+        "Back returns the grid to the prior path"
+    );
+    assert!(
+        doc.borrow().view_state().can_go_forward(),
+        "Back populated the forward stack"
+    );
+
+    // Frame 3: the Forward button (▶) re-advances to `tags`.
+    {
+        let mut harness = render_frame(&doc, &worker);
+        harness.get_by_label_contains("\u{25B6}").click();
+        harness.run();
+    }
+    assert_eq!(
+        doc.borrow().view_state().selected_table_section(),
+        Some(&tags_path),
+        "Forward re-advances the grid to the nested path"
+    );
+
+    // Frame 4: the Up button (▲) goes to the parent of `tags` (`data.rows.[0]`).
+    {
+        let mut harness = render_frame(&doc, &worker);
+        harness.get_by_label_contains("\u{25B2}").click();
+        harness.run();
+    }
+    assert_eq!(
+        doc.borrow().view_state().selected_table_section(),
+        Some(&rows_path.child(PathStep::Index(0))),
+        "Up a level navigates the grid to the parent path"
+    );
+
+    // The entire Back/Forward/Up navigation was byte-free (FR-020).
+    assert_eq!(
+        doc.borrow().buffer,
+        before,
+        "Back/Forward/Up navigation changes zero document bytes"
+    );
+}
+
+#[test]
+fn outline_lists_container_nodes_not_scalar_leaves_and_selecting_switches_grid() {
+    use egui_kittest::kittest::Queryable;
+    use std::cell::RefCell;
+
+    let worker = Rc::new(ReparseWorker::new());
+    let mut doc = EditorDocument::new_untitled(1);
+    // Two container fields (`rows` a list, `coords` a list) plus a SCALAR LEAF field
+    // (`title`). The outline must list the container nodes but SKIP the scalar leaf.
+    doc.buffer = concat!(
+        "(\n",
+        "  title: \"hello\",\n",
+        "  rows: [(a: 1), (a: 2), (a: 3)],\n",
+        "  coords: [(0, 0), (1, 1), (2, 2)],\n",
+        ")"
+    )
+    .to_string();
     doc.on_edit();
     drive_reparse(&mut doc, &worker);
     let doc = Rc::new(RefCell::new(doc));
 
-    let doc_ui = Rc::clone(&doc);
-    let worker_ui = Rc::clone(&worker);
-    let mut harness = egui_kittest::Harness::builder()
-        .with_size(egui::vec2(800.0, 400.0))
-        .build_ui(move |ui| {
-            let mut d = doc_ui.borrow_mut();
-            ronin_app::panels::render_table_seam(ui, &mut d, &worker_ui);
-        });
-    harness.run();
+    // The scalar-leaf field path (`title`) — it must never be a selectable outline node.
+    let title_path = StructuralPath::from_steps(vec![PathStep::Field("title".to_string())]);
+    let coords_path = StructuralPath::from_steps(vec![PathStep::Field("coords".to_string())]);
 
-    // The grouped side list renders a collapsible group header per top-level ancestor
-    // (`rows`, `coords`) and a dimension-bearing leaf inside each.
-    assert!(
-        harness.query_all_by_label_contains("rows").next().is_some(),
-        "the grouped navigator renders the `rows` group"
-    );
-    assert!(
-        harness
-            .query_all_by_label_contains("coords   (3")
-            .next()
-            .is_some(),
-        "the grouped navigator renders the `coords` leaf with R\u{00D7}C dims"
-    );
+    {
+        let doc_ui = Rc::clone(&doc);
+        let worker_ui = Rc::clone(&worker);
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(800.0, 400.0))
+            .build_ui(move |ui| {
+                let mut d = doc_ui.borrow_mut();
+                ronin_app::panels::render_table_seam(ui, &mut d, &worker_ui);
+            });
+        harness.run();
 
-    // Clicking the `coords` leaf selects that section.
-    harness.get_by_label_contains("coords   (3").click();
-    harness.run();
-    let d = doc.borrow();
-    assert_eq!(
-        d.view_state().selected_table_section(),
-        Some(&StructuralPath::from_steps(vec![PathStep::Field(
-            "coords".to_string()
-        )])),
-        "clicking a grouped leaf selects its section"
-    );
+        // The outline lists the container nodes (`rows`, `coords`).
+        assert!(
+            harness.query_all_by_label_contains("rows").next().is_some(),
+            "the outline lists the `rows` container node"
+        );
+        assert!(
+            harness.query_all_by_label_contains("coords").next().is_some(),
+            "the outline lists the `coords` container node"
+        );
+
+        // Selecting `coords` switches the grid to it. Click the OUTLINE row. The icon
+        // now lives in a separate fixed-width slot (E014), so the outline's selectable
+        // label is the count-suffixed `coords  (3)` — unique to the outline (the root
+        // grid's `(field)` cell shows the bare name `coords`). (The scalar-leaf `title`
+        // is not an outline node, so there is nothing to click that selects it — its
+        // model is `None` via `derive_any`, asserted below.)
+        harness.get_by_label_contains("coords  (").click();
+        harness.run();
+    }
+
+    {
+        let d = doc.borrow();
+        assert_eq!(
+            d.view_state().selected_table_section(),
+            Some(&coords_path),
+            "selecting an outline container node switches the grid to it (byte-free)"
+        );
+    }
+
+    // A scalar leaf is never selectable as a table: `derive_any` over `title` is `None`,
+    // so the navigator can never key the grid to it (and the outline never lists it).
+    {
+        let mut d = doc.borrow_mut();
+        let cst = &d.parse.as_ref().unwrap().cst;
+        assert!(
+            ronin_app::structural::table::TableModel::derive_any(cst, &title_path, &[]).is_none(),
+            "a scalar leaf node is not table-able (never selectable in the outline)"
+        );
+        // Defensive: even if the selection were somehow set to a scalar leaf, the seam
+        // falls back to the root (never empty) rather than rendering it.
+        d.view_state_mut()
+            .set_selected_table_section(Some(title_path.clone()));
+    }
+    {
+        let doc_ui = Rc::clone(&doc);
+        let worker_ui = Rc::clone(&worker);
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(800.0, 400.0))
+            .build_ui(move |ui| {
+                let mut d = doc_ui.borrow_mut();
+                ronin_app::panels::render_table_seam(ui, &mut d, &worker_ui);
+            });
+        harness.run();
+        // Falls back to the root field/value grid (the leading `(field)` column renders),
+        // never a scalar leaf and never empty.
+        assert!(
+            harness.query_all_by_label_contains("(field)").next().is_some(),
+            "a non-table-able stored selection falls back to the root field/value grid"
+        );
+    }
 }

@@ -29,6 +29,7 @@ use std::time::{Duration, Instant};
 
 use ronin_app::app::{App, NoticeKind};
 use ronin_app::settings::AppSettings;
+use ronin_app::structural::view_state::StructuralPath;
 
 // =============================================================================
 // Harness
@@ -258,5 +259,66 @@ fn open_sample_renders_and_writes_no_sidecar() {
         "open_sample littered recovery sidecar(s) into {}: {:?}",
         cwd.display(),
         leaked
+    );
+}
+
+// =============================================================================
+// The Table view is NEVER empty for any sample (E012 — Part A2/A3)
+// =============================================================================
+
+#[test]
+fn every_sample_table_view_is_non_empty_at_root() {
+    // E012 (Part A3): the Table view defaults to the document root and is NEVER empty —
+    // `derive_any` over the root projects a model with ≥1 column for every bundled
+    // sample (a struct → field/value grid, a list → records/tuples/value, a map →
+    // key+value). A scalar-leaf root is the only `None` case and no sample has one.
+    for path in sample_paths() {
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap().to_string();
+        let mut app = App::new(AppSettings::default(), None);
+        app.open_file(&path);
+        drive_app_reparse(&mut app);
+
+        let doc = app
+            .active_document_mut()
+            .expect("an active document for the opened sample");
+        // The default Table selection (Part A3) is the document root; `derive_any` over
+        // it must yield a model with ≥1 column (the Table view shows content, not blank).
+        let model = doc
+            .cached_table_model_any(&StructuralPath::root())
+            .unwrap_or_else(|| {
+                panic!("{name}: the root projects NO table model (the Table view would be empty)")
+            });
+        assert!(
+            !model.columns.is_empty(),
+            "{name}: the root table model has zero columns (empty Table view)"
+        );
+    }
+}
+
+#[test]
+fn sample_ron_root_renders_a_field_value_grid() {
+    // E012 (Part A2/A3): `sample.ron`'s root is the `Config` struct, so the Table view
+    // renders it as a field/value grid — a leading read-only `(field)` column + a
+    // `value` column, one row per field — rather than an empty state.
+    let path = samples_dir().join("sample.ron");
+    let mut app = App::new(AppSettings::default(), None);
+    app.open_file(&path);
+    drive_app_reparse(&mut app);
+
+    let doc = app
+        .active_document_mut()
+        .expect("an active document for sample.ron");
+    let model = doc
+        .cached_table_model_any(&StructuralPath::root())
+        .expect("sample.ron root projects a field/value grid");
+    let cols: Vec<&str> = model.columns.iter().map(|c| c.field_name.as_str()).collect();
+    assert_eq!(
+        cols,
+        vec!["(field)", "value"],
+        "sample.ron root struct renders a leading `(field)` column + a `value` column"
+    );
+    assert!(
+        model.row_count() >= 1,
+        "the field/value grid has one row per struct field"
     );
 }

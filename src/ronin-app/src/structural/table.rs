@@ -290,14 +290,16 @@ impl TableModel {
     }
 
     /// Derive a table for the LIVE node at `path`, projecting the best grid for **any**
-    /// drilled-into multi-element collection (E013 — "open any nested collection as a
-    /// table"). Returns `None` when the node is not a List or Map (a lone struct / tuple
-    /// is NOT openable as a table — the chosen scope).
+    /// node shape (E012/E013 — the Table view as a tree-outline navigator that can view
+    /// ANY level of the document as a table). Returns `None` only for a **scalar leaf**
+    /// (which the outline never selects); every container node — map, list, single
+    /// struct, single tuple, single struct-like enum variant — projects a sensible
+    /// [`TableModel`].
     ///
     /// Unlike [`derive_section`](Self::derive_section) (which renders the scanner's
     /// strict labeled shapes), this is **permissive for reach**: it never requires
     /// matching record names, and projects whatever grid best fits the live node so the
-    /// navigator can render any collection the user drills into:
+    /// navigator can render any node the user selects:
     ///
     /// * **Map** → a leading read-only `(key)` column (the map key is identity, not
     ///   data), then: if **every** value is a record, the union of their fields (mixed
@@ -307,6 +309,14 @@ impl TableModel {
     ///   names allowed); elif **every** element is a tuple, positional `.0 / .1 / …`
     ///   columns; else a single `value` column showing each element's summary. Rows are
     ///   keyed by `path / Index(i)`.
+    /// * **Single tuple** → a 1-row positional table, columns `.0 / .1 / …`, the single
+    ///   row's `element_ref = path`, each cell at `path / Index(i)`
+    ///   ([`project_tuple`](Self::project_tuple)).
+    /// * **Single struct / struct-like enum variant** → a field/value table: a leading
+    ///   read-only `(field)` column + a `value` column, one row per field, each value
+    ///   cell at `path / Field(name)` (a nested value keeps its drill marker so it opens
+    ///   as its own table) ([`project_struct`](Self::project_struct)).
+    /// * **Scalar leaf** → `None`.
     ///
     /// The result is the **same** `{ section_ref, columns, rows }` the grid renderer
     /// already consumes, so rendering is shape-agnostic. A pure read over the CST —
@@ -322,8 +332,118 @@ impl TableModel {
         match ast::Value::cast(node.clone())? {
             ast::Value::Map(map) => Some(Self::project_map(path, &map, diagnostics, &root)),
             ast::Value::List(list) => Some(Self::project_list(path, &list, diagnostics, &root)),
-            // A lone struct / tuple / enum / scalar is NOT openable as a table.
+            // A single tuple → a positional 1-row table.
+            ast::Value::Tuple(tuple) => {
+                Some(Self::project_tuple(path, &tuple, diagnostics, &root))
+            }
+            // A single struct / struct-like enum variant → a field/value table.
+            ast::Value::Struct(_) | ast::Value::EnumVariant(_) => Some(Self::project_struct(
+                path,
+                &ast::Value::cast(node)?,
+                diagnostics,
+                &root,
+            )),
+            // A scalar leaf (unit / literal / error) is NOT a table — the outline never
+            // selects one.
             _ => None,
+        }
+    }
+
+    /// Project a **single tuple** at `path` into a 1-row positional table (E012): columns
+    /// `.0 / .1 / …` (one per member), one row whose `element_ref = path` and whose cells
+    /// are each member at `path / Index(i)` via the shared [`tuple_member_cell`] (a nested
+    /// member keeps its drill marker; a scalar member is inline-editable).
+    fn project_tuple(
+        path: &StructuralPath,
+        tuple: &ast::Tuple,
+        diagnostics: &[DiagnosticView],
+        root: &SyntaxNode,
+    ) -> Self {
+        let index = build_byte_char_index(root, diagnostics);
+        let members: Vec<ast::Value> = tuple.items().collect();
+        let columns: Vec<Column> = (0..members.len())
+            .map(|pos| Column {
+                field_name: format!(".{pos}"),
+                class: if is_nested(&members[pos]) {
+                    ColumnClass::Nested
+                } else {
+                    ColumnClass::Scalar
+                },
+            })
+            .collect();
+        let cells = members
+            .iter()
+            .enumerate()
+            .map(|(pos, value)| {
+                let value_ref = path.child(PathStep::Index(pos));
+                tuple_member_cell(value_ref, value, diagnostics, &index)
+            })
+            .collect();
+        // The single row IS the tuple itself (element_ref = path).
+        let rows = vec![Row {
+            element_ref: path.clone(),
+            cells,
+        }];
+        Self {
+            section_ref: path.clone(),
+            columns,
+            rows,
+        }
+    }
+
+    /// Project a **single struct / struct-like enum variant** at `path` into a field/value
+    /// table (E012): a leading read-only `(field)` column (the field name as text) plus a
+    /// `value` column, one row per field. Each row's `element_ref` is the field's value
+    /// (`path / Field(name)`); the value cell is built via the shared [`value_cell`] at the
+    /// same path (a nested value keeps the `▦`/`▸` drill marker so it opens as its own
+    /// table). `value` must be a [`Struct`](ast::Value::Struct) or
+    /// [`EnumVariant`](ast::Value::EnumVariant); other kinds project an empty table.
+    fn project_struct(
+        path: &StructuralPath,
+        value: &ast::Value,
+        diagnostics: &[DiagnosticView],
+        root: &SyntaxNode,
+    ) -> Self {
+        let index = build_byte_char_index(root, diagnostics);
+        // The struct/variant fields in source order — reuse the shared record-fields
+        // extractor so the field/value projection matches the row-based shapes exactly.
+        let fields = record_fields(value);
+
+        let columns = vec![
+            Column {
+                field_name: "(field)".to_string(),
+                class: ColumnClass::Scalar,
+            },
+            value_column(&fields.iter().map(|(_, v)| v.clone()).collect::<Vec<_>>()),
+        ];
+
+        let rows = fields
+            .iter()
+            .map(|(name, field_value)| {
+                let element_ref = path.child(PathStep::Field(name.clone()));
+                // The leading read-only field-name cell (the field name is identity).
+                let field_cell = Cell {
+                    value_ref: None,
+                    class: CellClass::ReadOnly,
+                    text: Some(name.clone()),
+                    scalar: None,
+                    diagnostics: Vec::new(),
+                };
+                // The value cell IS the field value itself (element_ref): a nested value
+                // becomes a drill-in / open-as-table cell, a scalar an editable cell.
+                let value_cell =
+                    value_cell(element_ref.clone(), field_value, diagnostics, &index);
+                Row {
+                    element_ref,
+                    cells: vec![field_cell, value_cell],
+                }
+            })
+            .collect();
+
+        Self {
+            section_ref: path.clone(),
+            columns,
+            rows,
         }
     }
 
@@ -1584,9 +1704,11 @@ fn render_table_grid(
             }
             PendingAction::OpenAsTable { path } => {
                 // Open the nested List/Map as a table in place: re-key the navigator's
-                // selected section and STAY in the Table view (E013). Byte-free.
+                // selected section and STAY in the Table view (E013). Routed through
+                // `navigate_table_section` so back/forward history records the drill-in
+                // (E016). Byte-free.
                 doc.view_state_mut().clear_focus();
-                doc.view_state_mut().set_selected_table_section(Some(path));
+                doc.view_state_mut().navigate_table_section(path);
                 Ok(())
             }
         };
@@ -1947,10 +2069,14 @@ fn render_cell(
             // STAYS in the Table view (no switch to tree/form).
             ui.horizontal(|ui| {
                 let indicator = indicators::from_tree_kind(nested_cell_kind(cell));
+                // The list/map icon goes through the shared fixed-width slot (E014),
+                // BEFORE the button; the button text is the summary only (no embedded
+                // glyph), so the open-as-table cells align with the other cell icons.
+                indicator.show(ui).on_hover_text(indicator.word());
                 if let Some(path) = &cell.value_ref {
                     let summary = cell.text.clone().unwrap_or_default();
                     if ui
-                        .button(format!("{} {summary}", indicator.glyph()))
+                        .button(summary)
                         .on_hover_text("Open as table")
                         .clicked()
                     {
@@ -2098,7 +2224,9 @@ fn render_cell_diagnostics(ui: &mut Ui, cell: &Cell) {
         // Route the glyph + color + word through the shared [`TypeIndicator`] (E014)
         // so the cell diagnostic indicator matches the tree's and the text view's.
         let indicator = indicators::from_severity(diag.severity);
-        ui.label(indicator.rich(ui)).on_hover_text(format!(
+        // Draw the cell diagnostic glyph through the shared fixed-width slot (E014) so
+        // it aligns with the other indicators in the cell row.
+        indicator.show(ui).on_hover_text(format!(
             "{} [{}]: {}",
             indicator.word(),
             diag.code.code(),
@@ -2162,7 +2290,8 @@ fn nested_value_kind(cell: &Cell) -> Option<TreeNodeKind> {
 fn render_scalar_type_indicator(ui: &mut Ui, cell: &Cell) {
     if let Some(class) = cell.scalar {
         let indicator = indicators::from_scalar_class(class);
-        ui.label(indicator.rich(ui)).on_hover_text(indicator.word());
+        // The fixed-width slot keeps the value start-X aligned across scalar cells.
+        indicator.show(ui).on_hover_text(indicator.word());
     }
 }
 
@@ -2227,8 +2356,10 @@ fn column_type_indicator(
 fn render_column_header(ui: &mut Ui, column: &Column, rows: &[Row], col_idx: usize) {
     let indicator = column_type_indicator(column, rows, col_idx);
     ui.horizontal(|ui| {
+        // Draw the header icon through the shared fixed-width slot (E014) so column
+        // headers align with one another.
         if let Some(indicator) = indicator {
-            ui.label(indicator.rich(ui));
+            indicator.show(ui).on_hover_text(indicator.word());
         }
         ui.strong(&column.field_name);
     });

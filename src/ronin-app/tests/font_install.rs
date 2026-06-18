@@ -42,6 +42,10 @@ const STRUCTURAL_GLYPHS: &[(char, &str)] = &[
     ('\u{2191}', "↑ move-up control"),
     ('\u{2193}', "↓ move-down control"),
     ('\u{2026}', "… ellipsis (summary truncation)"),
+    // E016 — Table view Back / Forward / Up navigation buttons.
+    ('\u{25C0}', "◀ Table view Back button"),
+    ('\u{25B6}', "▶ Table view Forward button"),
+    ('\u{25B2}', "▲ Table view Up-a-level button"),
 ];
 
 #[test]

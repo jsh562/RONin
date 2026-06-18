@@ -91,8 +91,11 @@ pub enum TypeIndicator {
 const INDICATOR_SIZE: f32 = 14.0;
 
 /// The fixed leading-slot width for [`TypeIndicator::show`] (E014): icons in a column
-/// align vertically because each is drawn into a slot of this width.
-const SLOT_WIDTH: f32 = 18.0;
+/// align vertically because each is drawn into a slot of this width, and the glyph is
+/// centered within it so glyphs of differing advance widths still share a common text
+/// start-X in the row to their right. Sized to comfortably fit the widest glyph at
+/// [`INDICATOR_SIZE`] (e.g. ⚠ / ☑) with a little breathing room.
+pub const SLOT_WIDTH: f32 = 20.0;
 
 impl TypeIndicator {
     /// Every [`TypeIndicator`] variant, grouped for the always-visible legend strip
@@ -286,17 +289,29 @@ impl TypeIndicator {
             .color(self.color(ui))
     }
 
-    /// Render the indicator's glyph in a **fixed-width leading slot** (E014) so icons
-    /// align vertically when several rows place one in their leading column. Allocates
-    /// a slot of [`SLOT_WIDTH`] and draws [`rich`](Self::rich) into it.
-    pub fn show(self, ui: &mut Ui) {
+    /// Render the indicator's glyph in a **fixed-width leading slot** (E014) — the
+    /// SINGLE way to draw an icon next to text. The glyph is centered on BOTH axes
+    /// inside a [`SLOT_WIDTH`]×row-height box, so:
+    ///
+    /// * **vertical**: icons in a column align (every row's icon shares the same X and
+    ///   baseline band, regardless of the glyph's natural advance width); and
+    /// * **horizontal**: the text rendered to the right of the slot starts at a common
+    ///   X across rows, so labels line up into a clean column.
+    ///
+    /// Call this then render the row's text in the SAME `ui.horizontal`; never embed
+    /// the glyph in a format string or `ui.label(self.rich(ui))` directly.
+    ///
+    /// Returns the slot's [`egui::Response`] (its `rect` is always [`SLOT_WIDTH`] wide
+    /// regardless of the glyph) so a caller can attach a hover/tooltip to the icon.
+    pub fn show(self, ui: &mut Ui) -> egui::Response {
         ui.allocate_ui_with_layout(
             egui::vec2(SLOT_WIDTH, ui.spacing().interact_size.y),
-            egui::Layout::left_to_right(egui::Align::Center),
+            egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
             |ui| {
                 ui.label(self.rich(ui));
             },
-        );
+        )
+        .response
     }
 }
 
@@ -414,6 +429,47 @@ mod tests {
     fn from_severity_maps_to_error_and_warning() {
         assert_eq!(from_severity(Severity::Error), TypeIndicator::Error);
         assert_eq!(from_severity(Severity::Warning), TypeIndicator::Warning);
+    }
+
+    #[test]
+    fn show_allocates_a_constant_slot_width_regardless_of_glyph() {
+        // The fixed-slot renderer ([`show`]) allocates a slot of EXACTLY `SLOT_WIDTH`
+        // for every variant, so icons in a column align and the text to their right
+        // starts at a common X — independent of each glyph's natural advance width
+        // (`#` is narrow, `⚠`/`☑` are wide). Render a row per variant through `show`
+        // and assert the slot response rect width is `SLOT_WIDTH` for all of them.
+        use egui_kittest::Harness;
+
+        let variants = [
+            TypeIndicator::Struct,
+            TypeIndicator::Map,
+            TypeIndicator::Integer,
+            TypeIndicator::Str,
+            TypeIndicator::Bool,
+            TypeIndicator::Warning,
+        ];
+        let widths = std::rc::Rc::new(std::cell::RefCell::new(Vec::<f32>::new()));
+        let widths_ui = std::rc::Rc::clone(&widths);
+        let mut harness = Harness::new_ui(move |ui| {
+            let mut out = widths_ui.borrow_mut();
+            out.clear();
+            for ind in variants {
+                ui.horizontal(|ui| {
+                    let resp = ind.show(ui);
+                    out.push(resp.rect.width());
+                });
+            }
+        });
+        harness.run();
+
+        let widths = widths.borrow();
+        assert_eq!(widths.len(), variants.len(), "one slot per variant");
+        for (w, ind) in widths.iter().zip(variants) {
+            assert!(
+                (*w - SLOT_WIDTH).abs() < f32::EPSILON,
+                "{ind:?} slot width {w} must equal the fixed SLOT_WIDTH {SLOT_WIDTH}"
+            );
+        }
     }
 
     #[test]

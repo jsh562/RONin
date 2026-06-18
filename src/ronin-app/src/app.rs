@@ -673,7 +673,9 @@ fn legend_strip(ui: &mut egui::Ui) {
     let all = TypeIndicator::ALL;
     for i in (0..all.len()).rev() {
         let indicator = all[i];
-        ui.label(indicator.rich(ui)).on_hover_text(indicator.word());
+        // Each legend glyph goes through the shared fixed-width slot (E014) so the
+        // strip shares a uniform per-glyph slot + baseline with the views' icons.
+        indicator.show(ui).on_hover_text(indicator.word());
         // A group starts at index `containers` (scalars) and `scalar_end` (status);
         // when we step left across one of those boundaries, add the inter-group gap.
         if i == scalar_end || i == containers {
@@ -4898,7 +4900,9 @@ impl App {
                 return;
             };
             let mode_label = doc.mode_label();
-            let registry_label = doc.registry_label();
+            // The active type-source label (E012): serde → `Types: <bound type | none>`
+            // (the E006 binding), Bevy → the existing `Registry: …` registry label.
+            let registry_label = doc.type_source_label();
             let staleness = doc.staleness_label();
             let is_bevy = doc.is_bevy_mode();
             // The toggle's target mode + its button caption.
@@ -4913,11 +4917,10 @@ impl App {
                 // Always-visible active mode (emphasized) + bound registry + state.
                 ui.strong(&mode_label);
                 ui.separator();
-                if is_bevy {
-                    ui.label(&registry_label);
-                } else {
-                    ui.weak(&registry_label);
-                }
+                // The active type-source label: a real type/registry source in both
+                // modes now (serde `Types: …` / Bevy `Registry: …`), so it reads as a
+                // regular label rather than a weak placeholder.
+                ui.label(&registry_label);
                 // Staleness advisory (FR-008): shown only when warranted, as a weak
                 // marker — it is an advisory, never an error.
                 if let Some(stale) = &staleness {

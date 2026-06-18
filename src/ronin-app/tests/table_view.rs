@@ -963,17 +963,96 @@ fn derive_any_over_a_mixed_name_record_list_unions_columns() {
 }
 
 #[test]
-fn derive_any_returns_none_for_a_lone_struct_or_tuple() {
-    // A lone struct / tuple is NOT openable as a table (the chosen scope).
-    let struct_cst = ron_core::parse("Point(x: 1, y: 2)");
-    assert!(
-        AnyTableModel::derive_any(&struct_cst, &StructuralPath::root(), &[]).is_none(),
-        "a lone struct is not openable as a table"
+fn derive_any_over_a_single_struct_is_a_field_value_grid() {
+    // E012 (Part A2): a single struct projects a field/value table — a leading
+    // read-only `(field)` column + a `value` column, one row per field. Each value
+    // cell is editable where it is a scalar, and is the field's value (path/Field(name)).
+    let cst = ron_core::parse("Point(x: 1, y: 2)");
+    let model =
+        AnyTableModel::derive_any(&cst, &StructuralPath::root(), &[]).expect("a struct projects");
+
+    assert_eq!(col_names(&model), vec!["(field)", "value"]);
+    assert_eq!(model.row_count(), 2, "one row per field");
+
+    // Row 0 = field `x`: leading read-only field-name cell + an editable scalar value.
+    let field_cell = model.cell(0, 0).expect("row 0 (field)");
+    assert_eq!(field_cell.class, CellClass::ReadOnly);
+    assert_eq!(field_cell.text.as_deref(), Some("x"));
+    assert!(field_cell.value_ref.is_none(), "the field name is identity");
+
+    let value_cell = model.cell(0, 1).expect("row 0 value");
+    assert_eq!(value_cell.class, CellClass::Scalar);
+    assert_eq!(value_cell.text.as_deref(), Some("1"));
+    // The value cell IS the field value itself (root / Field("x")).
+    assert_eq!(
+        value_cell.value_ref,
+        Some(StructuralPath::from_steps(vec![PathStep::Field("x".to_string())]))
     );
-    let tuple_cst = ron_core::parse("(1, 2, 3)");
+}
+
+#[test]
+fn derive_any_over_a_struct_keeps_nested_value_drill_marker() {
+    // A nested struct/tuple field stays a tree/form drill-in (`Nested`); a nested
+    // list/map field opens AS A TABLE (`NestedTable`) — the value cell keeps its drill
+    // marker so it opens as its own table.
+    let cst = ron_core::parse("Config(tags: [\"a\"], pos: (1, 2), inner: Meta(k: 1))");
+    let model =
+        AnyTableModel::derive_any(&cst, &StructuralPath::root(), &[]).expect("a struct projects");
+
+    let row_for = |field: &str| {
+        model
+            .rows
+            .iter()
+            .position(|r| r.cells[0].text.as_deref() == Some(field))
+            .unwrap()
+    };
+    assert_eq!(
+        model.cell(row_for("tags"), 1).unwrap().class,
+        CellClass::NestedTable,
+        "a list field opens as a table"
+    );
+    assert_eq!(
+        model.cell(row_for("pos"), 1).unwrap().class,
+        CellClass::Nested,
+        "a tuple field stays a tree/form drill-in"
+    );
+    assert_eq!(
+        model.cell(row_for("inner"), 1).unwrap().class,
+        CellClass::Nested,
+        "a struct field stays a tree/form drill-in"
+    );
+}
+
+#[test]
+fn derive_any_over_a_single_tuple_is_a_one_row_positional_grid() {
+    // E012 (Part A2): a single tuple projects a 1-row positional table — columns
+    // `.0/.1/…`, one row whose cells are editable scalars at path/Index(i).
+    let cst = ron_core::parse("(1, 2, 3)");
+    let model =
+        AnyTableModel::derive_any(&cst, &StructuralPath::root(), &[]).expect("a tuple projects");
+
+    assert_eq!(col_names(&model), vec![".0", ".1", ".2"]);
+    assert_eq!(model.row_count(), 1, "a single tuple is one row");
+
+    let c1 = model.cell(0, 1).expect("row 0 / .1");
+    assert_eq!(c1.class, CellClass::Scalar);
+    assert_eq!(c1.text.as_deref(), Some("2"));
+    // Each cell is the member at root / Index(i).
+    assert_eq!(c1.value_ref, Some(StructuralPath::from_steps(vec![PathStep::Index(1)])));
+}
+
+#[test]
+fn derive_any_returns_none_for_a_scalar_leaf() {
+    // A scalar leaf is NOT a table — the outline never selects one (Part A2).
+    let int_cst = ron_core::parse("42");
     assert!(
-        AnyTableModel::derive_any(&tuple_cst, &StructuralPath::root(), &[]).is_none(),
-        "a lone tuple is not openable as a table"
+        AnyTableModel::derive_any(&int_cst, &StructuralPath::root(), &[]).is_none(),
+        "a scalar integer leaf is not a table"
+    );
+    let str_cst = ron_core::parse("\"hello\"");
+    assert!(
+        AnyTableModel::derive_any(&str_cst, &StructuralPath::root(), &[]).is_none(),
+        "a scalar string leaf is not a table"
     );
 }
 

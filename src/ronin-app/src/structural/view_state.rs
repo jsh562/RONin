@@ -514,6 +514,16 @@ pub struct ViewSelectionAndFocus {
     /// matches any scanned section). `None` until the user picks one (the navigator
     /// then defaults to the largest).
     selected_table_section: Option<StructuralPath>,
+    /// The Table view's **back** history: previously-selected sections, most-recent
+    /// last (E016). [`navigate_table_section`](Self::navigate_table_section) pushes the
+    /// outgoing selection here; [`table_go_back`](Self::table_go_back) pops it. Per-doc
+    /// + transient/byte-free, like [`selected_table_section`](Self::selected_table_section).
+    table_back: Vec<StructuralPath>,
+    /// The Table view's **forward** history: sections navigated *away from* via Back,
+    /// most-recent last (E016). [`table_go_back`](Self::table_go_back) pushes the
+    /// section it left here so [`table_go_forward`](Self::table_go_forward) can
+    /// re-advance; a NEW navigation clears it (the standard back/forward semantics).
+    table_forward: Vec<StructuralPath>,
 }
 
 /// The originating table cell a tree/form drill-in returns to (FR-006).
@@ -635,8 +645,100 @@ impl ViewSelectionAndFocus {
 
     /// Set (or clear) the table-view navigator's selected section (E012). Byte-free
     /// (FR-020): selecting a section in the navigator changes zero document bytes.
+    ///
+    /// This is the **raw** setter — it does NOT record back/forward history. Use it
+    /// only for non-navigational writes (e.g. the seam's default-to-root fallback,
+    /// which must never pollute history). User-initiated level changes route through
+    /// [`navigate_table_section`](Self::navigate_table_section) instead (E016).
     pub fn set_selected_table_section(&mut self, path: Option<StructuralPath>) {
         self.selected_table_section = path;
+    }
+
+    /// Navigate the Table view to the section at `path`, recording back/forward history
+    /// (E016) — the user-initiated level-change entry point (an outline click, a
+    /// breadcrumb click, or opening a nested cell as a table).
+    ///
+    /// If `path` is already the current selection this is a **no-op** (no duplicate
+    /// history entry). Otherwise the current selection (when set) is pushed onto the
+    /// **back** stack, the **forward** stack is cleared (a new navigation invalidates
+    /// the redo path), and `path` becomes the new selection. Byte-free (FR-020).
+    pub fn navigate_table_section(&mut self, path: StructuralPath) {
+        if Some(&path) == self.selected_table_section.as_ref() {
+            return;
+        }
+        if let Some(current) = self.selected_table_section.take() {
+            self.table_back.push(current);
+        }
+        self.table_forward.clear();
+        self.selected_table_section = Some(path);
+    }
+
+    /// Go **back** to the previously-selected Table section (E016): pop the back stack,
+    /// push the current selection onto the forward stack, and select the popped path.
+    /// A no-op when the back stack is empty ([`can_go_back`](Self::can_go_back) is
+    /// `false`). Byte-free (FR-020).
+    pub fn table_go_back(&mut self) {
+        let Some(prev) = self.table_back.pop() else {
+            return;
+        };
+        if let Some(current) = self.selected_table_section.take() {
+            self.table_forward.push(current);
+        }
+        self.selected_table_section = Some(prev);
+    }
+
+    /// Go **forward** to a Table section previously left via Back (E016): pop the
+    /// forward stack, push the current selection onto the back stack, and select the
+    /// popped path. A no-op when the forward stack is empty
+    /// ([`can_go_forward`](Self::can_go_forward) is `false`). Byte-free (FR-020).
+    pub fn table_go_forward(&mut self) {
+        let Some(next) = self.table_forward.pop() else {
+            return;
+        };
+        if let Some(current) = self.selected_table_section.take() {
+            self.table_back.push(current);
+        }
+        self.selected_table_section = Some(next);
+    }
+
+    /// Go **up a level** in the Table view (E016): navigate to the parent of the
+    /// current selection (the document root when nothing is selected). A no-op when the
+    /// current selection is already the root (there is no parent). Records history via
+    /// [`navigate_table_section`](Self::navigate_table_section). Byte-free (FR-020).
+    pub fn table_go_up(&mut self) {
+        let current = self
+            .selected_table_section
+            .clone()
+            .unwrap_or_else(StructuralPath::root);
+        if current.is_root() {
+            return;
+        }
+        let steps = current.steps();
+        let parent = StructuralPath::from_steps(steps[..steps.len() - 1].to_vec());
+        self.navigate_table_section(parent);
+    }
+
+    /// `true` when [`table_go_back`](Self::table_go_back) would move (the back stack is
+    /// non-empty) — for enabling a Back button (E016).
+    #[must_use]
+    pub fn can_go_back(&self) -> bool {
+        !self.table_back.is_empty()
+    }
+
+    /// `true` when [`table_go_forward`](Self::table_go_forward) would move (the forward
+    /// stack is non-empty) — for enabling a Forward button (E016).
+    #[must_use]
+    pub fn can_go_forward(&self) -> bool {
+        !self.table_forward.is_empty()
+    }
+
+    /// `true` when [`table_go_up`](Self::table_go_up) would move (the current selection,
+    /// or the root default, is not already the root) — for enabling an Up button (E016).
+    #[must_use]
+    pub fn can_go_up(&self) -> bool {
+        self.selected_table_section
+            .as_ref()
+            .is_some_and(|p| !p.is_root())
     }
 
     /// `true` when the projection is stale (a reparse is in flight) (FR-015).
@@ -904,5 +1006,175 @@ mod tests {
         let path = StructuralPath::from_steps(vec![PathStep::Key("2".to_string())]);
         let node = resolve_path(&root, &path).expect("key 2 resolves");
         assert_eq!(node.text(), "\"two\"");
+    }
+
+    // =========================================================================
+    // E016 — Table view Back / Forward / Up navigation history
+    // =========================================================================
+
+    /// A `StructuralPath` of one field step (a convenient distinct navigation target).
+    fn field(name: &str) -> StructuralPath {
+        StructuralPath::from_steps(vec![PathStep::Field(name.to_string())])
+    }
+
+    #[test]
+    fn navigate_table_section_pushes_back_and_clears_forward() {
+        let mut vsf = ViewSelectionAndFocus::new();
+        assert!(vsf.selected_table_section().is_none());
+        assert!(!vsf.can_go_back() && !vsf.can_go_forward());
+
+        // First navigation: nothing was selected, so nothing pushed onto back.
+        vsf.navigate_table_section(field("a"));
+        assert_eq!(vsf.selected_table_section(), Some(&field("a")));
+        assert!(!vsf.can_go_back(), "first navigation pushes no back entry");
+
+        // Second navigation: the outgoing selection (`a`) is pushed onto back.
+        vsf.navigate_table_section(field("b"));
+        assert_eq!(vsf.selected_table_section(), Some(&field("b")));
+        assert!(vsf.can_go_back(), "navigating away pushes the prior onto back");
+
+        // Going back populates forward; a NEW navigation must clear forward.
+        vsf.table_go_back();
+        assert_eq!(vsf.selected_table_section(), Some(&field("a")));
+        assert!(vsf.can_go_forward(), "back populates forward");
+        vsf.navigate_table_section(field("c"));
+        assert!(
+            !vsf.can_go_forward(),
+            "a new navigation clears the forward stack"
+        );
+    }
+
+    #[test]
+    fn navigate_table_section_is_a_noop_when_path_equals_current() {
+        let mut vsf = ViewSelectionAndFocus::new();
+        vsf.navigate_table_section(field("a"));
+        vsf.navigate_table_section(field("b"));
+        assert!(vsf.can_go_back());
+        // Re-navigating to the CURRENT selection records no duplicate history entry.
+        vsf.navigate_table_section(field("b"));
+        assert_eq!(vsf.selected_table_section(), Some(&field("b")));
+        // Only one back entry (`a`) — the no-op did not push `b` again.
+        vsf.table_go_back();
+        assert_eq!(vsf.selected_table_section(), Some(&field("a")));
+        assert!(!vsf.can_go_back(), "the no-op recorded no extra back entry");
+    }
+
+    #[test]
+    fn table_back_and_forward_round_trip_a_sequence() {
+        // A → B → C, then Back → B, Back → A, Forward → B (E016).
+        let mut vsf = ViewSelectionAndFocus::new();
+        vsf.navigate_table_section(field("a"));
+        vsf.navigate_table_section(field("b"));
+        vsf.navigate_table_section(field("c"));
+        assert_eq!(vsf.selected_table_section(), Some(&field("c")));
+
+        vsf.table_go_back();
+        assert_eq!(vsf.selected_table_section(), Some(&field("b")));
+        vsf.table_go_back();
+        assert_eq!(vsf.selected_table_section(), Some(&field("a")));
+        assert!(!vsf.can_go_back(), "back stack is exhausted at A");
+
+        vsf.table_go_forward();
+        assert_eq!(vsf.selected_table_section(), Some(&field("b")));
+        assert!(vsf.can_go_back() && vsf.can_go_forward());
+    }
+
+    #[test]
+    fn table_go_back_and_forward_are_noops_on_empty_stacks() {
+        let mut vsf = ViewSelectionAndFocus::new();
+        vsf.navigate_table_section(field("a"));
+        // No history yet: both are no-ops (selection unchanged).
+        vsf.table_go_back();
+        assert_eq!(vsf.selected_table_section(), Some(&field("a")));
+        vsf.table_go_forward();
+        assert_eq!(vsf.selected_table_section(), Some(&field("a")));
+    }
+
+    #[test]
+    fn table_go_up_yields_parent_and_is_noop_at_root() {
+        let mut vsf = ViewSelectionAndFocus::new();
+        let deep = StructuralPath::from_steps(vec![
+            PathStep::Field("data".to_string()),
+            PathStep::Field("rows".to_string()),
+            PathStep::Index(0),
+        ]);
+        vsf.set_selected_table_section(Some(deep));
+
+        vsf.table_go_up();
+        assert_eq!(
+            vsf.selected_table_section(),
+            Some(&StructuralPath::from_steps(vec![
+                PathStep::Field("data".to_string()),
+                PathStep::Field("rows".to_string()),
+            ])),
+            "up a level drops the trailing step"
+        );
+
+        vsf.table_go_up();
+        assert_eq!(
+            vsf.selected_table_section(),
+            Some(&field("data")),
+            "up again drops another step"
+        );
+
+        vsf.table_go_up();
+        assert_eq!(
+            vsf.selected_table_section(),
+            Some(&StructuralPath::root()),
+            "up from a depth-1 path reaches the root"
+        );
+
+        // At the root there is no parent: up is a no-op (and `can_go_up` is false).
+        assert!(!vsf.can_go_up(), "the root has no parent to go up to");
+        vsf.table_go_up();
+        assert_eq!(
+            vsf.selected_table_section(),
+            Some(&StructuralPath::root()),
+            "up at the root is a no-op"
+        );
+    }
+
+    #[test]
+    fn can_go_back_forward_up_reflect_state() {
+        let mut vsf = ViewSelectionAndFocus::new();
+        // Nothing selected: no history, and no parent (None defaults to root).
+        assert!(!vsf.can_go_back());
+        assert!(!vsf.can_go_forward());
+        assert!(!vsf.can_go_up());
+
+        vsf.navigate_table_section(field("a"));
+        assert!(!vsf.can_go_back(), "first nav records no back");
+        assert!(!vsf.can_go_forward());
+        assert!(vsf.can_go_up(), "a depth-1 selection can go up to the root");
+
+        vsf.navigate_table_section(field("b"));
+        assert!(vsf.can_go_back());
+        assert!(!vsf.can_go_forward());
+
+        vsf.table_go_back();
+        assert!(!vsf.can_go_back());
+        assert!(vsf.can_go_forward(), "back populated the forward stack");
+
+        // At the root selection, can_go_up is false.
+        vsf.set_selected_table_section(Some(StructuralPath::root()));
+        assert!(!vsf.can_go_up());
+    }
+
+    #[test]
+    fn set_selected_table_section_does_not_record_history() {
+        // The raw setter (used by the default-to-root fallback) must NOT pollute the
+        // back/forward history (E016).
+        let mut vsf = ViewSelectionAndFocus::new();
+        vsf.navigate_table_section(field("a"));
+        vsf.navigate_table_section(field("b"));
+        let back_before = vsf.can_go_back();
+        // A raw set (e.g. the seam's default-to-root resolve) records no history.
+        vsf.set_selected_table_section(Some(StructuralPath::root()));
+        assert_eq!(
+            vsf.can_go_back(),
+            back_before,
+            "the raw setter must not change the back stack"
+        );
+        assert!(!vsf.can_go_forward(), "the raw setter must not touch forward");
     }
 }

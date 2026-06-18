@@ -194,7 +194,9 @@ fn render_section_boundary(
             SectionRendering::Table { .. } => (TypeIndicator::Map, "table"),
             SectionRendering::TreeForm { .. } => (TypeIndicator::Struct, "tree/form"),
         };
-        ui.label(indicator.rich(ui));
+        // The badge glyph goes through the shared fixed-width slot (E014) so the badge
+        // icon aligns with the icons the inner views paint.
+        indicator.show(ui).on_hover_text(indicator.word());
         ui.label(
             RichText::new(label)
                 .color(indicator.color(ui))

@@ -1328,6 +1328,7 @@ fn render_node(
     // painted across this node row's vertical extent (visual only — no model change).
     let row_top = ui.cursor().top();
 
+    let indicator = node_indicator(node);
     let header = node_header(node, ui);
     let summary = node_summary_text(node);
     // An Option value (`Some(x)` / `None`) edits inline as a Some/None selector
@@ -1348,6 +1349,9 @@ fn render_node(
             node.expanded,
         )
         .show_header(ui, |ui| {
+            // The leading type icon in a fixed-width slot (E014 — aligns vertically
+            // across rows) then the header text in the same row.
+            indicator.show(ui).on_hover_text(indicator.word());
             ui.label(header);
             // The collapsed-collection child count (N) + a monospace, weak value
             // preview — readability polish (visual only).
@@ -1375,8 +1379,11 @@ fn render_node(
             }
         });
     } else {
-        // A leaf row: label + inline editor (or read-only summary) + sibling ops.
+        // A leaf row: icon slot + label + inline editor (or read-only summary) +
+        // sibling ops. The icon goes through the fixed-width slot so leaf rows align
+        // vertically with collapsible-header rows (E014).
         ui.horizontal(|ui| {
+            indicator.show(ui).on_hover_text(indicator.word());
             ui.label(header);
             render_leaf_editor(ui, node, ctx);
             render_node_diagnostics(ui, node);
@@ -1579,14 +1586,14 @@ fn node_indicator(node: &TreeNode) -> TypeIndicator {
     }
 }
 
-/// The colored, icon-prefixed header [`RichText`] for a node row (Part B): the shared
-/// [`TypeIndicator`] glyph (E014) + the label + the bracketed kind word, colored by
-/// the indicator's theme-aware color. The value preview is rendered separately in
-/// monospace by the caller (so it can be weak/monospaced).
+/// The colored header **text** [`RichText`] for a node row (Part B): the label + the
+/// bracketed kind word, colored by the shared [`TypeIndicator`]'s theme-aware color
+/// (E014). The leading icon is drawn separately via [`TypeIndicator::show`] into a
+/// fixed-width slot so icons align vertically across rows; the value preview is
+/// rendered separately in monospace by the caller (so it can be weak/monospaced).
 fn node_header(node: &TreeNode, ui: &Ui) -> RichText {
     let indicator = node_indicator(node);
-    RichText::new(format!("{} {} [{}]", indicator.glyph(), node.label, indicator.word()))
-        .color(indicator.color(ui))
+    RichText::new(format!("{} [{}]", node.label, indicator.word())).color(indicator.color(ui))
 }
 
 /// The value-preview text for a node row (Part B), rendered by the caller in
@@ -1771,7 +1778,9 @@ fn render_node_diagnostics(ui: &mut Ui, node: &TreeNode) {
         // Route the glyph + color + word through the shared [`TypeIndicator`] (E014)
         // so the tree diagnostic indicator matches the table's and the text view's.
         let indicator = indicators::from_severity(diag.severity);
-        ui.label(indicator.rich(ui)).on_hover_text(format!(
+        // Draw the diagnostic glyph through the shared fixed-width slot (E014) so it
+        // aligns with the other indicators in the row.
+        indicator.show(ui).on_hover_text(format!(
             "{} [{}]: {}",
             indicator.word(),
             diag.code.code(),

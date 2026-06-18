@@ -1398,6 +1398,31 @@ impl EditorDocument {
     /// indicator stays compact; the full path lives in the registry-binding config
     /// window. A staleness advisory is surfaced separately via
     /// [`staleness_label`](Self::staleness_label) (FR-008/FR-011).
+    /// The active **type source** label for the always-visible mode strip (E012 — the
+    /// reworded registry label), dispatching by mode:
+    ///
+    /// * **serde mode** → `Types: <bound type name>` from the active E006 binding (the
+    ///   same source [`binding_label`](Self::binding_label) / the binding indicator
+    ///   reads), or `Types: none` when no type is bound (the
+    ///   [`BindingState::NoBinding`](crate::binding::BindingState::NoBinding) state — a
+    ///   first-class, valid state, never an error). Replaces the always-`n/a` registry
+    ///   text with the actually-active serde type source.
+    /// * **Bevy mode** → the existing [`registry_label`](Self::registry_label)
+    ///   (`Registry: <name> (loaded)` / `Registry: none` /
+    ///   `Registry: <name> (no registry loaded)`).
+    ///
+    /// Reading the label changes zero document bytes (FR-011).
+    #[must_use]
+    pub fn type_source_label(&self) -> String {
+        if self.is_bevy_mode() {
+            return self.registry_label();
+        }
+        match self.binding.type_name() {
+            Some(name) => format!("Types: {name}"),
+            None => "Types: none".to_string(),
+        }
+    }
+
     #[must_use]
     pub fn registry_label(&self) -> String {
         if !self.is_bevy_mode() {
@@ -2023,6 +2048,58 @@ mod mode_selection_tests {
         // The serde doc, now in Bevy mode but with NO registry of its own, falls
         // through to its serde branch (it never borrows the other doc's registry).
         assert!(!serde_doc.mode_state().has_registry());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // -- E012: the reworded type-source label (serde `Types:` vs Bevy `Registry:`) ---
+
+    #[test]
+    fn serde_mode_type_source_label_starts_with_types() {
+        // E012 (Part B): a serde document's mode-strip label is `Types: …` (the active
+        // E006 binding), never the old `Registry: n/a (serde mode)`. With no binding it
+        // reads `Types: none`; with a bound type it names the bound type.
+        let mut doc = EditorDocument::new_untitled(1);
+        assert!(!doc.is_bevy_mode());
+
+        // No binding ⇒ `Types: none` (a first-class, valid state — never an error).
+        assert_eq!(doc.type_source_label(), "Types: none");
+        assert!(
+            doc.type_source_label().starts_with("Types:"),
+            "a serde document's label must start with `Types:`"
+        );
+
+        // A bound type ⇒ the bound type name is shown.
+        doc.binding = TypeBinding::bound(
+            "Config".to_string(),
+            crate::binding::TypeSourceLocator::SchemaFile(PathBuf::from("schema.json")),
+            BindingOrigin::Config,
+        );
+        assert_eq!(doc.type_source_label(), "Types: Config");
+        assert!(doc.type_source_label().starts_with("Types:"));
+    }
+
+    #[test]
+    fn bevy_mode_type_source_label_starts_with_registry() {
+        // E012 (Part B): a Bevy `.scn.ron` document's mode-strip label keeps the existing
+        // `Registry: …` text (loaded / none / no-registry-loaded), unchanged.
+        let root = temp_dir("label_bevy");
+        std::fs::write(root.join("registry.json"), REGISTRY).unwrap();
+        let config = scene_config();
+        let path = root.join("w.scn.ron");
+
+        let mut doc = EditorDocument::from_loaded(&path, b"").unwrap();
+        let mut state = ModeState::resolve(&config, Some(&path), None, None);
+        assert!(state.load_registry(&root));
+        doc.set_mode_state(state);
+
+        assert!(doc.is_bevy_mode());
+        let label = doc.type_source_label();
+        assert!(
+            label.starts_with("Registry:"),
+            "a Bevy document's label must start with `Registry:`, got {label:?}"
+        );
+        // Bevy reuses `registry_label` verbatim — the two are identical in Bevy mode.
+        assert_eq!(label, doc.registry_label());
         let _ = std::fs::remove_dir_all(&root);
     }
 }
