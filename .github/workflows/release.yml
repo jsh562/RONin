@@ -176,7 +176,7 @@ jobs:
         # installer fragments for this target are written to the dist artifact dir.
         run: dist build --tag="${GITHUB_REF_NAME}" --target="${{ matrix.target }}" --output-format=json
       - name: Upload local artifacts (for host job)
-        uses: actions/upload-artifact@v4 # TODO(OR-010): resolve to full commit SHA before first release — offline now; SHA not resolvable offline
+        uses: actions/upload-artifact@v7 # TODO(OR-010): resolve to full commit SHA before first release — offline now; SHA not resolvable offline
         with:
           name: artifacts-${{ matrix.target }}
           path: |
@@ -216,7 +216,7 @@ jobs:
       - name: dist build (global installers + manifest)
         run: dist build --tag="${GITHUB_REF_NAME}" --artifacts=global --output-format=json
       - name: Upload global artifacts (for host job)
-        uses: actions/upload-artifact@v4 # TODO(OR-010): resolve to full commit SHA before first release — offline now; SHA not resolvable offline
+        uses: actions/upload-artifact@v7 # TODO(OR-010): resolve to full commit SHA before first release — offline now; SHA not resolvable offline
         with:
           name: artifacts-global
           path: |
