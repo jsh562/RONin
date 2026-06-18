@@ -1,6 +1,6 @@
 //! Shared byte-offset → char-offset resolution over a source string.
 //!
-//! `ron-core` syntax ranges are **byte** offsets; the editor surfaces (highlight
+//! `ronin-core` syntax ranges are **byte** offsets; the editor surfaces (highlight
 //! spans, diagnostic char ranges) work in **char** offsets. Converting naively
 //! with `source[..off].chars().count()` is O(off) per query, so resolving every
 //! token/node is O(n²) over a large file — the exact cost that froze the

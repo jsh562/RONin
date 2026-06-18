@@ -9,7 +9,7 @@
 # `[workspace.package]` in the root Cargo.toml (via `field.workspace = true`)
 # count as present, matching how cargo resolves them at publish time.
 #
-# The root-excluded `src/ron-core/fuzz` crate is NOT a workspace member and is
+# The root-excluded `src/ronin-core/fuzz` crate is NOT a workspace member and is
 # NEVER published (OR-005), so it is deliberately absent from the checked set.
 #
 # This script ALSO sanity-checks the surrounding release inputs named in OR-017:
@@ -31,9 +31,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # The four publishable members, in dependency / publish order (OR-005). `fuzz` is
 # intentionally NOT here (never published).
 PUBLISHABLE_CRATES = [
-    "src/ron-core",
-    "src/ron-types",
-    "src/ron-validate",
+    "src/ronin-core",
+    "src/ronin-types",
+    "src/ronin-validate",
     "src/ronin-app",
 ]
 

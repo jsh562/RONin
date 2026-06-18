@@ -3,10 +3,10 @@
 //!
 //! Drives [`validate_scene`](ronin_app::bevy::validate_scene) over the real
 //! `.scn.ron` fixtures in `tests/fixtures/scenes/` against the hand-authored Bevy
-//! registry-schema export shared with the `ron-types` suite
-//! (`../ron-types/tests/fixtures/bevy_registry_schema.json`). The model is
+//! registry-schema export shared with the `ronin-types` suite
+//! (`../ronin-types/tests/fixtures/bevy_registry_schema.json`). The model is
 //! acquired and serialized exactly as production does — `BevySource::acquire()`
-//! then `ron_types::to_json` — and paired with the parsed `BevyRegistry` for the
+//! then `ronin_types::to_json` — and paired with the parsed `BevyRegistry` for the
 //! membership lookup.
 //!
 //! Covered acceptance scenarios:
@@ -24,8 +24,8 @@
 
 use std::path::PathBuf;
 
-use ron_core::parse;
-use ron_types::{BevyRegistry, BevySource, TypeSource};
+use ronin_core::parse;
+use ronin_types::{BevyRegistry, BevySource, TypeSource};
 use ronin_app::bevy::{
     validate_scene, SceneDiagnostic, SceneDiagnosticCode, SceneModel, SceneSeverity,
 };
@@ -42,11 +42,11 @@ fn scene_fixture(name: &str) -> String {
         .unwrap_or_else(|e| panic!("read scene fixture {}: {e}", path.display()))
 }
 
-/// The shared Bevy registry-schema export (lives in the `ron-types` fixtures).
+/// The shared Bevy registry-schema export (lives in the `ronin-types` fixtures).
 fn registry_schema_json() -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
-        .join("ron-types")
+        .join("ronin-types")
         .join("tests")
         .join("fixtures")
         .join("bevy_registry_schema.json");
@@ -55,12 +55,12 @@ fn registry_schema_json() -> String {
 }
 
 /// Acquire the registry + its serialized interchange the way production does:
-/// `BevySource::acquire()` → `ron_types::to_json` (the same serialization serde
+/// `BevySource::acquire()` → `ronin_types::to_json` (the same serialization serde
 /// mode hands the validator), plus the parsed `BevyRegistry` for membership.
 fn registry_and_model(json: &str) -> (BevyRegistry, Value) {
     let (registry, _diags) = BevyRegistry::from_schema_json(json, "test", "<registry>");
     let acquired = BevySource::from_schema_json(json).acquire();
-    let model = ron_types::to_json(&acquired.model);
+    let model = ronin_types::to_json(&acquired.model);
     (registry, model)
 }
 
@@ -163,7 +163,7 @@ fn valid_scene_has_zero_error_findings() {
 fn no_registry_is_only_the_hint_with_structural_intact() {
     // FR-006 / SC-002: a Bevy-mode scene with no registry loaded → only the
     // "no registry loaded" hint and NO type errors; structural diagnostics
-    // (computed by ron-core, independent of validation) still work.
+    // (computed by ronin-core, independent of validation) still work.
     let (_r, model) = registry_and_model(&registry_schema_json());
     let empty = BevyRegistry::default();
     let src = scene_fixture("wrong_typed.scn.ron"); // would error WITH a registry
@@ -426,7 +426,7 @@ fn registry_acquisition_is_local_file_only_no_network_surface() {
     // a URL fetch. This is the production acquisition path (FR-001).
     let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
-        .join("ron-types")
+        .join("ronin-types")
         .join("tests")
         .join("fixtures")
         .join("bevy_registry_schema.json");
@@ -485,7 +485,7 @@ fn wasm_clean_no_network_proof_is_the_dependency_invariants_test() {
     // (c) The WASM-clean-crate no-network proof is the `dependency_invariants`
     // test (T004, `tests/dependency_invariants.rs`): it walks the cargo-metadata
     // normal-dependency closure to prove NO `bevy*` crate appears anywhere, and
-    // builds `ron-core` + `ron-validate` for `wasm32-unknown-unknown` (a target
+    // builds `ronin-core` + `ronin-validate` for `wasm32-unknown-unknown` (a target
     // with no ambient network/filesystem) — together the SC-007 proof that the
     // WASM-clean core gains no Bevy/registry/network dependency. This test
     // documents that delegation so the FR-018 coverage is traceable from here.

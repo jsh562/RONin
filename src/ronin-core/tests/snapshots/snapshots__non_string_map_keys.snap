@@ -1,0 +1,24 @@
+---
+source: src/ronin-core/tests/snapshots.rs
+expression: "tree(\"{1: \\\"a\\\", true: \\\"b\\\"}\")"
+---
+Root@TextRange { start: 0, end: 19 }
+  Map@TextRange { start: 0, end: 19 }
+    LBrace@TextRange { start: 0, end: 1 } "{"
+    MapEntry@TextRange { start: 1, end: 7 }
+      Literal@TextRange { start: 1, end: 2 }
+        Integer@TextRange { start: 1, end: 2 } "1"
+      Colon@TextRange { start: 2, end: 3 } ":"
+      Whitespace@TextRange { start: 3, end: 4 } " "
+      Literal@TextRange { start: 4, end: 7 }
+        String@TextRange { start: 4, end: 7 } "\"a\""
+    Comma@TextRange { start: 7, end: 8 } ","
+    Whitespace@TextRange { start: 8, end: 9 } " "
+    MapEntry@TextRange { start: 9, end: 18 }
+      Literal@TextRange { start: 9, end: 13 }
+        TrueKw@TextRange { start: 9, end: 13 } "true"
+      Colon@TextRange { start: 13, end: 14 } ":"
+      Whitespace@TextRange { start: 14, end: 15 } " "
+      Literal@TextRange { start: 15, end: 18 }
+        String@TextRange { start: 15, end: 18 } "\"b\""
+    RBrace@TextRange { start: 18, end: 19 } "}"

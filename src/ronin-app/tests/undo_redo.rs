@@ -3,7 +3,7 @@
 //! The `EditorDocument`/`App` half of tasks T029 (undo/redo round-trip + redo
 //! invalidation, SC-005), T030 (bounds + coalescing, SC-006/SC-009/SC-010), and
 //! T038 (`[COMPLETES TR-010]` — the shell-command-driven undo/redo). The pure
-//! `UndoStack` properties live in `ron-core/tests/undo.rs`; here we drive undo/redo
+//! `UndoStack` properties live in `ronin-core/tests/undo.rs`; here we drive undo/redo
 //! through the real `EditorDocument` seam and the `App` command surface.
 //!
 //! # The editor-level undo guarantees pinned here

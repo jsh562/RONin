@@ -150,7 +150,7 @@ jobs:
         run: actionlint -color
 
       # --- T032 {COMPLETES SC-003}: cargo publish --dry-run --locked per crate in
-      # dependency order (ron-core -> ron-types -> ron-validate -> ronin-app),
+      # dependency order (ronin-core -> ronin-types -> ronin-validate -> ronin-app),
       # handling unpublished workspace path-deps deterministically (--no-verify on
       # dependents pre-first-publish; see the script's comment). The fuzz crate is
       # absent (never published — OR-005). ---

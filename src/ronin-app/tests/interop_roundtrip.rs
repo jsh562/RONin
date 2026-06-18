@@ -17,8 +17,8 @@
 //! Snapshots key on the JSONC text + the loss kinds, NOT on detail wording (plan
 //! "Snapshot vs assertion scope").
 
-use ron_core::parse;
-use ron_types::model::{
+use ronin_core::parse;
+use ronin_types::model::{
     Discriminator, Field, NodeKind, Primitive, TypeModel, TypeNode, TypeRef, Variant, VariantShape,
 };
 use ronin_app::interop::{

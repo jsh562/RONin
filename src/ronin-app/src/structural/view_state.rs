@@ -5,7 +5,7 @@
 //!
 //! A reparse builds a **new** green tree, so a raw [`SyntaxNode`] handle held
 //! across an off-frame reparse points at the *old* tree and is useless for
-//! re-binding focus or expansion. `ron-core`'s [`ParentRef`](ron_core::ParentRef)
+//! re-binding focus or expansion. `ronin-core`'s [`ParentRef`](ronin_core::ParentRef)
 //! addresses by `(kind + start-offset)` and is stable only *within* a single
 //! composed transform (where intermediate trees keep their start offsets) — it is
 //! **not** a cross-reparse identity either, because edits shift offsets.
@@ -29,8 +29,8 @@
 //! count or the document's total node count (FR-027). [`path_of`] is the inverse:
 //! it walks **up** via [`SyntaxNode::parent`], one hop per level, also depth-bounded.
 
-use ron_core::ast;
-use ron_core::{SyntaxKind, SyntaxNode};
+use ronin_core::ast;
+use ronin_core::{SyntaxKind, SyntaxNode};
 
 /// One step along a [`StructuralPath`]: how to descend from a parent collection to
 /// one of its children by the child's **structural role** (not by offset or handle).
@@ -915,7 +915,7 @@ impl ViewSelectionAndFocus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ron_core::parse;
+    use ronin_core::parse;
 
     fn root_of(src: &str) -> SyntaxNode {
         parse(src).root()

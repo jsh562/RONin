@@ -70,7 +70,7 @@ use crate::snippets::{SnippetSet, UserSnippetFile, USER_SNIPPET_TEMPLATE};
 use crate::structural::view_state::ActiveView;
 use crate::type_acquire::resolve_and_acquire;
 use crate::workspace::{ClosedDocumentRecord, EditorWorkspace};
-use ron_core::{FormatResult, SyntaxKind, SyntaxNode};
+use ronin_core::{FormatResult, SyntaxKind, SyntaxNode};
 
 /// How long an informational (auto-dismiss) notice stays on screen.
 const INFO_NOTICE_TTL: Duration = Duration::from_secs(4);
@@ -444,7 +444,7 @@ pub struct PartialRonPrompt {
     /// The per-conversion format override seeded from settings.
     format: ConvertFormatOverride,
     /// The byte range of the first unparseable region (for the block-branch locate).
-    first_error: ron_core::TextRange,
+    first_error: ronin_core::TextRange,
 }
 
 /// The RONin desktop editor shell (FR-003).
@@ -988,7 +988,7 @@ impl App {
     /// (T037).
     ///
     /// FR-021 (b) requires that when the bound `type_source` is re-acquired and
-    /// yields a different [`TypeModel`](ron_types::TypeModel) the document
+    /// yields a different [`TypeModel`](ronin_types::TypeModel) the document
     /// re-validates against it. RONin does **not** auto-watch the filesystem for an
     /// externally edited source file in this MVP (filesystem-watch auto-detection is
     /// out of scope); instead this is the explicit, on-demand re-acquire the user (or
@@ -1249,7 +1249,7 @@ impl App {
     /// precondition, then parse the active document's live buffer → derive the
     /// [`SceneModel`](crate::bevy::SceneModel) from that same CST → call the pure
     /// elision entry point against the document's loaded
-    /// [`BevyRegistry`](ron_types::BevyRegistry). On
+    /// [`BevyRegistry`](ronin_types::BevyRegistry). On
     /// [`ElisionOutcome::Applied`](crate::bevy::ElisionOutcome::Applied) the resulting
     /// CST is committed as exactly **one** E007 undo unit via
     /// [`EditorDocument::commit_transformed_cst`] (so a single undo restores the exact
@@ -1285,7 +1285,7 @@ impl App {
 
         // Parse the live buffer once and derive the scene model from that same CST so
         // every elision target maps to a real, current span (FR-014).
-        let cst = ron_core::parse(&doc.buffer);
+        let cst = ronin_core::parse(&doc.buffer);
         let model = SceneModel::from_cst(&cst);
         let outcome: ElisionOutcome = match kind {
             ElisionKind::Reduce => reduce_verbosity(&cst, &model, registry, scope),
@@ -1408,7 +1408,7 @@ impl App {
         };
 
         // 1. Unparseable-RON gate: prompt block vs convert-remainder (FR-013/SC-008).
-        let cst = ron_core::parse(&doc.buffer);
+        let cst = ronin_core::parse(&doc.buffer);
         if !tolerate_errors {
             if let Some(first) = cst.diagnostics().first() {
                 self.partial_ron_prompt = Some(PartialRonPrompt {
@@ -1834,10 +1834,10 @@ impl App {
     /// or the interchange is malformed — the caller then surfaces the clear
     /// "no type model available" message (FR-010 / §III, no false certainty).
     #[must_use]
-    fn active_bound_type_model(&self) -> Option<(ron_types::model::TypeModel, String)> {
+    fn active_bound_type_model(&self) -> Option<(ronin_types::model::TypeModel, String)> {
         let doc = self.active_document()?;
         let bound = doc.bound_type.as_ref()?;
-        let model = ron_types::from_json(&bound.model).ok()?;
+        let model = ronin_types::from_json(&bound.model).ok()?;
         Some((model, bound.type_name.clone()))
     }
 
@@ -2283,7 +2283,7 @@ impl App {
 
     /// Format the active document (FR-001/FR-023).
     ///
-    /// Parses the active buffer with `ron_core::parse`, runs `ron_core::format`
+    /// Parses the active buffer with `ronin_core::parse`, runs `ronin_core::format`
     /// against the live [`FormattingConfig`], and routes the outcome through the
     /// single safe apply path ([`apply_whole_document_format`](Self::apply_whole_document_format)):
     ///
@@ -2306,8 +2306,8 @@ impl App {
             return;
         };
         let config = self.settings.formatting.to_engine_config();
-        let parsed = ron_core::parse(&doc.buffer);
-        let result = ron_core::format(&parsed, &config);
+        let parsed = ronin_core::parse(&doc.buffer);
+        let result = ronin_core::format(&parsed, &config);
         self.apply_whole_document_format(idx, result);
     }
 
@@ -2315,7 +2315,7 @@ impl App {
     ///
     /// Maps the active document's character-offset selection to its byte range,
     /// parses the buffer, and walks the CST for the **smallest enclosing
-    /// value-position node** that fully covers the selection. `ron_core::format_node`
+    /// value-position node** that fully covers the selection. `ronin_core::format_node`
     /// then produces the canonical text for just that subtree, which is spliced back
     /// over the node's exact source range — the rest of the buffer stays
     /// byte-unchanged (FR-023). The outcome goes through the same single safe apply
@@ -2359,7 +2359,7 @@ impl App {
             return;
         };
         let config = self.settings.formatting.to_engine_config();
-        let parsed = ron_core::parse(&doc.buffer);
+        let parsed = ronin_core::parse(&doc.buffer);
         let Some(node) = smallest_enclosing_value_node(&parsed, byte_start, byte_end) else {
             self.push_authoring_notice(
                 NoticeKind::Error,
@@ -2368,7 +2368,7 @@ impl App {
             return;
         };
         let node_range = node.text_range();
-        let result = ron_core::format_node(&node, &config);
+        let result = ronin_core::format_node(&node, &config);
         self.apply_selection_format(idx, node_range.start(), node_range.end(), result);
     }
 
@@ -2803,8 +2803,8 @@ impl App {
             return;
         };
         let config = self.settings.formatting.to_engine_config();
-        let parsed = ron_core::parse(&doc.buffer);
-        match ron_core::format(&parsed, &config) {
+        let parsed = ronin_core::parse(&doc.buffer);
+        match ronin_core::format(&parsed, &config) {
             FormatResult::Formatted(text) => {
                 let Some(doc) = self.workspace.get_mut(idx) else {
                     return;
@@ -3336,7 +3336,7 @@ impl App {
     ///
     /// Returns `true` if any document installed a fresh result (the caller can
     /// repaint to show it). Runs for all documents — not just the active one — so
-    /// background tabs stay current; none of this touches `ron_core::parse`
+    /// background tabs stay current; none of this touches `ronin_core::parse`
     /// directly (the worker owns parsing).
     ///
     /// Before requesting reparses it reconciles each document's type-validation
@@ -3756,7 +3756,7 @@ impl App {
                     });
                 });
                 // Format menu (FR-001/FR-002/FR-023): Format Document / Format
-                // Selection. Both invoke the real `ron_core` formatter through the
+                // Selection. Both invoke the real `ronin_core` formatter through the
                 // shell's single safe apply path (buffer replaced only on a
                 // verified `Formatted` result; `NoOp` surfaces an error notice and
                 // changes nothing). Both are disabled only when no tab is open so the
@@ -5279,7 +5279,7 @@ fn canonicalize_or_raw(path: &std::path::Path) -> PathBuf {
 /// (FR-002).
 ///
 /// The editor surface tracks the selection in **character** offsets (encoding-width
-/// independent), while the `ron-core` CST works in **byte** offsets; Format
+/// independent), while the `ronin-core` CST works in **byte** offsets; Format
 /// Selection must bridge the two. Returns `None` only when an offset falls past the
 /// buffer's character count (a stale selection), so the caller can decline rather
 /// than splice on a bogus range. `char_end == char_len` maps to `buffer.len()`.
@@ -5314,14 +5314,14 @@ fn char_range_to_bytes(buffer: &str, char_start: usize, char_end: usize) -> Opti
 ///
 /// Walks the parsed CST from the root, descending into the deepest child whose byte
 /// range fully covers the selection, and returns the smallest such node whose kind is
-/// a clean subtree boundary for `ron_core::format_node` (a struct / tuple / list /
+/// a clean subtree boundary for `ronin_core::format_node` (a struct / tuple / list /
 /// map / enum-variant / unit / literal). When the smallest covering node is not itself
 /// a value node (e.g. a bare `StructField` or `MapEntry`), the nearest enclosing value
 /// ancestor is returned instead, so a selection landing inside a field still maps to a
 /// formattable subtree. Returns `None` when no value node covers the selection (the
 /// caller then declines and notifies).
 fn smallest_enclosing_value_node(
-    doc: &ron_core::CstDocument,
+    doc: &ronin_core::CstDocument,
     byte_start: usize,
     byte_end: usize,
 ) -> Option<SyntaxNode> {
@@ -5350,7 +5350,7 @@ fn smallest_enclosing_value_node(
     None
 }
 
-/// Whether `kind` is a value-position node kind accepted by `ron_core::format_node`
+/// Whether `kind` is a value-position node kind accepted by `ronin_core::format_node`
 /// as a clean Format-Selection subtree boundary.
 fn is_value_node_kind(kind: SyntaxKind) -> bool {
     matches!(

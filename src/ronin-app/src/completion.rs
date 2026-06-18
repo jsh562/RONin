@@ -10,11 +10,11 @@
 //! The design splits cleanly so the decision logic never needs a live UI:
 //!
 //! * [`CompletionState`] holds the popup's cross-frame state: whether it is open,
-//!   the candidate items (already ranked below the literal by `ron-core`), the
+//!   the candidate items (already ranked below the literal by `ronin-core`), the
 //!   explicitly-highlighted index (`None` = nothing preselected), and the byte
 //!   offset the popup was triggered at.
 //! * [`recompute`] re-derives candidates from the buffer + caret each frame via
-//!   `ron_core::completion_context`. An empty/ambiguous context (no items) closes
+//!   `ronin_core::completion_context`. An empty/ambiguous context (no items) closes
 //!   the popup (FR-014); a context with items (auto-trigger on a non-empty prefix,
 //!   or any value slot on manual invoke) opens it.
 //! * [`accept`] turns a highlighted item into a CST-verified buffer splice
@@ -30,7 +30,7 @@
 //! lets the `TextEdit` handle it) — only an explicit arrow-key highlight makes
 //! `Enter`/`Tab` accept a suggestion. Typing through the popup never auto-accepts.
 
-use ron_core::{completion_context, CompletionItem};
+use ronin_core::{completion_context, CompletionItem};
 
 /// The cross-frame state of the completion popup for one document.
 ///
@@ -123,7 +123,7 @@ impl CompletionState {
     /// Re-derive the popup from `buffer` at `caret_byte` for the given `trigger`
     /// (FR-014/FR-022).
     ///
-    /// Asks `ron_core::completion_context` for the structural candidates, then:
+    /// Asks `ronin_core::completion_context` for the structural candidates, then:
     /// * an empty/ambiguous context (no items) **closes** the popup (FR-014);
     /// * otherwise, under [`Trigger::Auto`] the popup only opens when the user is
     ///   mid-identifier (a non-empty prefix); under [`Trigger::Manual`] it opens
@@ -133,7 +133,7 @@ impl CompletionState {
     ///
     /// Returns `true` if the popup is open after recompute.
     pub fn recompute(&mut self, buffer: &str, caret_byte: usize, trigger: Trigger) -> bool {
-        let ctx = completion_context(&ron_core::parse(buffer), caret_byte);
+        let ctx = completion_context(&ronin_core::parse(buffer), caret_byte);
 
         // Empty / ambiguous context → no list, no popup (FR-014).
         if ctx.items.is_empty() {
@@ -270,14 +270,14 @@ pub fn accept_item(
 
 /// The number of parse diagnostics for `text` (the verify-before-commit metric).
 fn parse_error_count(text: &str) -> usize {
-    ron_core::parse(text).diagnostics().len()
+    ronin_core::parse(text).diagnostics().len()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn item(label: &str, insert: &str, kind: ron_core::CompletionKind) -> CompletionItem {
+    fn item(label: &str, insert: &str, kind: ronin_core::CompletionKind) -> CompletionItem {
         CompletionItem {
             label: label.to_string(),
             insert_text: insert.to_string(),
@@ -400,7 +400,7 @@ mod tests {
         state.highlighted = Some(some_idx);
         let accepted = state.accept(buffer, 3).unwrap();
         // The spliced buffer parses without diagnostics (lossless, Principle I).
-        let parsed = ron_core::parse(&accepted.new_buffer);
+        let parsed = ronin_core::parse(&accepted.new_buffer);
         assert!(
             parsed.diagnostics().is_empty(),
             "accepted suggestion must round-trip cleanly: {:?}",
@@ -412,7 +412,7 @@ mod tests {
     fn accept_refuses_a_splice_that_introduces_a_new_error() {
         // A hand-crafted item whose insert_text would corrupt the buffer must be
         // refused by the verify-before-commit guard.
-        let bad = item("Some", "Some(", ron_core::CompletionKind::Option);
+        let bad = item("Some", "Some(", ronin_core::CompletionKind::Option);
         // Replacing the empty prefix at the end of a clean buffer with `Some(`
         // introduces an unclosed delimiter → must be refused.
         let accepted = accept_item("[1]", 3, "", &bad);
@@ -429,7 +429,7 @@ mod tests {
             "So",
             999,
             "So",
-            &item("Some", "Some()", ron_core::CompletionKind::Option)
+            &item("Some", "Some()", ronin_core::CompletionKind::Option)
         )
         .is_none());
     }

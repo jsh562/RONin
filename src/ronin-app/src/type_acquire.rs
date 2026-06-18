@@ -2,15 +2,15 @@
 //!
 //! This module is the seam that turns a resolved [`TypeBinding`] into a
 //! [`BoundType`] the off-frame validator can run against. It bridges the *pure*
-//! binding-config core ([`crate::binding`]) to E004's native `ron-types`
+//! binding-config core ([`crate::binding`]) to E004's native `ronin-types`
 //! acquisition pipeline:
 //!
-//! 1. pick a [`TypeSource`](ron_types::TypeSource) adapter from the binding's
-//!    [`TypeSourceLocator`] (`RustSource` → [`SynSource`](ron_types::SynSource),
-//!    `SchemaFile` → [`JsonSchemaSource`](ron_types::JsonSchemaSource)),
-//! 2. [`acquire`](ron_types::TypeSource::acquire) + [`normalize`](ron_types::normalize)
-//!    into one [`TypeModel`](ron_types::TypeModel),
-//! 3. serialize with [`ron_types::to_json`] into the frozen JSON-Schema-2020-12 +
+//! 1. pick a [`TypeSource`](ronin_types::TypeSource) adapter from the binding's
+//!    [`TypeSourceLocator`] (`RustSource` → [`SynSource`](ronin_types::SynSource),
+//!    `SchemaFile` → [`JsonSchemaSource`](ronin_types::JsonSchemaSource)),
+//! 2. [`acquire`](ronin_types::TypeSource::acquire) + [`normalize`](ronin_types::normalize)
+//!    into one [`TypeModel`](ronin_types::TypeModel),
+//! 3. serialize with [`ronin_types::to_json`] into the frozen JSON-Schema-2020-12 +
 //!    `x-ron-*` interchange `serde_json::Value`,
 //! 4. wrap it with the binding's `type_name` as a [`BoundType`].
 //!
@@ -24,8 +24,8 @@
 //! - ANY failure or unresolvable/malformed source yields [`None`], so the caller
 //!   degrades to structural-only validation rather than crashing (FR-014). A
 //!   missing file, unreadable path, garbage Rust, or invalid JSON Schema all
-//!   degrade to [`None`] via `ron-types`' never-fail acquire contract — there is
-//!   nothing to catch because `ron-types` records failures as diagnostics and
+//!   degrade to [`None`] via `ronin-types`' never-fail acquire contract — there is
+//!   nothing to catch because `ronin-types` records failures as diagnostics and
 //!   returns a (possibly empty) model rather than panicking.
 //! - A [`BindingState::NoBinding`] binding yields [`None`] directly.
 //!
@@ -44,7 +44,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use ron_types::{JsonSchemaSource, SynSource, TypeModel, TypeSource};
+use ronin_types::{JsonSchemaSource, SynSource, TypeModel, TypeSource};
 
 use crate::binding::{
     contain_type_source, resolve, BindingConfig, BindingState, DocumentOverride, TypeBinding,
@@ -58,7 +58,7 @@ use crate::reparse::BoundType;
 ///
 /// For a [`BindingState::Bound`] binding this picks the source adapter by the
 /// binding's [`TypeSourceLocator`], acquires + normalizes a [`TypeModel`],
-/// serializes it via [`ron_types::to_json`], and wraps it with the binding's
+/// serializes it via [`ronin_types::to_json`], and wraps it with the binding's
 /// `type_name`.
 ///
 /// # Project-root containment (FR-025)
@@ -118,7 +118,7 @@ pub fn acquire_bound_type(binding: &TypeBinding, project_root: &Path) -> Option<
 
     // Serialize to the frozen JSON-Schema-2020-12 + `x-ron-*` interchange the
     // WASM-clean validator consumes.
-    let interchange = ron_types::to_json(&model);
+    let interchange = ronin_types::to_json(&model);
 
     Some(BoundType {
         model: Arc::new(interchange),
@@ -157,8 +157,8 @@ pub fn resolve_and_acquire(
 
 /// Acquire + normalize a [`TypeModel`] from a single [`TypeSourceLocator`].
 ///
-/// Picks the adapter by source kind, runs `ron-types`' never-fail acquire through
-/// [`normalize`](ron_types::normalize) (so the result carries provenance and
+/// Picks the adapter by source kind, runs `ronin-types`' never-fail acquire through
+/// [`normalize`](ronin_types::normalize) (so the result carries provenance and
 /// merge-time diagnostics consistently with multi-source acquisition), and returns
 /// the (possibly empty) model. Never panics; a malformed/unreadable source yields
 /// an empty model via the adapter's diagnostics path (FR-024).
@@ -170,7 +170,7 @@ fn acquire_model(source: &TypeSourceLocator) -> TypeModel {
         // A user-authored JSON Schema 2020-12 file, read as data.
         TypeSourceLocator::SchemaFile(path) => Box::new(JsonSchemaSource::from_path(path)),
     };
-    ron_types::normalize(&[adapter])
+    ronin_types::normalize(&[adapter])
 }
 
 /// Build a [`SynSource`] for a Rust source path, walking a directory or reading a

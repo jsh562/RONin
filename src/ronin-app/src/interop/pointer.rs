@@ -1,7 +1,7 @@
 //! Shared JSON-Pointer walk over the RON CST value tree (HINT-002).
 //!
-//! `ron-validate`'s [`CstJsonProjection`] builds a `serde_json` value and a
-//! [`PointerRangeIndex`](ron_validate::PointerRangeIndex) keyed by JSON Pointer,
+//! `ronin-validate`'s [`CstJsonProjection`] builds a `serde_json` value and a
+//! [`PointerRangeIndex`](ronin_validate::PointerRangeIndex) keyed by JSON Pointer,
 //! but it does **not** expose a public value-node → pointer map. The loss-map
 //! builder ([`crate::interop::loss`]) and the comment carrier
 //! ([`crate::interop::comments`]) both need to address a CST value node by the
@@ -10,12 +10,12 @@
 //! the projection's coordinate space.
 //!
 //! This module re-walks the value tree producing exactly the same pointers the
-//! projection's [`project_value`](ron_validate::projection) walk records, so the
+//! projection's [`project_value`](ronin_validate::projection) walk records, so the
 //! pointers align byte-for-byte with the projection index keys. It is the single
 //! place that mirrors the projection's pointer rules — keeping the loss map and
 //! the comment carrier from drifting from the value mapping they describe.
 //!
-//! # Pointer rules (must match `ron-validate`'s schema-agnostic projection)
+//! # Pointer rules (must match `ronin-validate`'s schema-agnostic projection)
 //!
 //! * **Struct** → `push_key(field_name)` per field value.
 //! * **Tuple**: anonymous `(a, b)` → `push_index(i)`; a named tuple is a
@@ -31,8 +31,8 @@
 
 use std::collections::BTreeMap;
 
-use ron_core::syntax::ast::{Document, EnumVariant, List, Map, MapEntry, Struct, Tuple, Value};
-use ron_core::{SyntaxKind, SyntaxNode, TextRange};
+use ronin_core::syntax::ast::{Document, EnumVariant, List, Map, MapEntry, Struct, Tuple, Value};
+use ronin_core::{SyntaxKind, SyntaxNode, TextRange};
 
 /// A value node and the JSON Pointer it maps to in the projection's coordinate
 /// space.
@@ -82,7 +82,7 @@ pub fn pointer_to_range(root: &SyntaxNode) -> BTreeMap<String, TextRange> {
     map
 }
 
-/// An incrementally-built JSON Pointer (RFC 6901), mirroring `ron-validate`'s
+/// An incrementally-built JSON Pointer (RFC 6901), mirroring `ronin-validate`'s
 /// internal `PointerBuilder` so the segment escaping matches exactly.
 struct PointerStack {
     buf: String,
@@ -303,7 +303,7 @@ fn entry_key_name(entry: &MapEntry) -> Option<(String, TextRange)> {
 }
 
 /// The object-key string the projection records for a map key value (verbatim for
-/// non-string keys) — mirrors `ron-validate`'s `map_key_string` so the pointer
+/// non-string keys) — mirrors `ronin-validate`'s `map_key_string` so the pointer
 /// segment matches the projection index key (HINT-002).
 pub(crate) fn projection_key_string(key: &Value) -> String {
     if let Value::Literal(lit) = key {
@@ -414,7 +414,7 @@ mod tests {
     use super::*;
 
     fn pointers(src: &str) -> Vec<String> {
-        let doc = ron_core::parse(src);
+        let doc = ronin_core::parse(src);
         value_pointer_map(&doc.root())
             .into_iter()
             .map(|(_, p)| p)
@@ -460,7 +460,7 @@ mod tests {
 
     #[test]
     fn pointer_to_range_keeps_innermost_for_shared_pointer() {
-        let doc = ron_core::parse("(opt: Some(5))");
+        let doc = ronin_core::parse("(opt: Some(5))");
         let map = pointer_to_range(&doc.root());
         // `/opt` resolves to the inner literal `5`'s span (the innermost value).
         let opt = map.get("/opt").copied().expect("/opt mapped");

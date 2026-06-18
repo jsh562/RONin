@@ -369,8 +369,8 @@ impl TypeBinding {
 /// The E010 JSON→RON reconstruction is **schema-aware when a type is bound** — it
 /// consults the bound `TypeModel` strictly as **data** (ADR-0004; never executed,
 /// never mutated) to recover tuples-vs-lists, named enum variants (via the recorded
-/// serde [`Discriminator`](ron_types::model::Discriminator)), `char`, `Option`, and
-/// non-string map keys (via the [`RonTypeExtension`](ron_types::extension::RonTypeExtension)
+/// serde [`Discriminator`](ronin_types::model::Discriminator)), `char`, `Option`, and
+/// non-string map keys (via the [`RonTypeExtension`](ronin_types::extension::RonTypeExtension)
 /// tuple-arity / char / non-string-key / option facts). This struct is the seam
 /// that turns a document's resolved binding into that consultable model: the worker
 /// carries the bound type as a **serialized** E004 interchange
@@ -381,16 +381,16 @@ impl TypeBinding {
 #[derive(Debug, Clone)]
 pub struct JsonToRonConsultation {
     /// The in-memory `TypeModel` consulted as data for reconstruction (FR-009).
-    pub model: ron_types::model::TypeModel,
+    pub model: ronin_types::model::TypeModel,
     /// The bound root type name — a key into
-    /// [`TypeModel::named_types`](ron_types::model::TypeModel::named_types).
+    /// [`TypeModel::named_types`](ronin_types::model::TypeModel::named_types).
     pub root_type: String,
 }
 
 impl JsonToRonConsultation {
     /// Build a consultation from an owned `TypeModel` + root type name.
     #[must_use]
-    pub fn new(model: ron_types::model::TypeModel, root_type: impl Into<String>) -> Self {
+    pub fn new(model: ronin_types::model::TypeModel, root_type: impl Into<String>) -> Self {
         Self {
             model,
             root_type: root_type.into(),
@@ -401,13 +401,13 @@ impl JsonToRonConsultation {
     /// interchange (`reparse::BoundType.model`) + the bound root type name (T021).
     ///
     /// Deserializes the JSON-Schema-2020-12 + `x-ron-*` interchange back into an
-    /// in-memory [`TypeModel`] via [`ron_types::from_json`]; returns `None` when the
+    /// in-memory [`TypeModel`] via [`ronin_types::from_json`]; returns `None` when the
     /// interchange is malformed or the root type is absent — the caller then falls
     /// back to the unbound best-effort path (FR-009, schema-optional / no false
     /// certainty, §III). The model is consulted strictly as **data** (ADR-0004).
     #[must_use]
     pub fn from_serialized_model(serialized: &serde_json::Value, root_type: &str) -> Option<Self> {
-        let model = ron_types::from_json(serialized).ok()?;
+        let model = ronin_types::from_json(serialized).ok()?;
         // Only a consultation whose root type is actually registered is useful; an
         // absent root degrades to unbound best-effort rather than a false binding.
         if !model.contains(root_type) {
@@ -669,15 +669,15 @@ mod consultation_tests {
     //! T021 — the JSON→RON schema-aware reconstruction consultation (FR-009/015).
 
     use super::*;
-    use ron_types::model::{TypeModel, TypeNode, TypeRef};
+    use ronin_types::model::{TypeModel, TypeNode, TypeRef};
 
     fn tuple_model() -> TypeModel {
         let mut model = TypeModel::new();
         model.insert_named(
             "Pos2",
             TypeNode::tuple(vec![
-                TypeRef::inline(TypeNode::primitive(ron_types::model::Primitive::Integer)),
-                TypeRef::inline(TypeNode::primitive(ron_types::model::Primitive::Integer)),
+                TypeRef::inline(TypeNode::primitive(ronin_types::model::Primitive::Integer)),
+                TypeRef::inline(TypeNode::primitive(ronin_types::model::Primitive::Integer)),
             ]),
         );
         model
@@ -687,7 +687,7 @@ mod consultation_tests {
     fn from_serialized_model_round_trips_and_binds() {
         // A serialized E004 interchange deserializes back to a consultable model.
         let model = tuple_model();
-        let serialized = ron_types::to_json(&model);
+        let serialized = ronin_types::to_json(&model);
         let consult = JsonToRonConsultation::from_serialized_model(&serialized, "Pos2")
             .expect("a registered root type binds");
         assert_eq!(consult.root_type, "Pos2");
@@ -699,7 +699,7 @@ mod consultation_tests {
 
     #[test]
     fn from_serialized_model_absent_root_degrades_to_none() {
-        let serialized = ron_types::to_json(&tuple_model());
+        let serialized = ronin_types::to_json(&tuple_model());
         // An unregistered root type degrades to unbound best-effort (no false bind).
         assert!(
             JsonToRonConsultation::from_serialized_model(&serialized, "NotThere").is_none(),

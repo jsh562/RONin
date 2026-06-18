@@ -12,8 +12,8 @@
 //! ABSENT whose default is known (FR-015) — it never relies on remembering what was
 //! elided, because elision leaves no on-disk marker.
 //!
-//! Both directions are routed through `ron-core`'s pure E008
-//! [`apply_structural`](ron_core::apply_structural) transforms — never a hand-edit
+//! Both directions are routed through `ronin-core`'s pure E008
+//! [`apply_structural`](ronin_core::apply_structural) transforms — never a hand-edit
 //! (HINT-005) — so every untouched region stays **byte-for-byte** identical, and
 //! the whole invocation is ONE CST→CST result the caller pushes as a single E007
 //! undo unit (FR-016).
@@ -66,11 +66,11 @@
 
 use std::collections::BTreeSet;
 
-use ron_core::{
+use ronin_core::{
     apply_structural, ast, syntax::SyntaxKind, CstDocument, ParentRef, StructuralOp, SyntaxNode,
     TransformOutcome,
 };
-use ron_types::BevyRegistry;
+use ronin_types::BevyRegistry;
 use serde_json::Value as JsonValue;
 
 use crate::bevy::scene::{SceneModel, SceneValueRef};
@@ -519,7 +519,7 @@ fn apply_removals(doc: &CstDocument, mut groups: Vec<ComponentRemoval>) -> Optio
 /// per-field index/key re-resolution between chained ops correct without changing
 /// any byte.
 fn reparse(doc: &CstDocument) -> CstDocument {
-    ron_core::parse(&ron_core::print(doc))
+    ronin_core::parse(&ronin_core::print(doc))
 }
 
 /// Apply the per-component inserts through [`apply_structural`], producing one
@@ -1082,14 +1082,14 @@ fn render_string(s: &str) -> String {
 /// `true` if the registered type is a reflect `Struct` (so a JSON object default
 /// renders as a RON struct, not a map).
 fn is_struct_type(registry: &BevyRegistry, type_path: &str) -> bool {
-    use ron_types::source::ReflectKind;
+    use ronin_types::source::ReflectKind;
     matches!(registry.reflect_kind(type_path), Some(ReflectKind::Struct))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ron_core::{parse, print};
+    use ronin_core::{parse, print};
     use serde_json::json;
 
     /// Parse a top-level RON value (the doc's single value).

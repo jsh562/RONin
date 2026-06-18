@@ -244,7 +244,7 @@ mod tests {
 
     use super::*;
     use crate::interop::{ron_to_json, RonToJson};
-    use ron_core::parse;
+    use ronin_core::parse;
 
     fn convert(src: &str, mode: CommentMode) -> RonToJson {
         let doc = parse(src);

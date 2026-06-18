@@ -1,0 +1,8 @@
+---
+source: src/ronin-core/tests/format_properties.rs
+expression: "snap(\"#![enable(implicit_some)]\\n#![enable(unwrap_newtypes)]\\n// note\\n(a: 1, b: 2)\")"
+---
+#![enable(implicit_some)]
+#![enable(unwrap_newtypes)]
+// note
+(a: 1, b: 2)

@@ -3,7 +3,7 @@
 //!
 //! FR-019's guarantee: **no authoring action drops comments, reorders content, or
 //! changes values**. The three actions are format, completion-accept insertion,
-//! and snippet insertion. The formatter's round-trip is pinned in `ron-core`
+//! and snippet insertion. The formatter's round-trip is pinned in `ronin-core`
 //! (`format_preservation.rs` + `cross_action_round_trip.rs`); this file adds the
 //! two *insertion* legs at the app/logic layer:
 //!
@@ -22,7 +22,7 @@
 //!    semantic-token stream is a contiguous subsequence of the spliced one — the
 //!    splice only *adds* tokens, never drops or reorders the existing content).
 
-use ron_core::{completion_context, parse, SyntaxKind};
+use ronin_core::{completion_context, parse, SyntaxKind};
 use ronin_app::completion::accept_item;
 use ronin_app::snippets::insert_snippet;
 

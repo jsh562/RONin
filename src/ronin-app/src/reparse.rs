@@ -1,4 +1,4 @@
-//! Off-thread, generation-keyed reparsing against `ron-core` (FR-006).
+//! Off-thread, generation-keyed reparsing against `ronin-core` (FR-006).
 //!
 //! Parsing and diagnostic collection run **off** the per-frame UI path so the
 //! editor stays within its frame budget (project-instructions §Performance). A
@@ -9,7 +9,7 @@
 //!
 //! [`ReparseWorker`] owns a background thread that turns `(generation, text,
 //! bound)` jobs into [`ParseResult`]s — parsing structurally and, when a type
-//! binding has resolved, running `ron-validate` off-frame too (E006/FR-006) —
+//! binding has resolved, running `ronin-validate` off-frame too (E006/FR-006) —
 //! and ships them back over a channel. The worker only
 //! *computes*; the document decides staleness by comparing generations. The
 //! worker is panic-isolated and exits cleanly when dropped. When an
@@ -21,8 +21,8 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
-use ron_core::{CstDocument, Diagnostic, TextRange};
-use ron_types::BevyRegistry;
+use ronin_core::{CstDocument, Diagnostic, TextRange};
+use ronin_types::BevyRegistry;
 
 use crate::bevy::{validate_scene, SceneDiagnostic};
 
@@ -61,7 +61,7 @@ impl std::fmt::Debug for BoundType {
 /// This is the Bevy-mode analogue of [`BoundType`]: where serde mode carries a
 /// single named type + its serialized `TypeModel`, Bevy mode carries the whole
 /// bound [`BevyRegistry`] plus the **already-serialized** E004 interchange `model`
-/// (`ron_types::to_json` of `BevySource::from_registry(registry).acquire().model`)
+/// (`ronin_types::to_json` of `BevySource::from_registry(registry).acquire().model`)
 /// — produced **once** at registry-load time, not per keystroke — and the
 /// optional configured expected Bevy version for the FR-008 staleness advisory.
 /// Both the `model` and the `registry` are behind an [`Arc`] so each per-keystroke
@@ -69,12 +69,12 @@ impl std::fmt::Debug for BoundType {
 /// registry / schema.
 ///
 /// Validation in Bevy mode runs [`validate_scene`] (the multi-subtree scene
-/// validator) rather than `ron_validate::validate_against`: a Bevy-mode document
+/// validator) rather than `ronin_validate::validate_against`: a Bevy-mode document
 /// **replaces** its active source with the bound registry (AD-003/FR-013).
 #[derive(Clone)]
 pub struct BoundScene {
     /// E004's serialized `TypeModel` interchange for the bound registry, shared by
-    /// `Arc`. Acquired once at registry-load time (`ron_types::to_json` of the
+    /// `Arc`. Acquired once at registry-load time (`ronin_types::to_json` of the
     /// `BevySource::from_registry(..).acquire().model`); the same serialization
     /// serde mode hands the validator.
     pub model: Arc<serde_json::Value>,
@@ -100,7 +100,7 @@ impl std::fmt::Debug for BoundScene {
 /// of the two mutually-exclusive modes (E009/FR-013).
 ///
 /// A document is validated under exactly one mode's type source: **`Serde`** runs
-/// `ron_validate::validate_against` against a single bound type (today's behavior,
+/// `ronin_validate::validate_against` against a single bound type (today's behavior,
 /// byte-for-byte unchanged); **`Bevy`** runs [`validate_scene`] against the bound
 /// registry, which **replaces** the active source (AD-003/FR-013). The variant the
 /// document ships is chosen per-document by its [`ModeState`](crate::bevy::mode::ModeState),
@@ -123,11 +123,11 @@ pub enum BoundValidation {
 /// older (see [`ParseResult::supersedes`]).
 #[derive(Clone)]
 pub struct ParseResult {
-    /// The lossless concrete syntax tree from `ron-core::parse`.
+    /// The lossless concrete syntax tree from `ronin-core::parse`.
     pub cst: CstDocument,
     /// Parse diagnostics, each with its byte range clamped to `[0, source_len]`.
     pub diagnostics: Vec<Diagnostic>,
-    /// Type-validation diagnostics from `ron-validate`, each with its byte range
+    /// Type-validation diagnostics from `ronin-validate`, each with its byte range
     /// clamped to `[0, source_len]` (E006/FR-006, FR-021).
     ///
     /// Empty when the document has no resolved *serde* binding (`bound` was `None`
@@ -181,18 +181,18 @@ impl std::fmt::Debug for ParseResult {
 }
 
 impl ParseResult {
-    /// Parse `text` with `ron-core` and capture the result at `generation`, with no
+    /// Parse `text` with `ronin-core` and capture the result at `generation`, with no
     /// type validation (no resolved binding).
     ///
     /// Each diagnostic's byte range is defensively clamped to `[0, source_len]`
-    /// (`ron-core` already keeps ranges in bounds, but the shell must never trust
+    /// (`ronin-core` already keeps ranges in bounds, but the shell must never trust
     /// an out-of-range span when later projecting it onto the buffer).
     #[must_use]
     pub fn parse(text: &str, generation: u64) -> Self {
         Self::parse_with_binding(text, generation, None)
     }
 
-    /// Parse `text` with `ron-core` and, when `bound` is `Some`, additionally run
+    /// Parse `text` with `ronin-core` and, when `bound` is `Some`, additionally run
     /// the bound validation — all on the calling (worker) thread, never the
     /// per-frame path (E006/FR-006, E009/FR-013).
     ///
@@ -200,7 +200,7 @@ impl ParseResult {
     /// are computed only when a binding is present (`None` ⇒ both sets empty,
     /// FR-015), and the variant selects **which** path runs — exactly one (FR-013):
     ///
-    /// * [`BoundValidation::Serde`] → `ron_validate::validate_against` against the
+    /// * [`BoundValidation::Serde`] → `ronin_validate::validate_against` against the
     ///   single bound type, populating [`type_diagnostics`](Self::type_diagnostics)
     ///   (today's behavior, byte-for-byte unchanged);
     /// * [`BoundValidation::Bevy`] → [`validate_scene`] against the bound registry,
@@ -217,7 +217,7 @@ impl ParseResult {
         bound: Option<&BoundValidation>,
     ) -> Self {
         let source_len = text.len();
-        let cst = ron_core::parse(text);
+        let cst = ronin_core::parse(text);
         let diagnostics: Vec<Diagnostic> = cst
             .diagnostics()
             .iter()
@@ -227,9 +227,9 @@ impl ParseResult {
         // exactly one mode's path runs (FR-013). Both paths are read-only over the
         // CST + the bound model (zero bytes, FR-011/FR-022) and each yields a full
         // set to publish in place of the prior set (replace, not merge — FR-006).
-        // `ron_validate` (driven by both `validate_against` and, inside
+        // `ronin_validate` (driven by both `validate_against` and, inside
         // `validate_scene`, `validate_subtree_against_type`) skips findings inside
-        // `ron-core` parse-error node spans, so a malformed region never produces a
+        // `ronin-core` parse-error node spans, so a malformed region never produces a
         // cascade of false type errors while the parseable remainder is still
         // validated (FR-019); the structural diagnostics above still cover the
         // malformed span. Overlap dedup against structural is applied at the publish
@@ -240,7 +240,7 @@ impl ParseResult {
             // Serde mode (E006): unchanged — validate the single bound type.
             Some(BoundValidation::Serde(bound)) => {
                 type_diagnostics =
-                    ron_validate::validate_against(&bound.model, &bound.type_name, &cst)
+                    ronin_validate::validate_against(&bound.model, &bound.type_name, &cst)
                         .iter()
                         .map(|d| clamp_diagnostic(d, source_len))
                         .collect();
@@ -331,7 +331,7 @@ type RepaintSlot = Arc<Mutex<Option<egui::Context>>>;
 ///
 /// Send work with [`request`](Self::request); collect finished results
 /// non-blockingly with [`poll`](Self::poll). The worker runs each parse inside
-/// [`std::panic::catch_unwind`] so a hypothetical parser panic (which `ron-core`
+/// [`std::panic::catch_unwind`] so a hypothetical parser panic (which `ronin-core`
 /// guarantees never happens) cannot take down the worker thread — it simply
 /// drops that job and keeps serving. Dropping the worker closes the job channel,
 /// which lets the thread observe a disconnect and exit cleanly.
@@ -463,8 +463,8 @@ fn worker_loop(
             text,
             bound,
         } = job;
-        // Panic-isolate the parse *and* the type-validation pass. `ron-core`
-        // guarantees parsing never panics, and `ron-validate` fails soft, so this
+        // Panic-isolate the parse *and* the type-validation pass. `ronin-core`
+        // guarantees parsing never panics, and `ronin-validate` fails soft, so this
         // is belt-and-suspenders: a bug in either would drop one result rather
         // than kill the worker (FR-006 panic isolation covers validation too).
         let parsed = std::panic::catch_unwind(|| {
@@ -503,7 +503,7 @@ mod tests {
     //! diagnostic set and leaving the other empty.
 
     use super::*;
-    use ron_types::{BevyRegistry, BevySource, TypeSource};
+    use ronin_types::{BevyRegistry, BevySource, TypeSource};
 
     /// A serde `Entity { id: integer }` interchange model (required `id`).
     fn entity_model() -> serde_json::Value {
@@ -528,7 +528,7 @@ mod tests {
     fn bevy_binding() -> BoundValidation {
         let (registry, _diags) = BevyRegistry::from_schema_json(REGISTRY, "test", "<test>");
         let model =
-            ron_types::to_json(&BevySource::from_registry(registry.clone()).acquire().model);
+            ronin_types::to_json(&BevySource::from_registry(registry.clone()).acquire().model);
         BoundValidation::Bevy(BoundScene {
             model: Arc::new(model),
             registry: Arc::new(registry),

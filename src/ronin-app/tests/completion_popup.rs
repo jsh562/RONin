@@ -16,7 +16,7 @@
 use ronin_app::completion::{accept_item, CompletionState, Trigger};
 use ronin_app::document::EditorDocument;
 
-use ron_core::{parse, CompletionItem, CompletionKind};
+use ronin_core::{parse, CompletionItem, CompletionKind};
 
 // ---- in-context prefix yields a never-preselected suggestion list -----------
 

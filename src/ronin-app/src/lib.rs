@@ -12,7 +12,7 @@
 //!
 //! * [`document`] — the editor document model and byte-fidelity profile (FR-007,
 //!   FR-020).
-//! * [`reparse`] — off-thread parsing against `ron-core` with generation-keyed
+//! * [`reparse`] — off-thread parsing against `ronin-core` with generation-keyed
 //!   staleness (FR-006).
 //! * [`diagnostics_map`] — byte→char/line-column diagnostic projection (FR-008).
 //! * [`fileio`] — UTF-8-validated file open (FR-018).

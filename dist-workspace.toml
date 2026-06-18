@@ -11,8 +11,8 @@
 #   - release-plz → the SOLE crates.io publisher (OR-005). dist must NEVER push
 #     a crate, or the two tools would double-publish (a yank-only error).
 #
-# The root-excluded `src/ron-core/fuzz` crate is NOT a workspace member
-# (root Cargo.toml `exclude = ["src/ron-core/fuzz"]`), so dist never sees it and
+# The root-excluded `src/ronin-core/fuzz` crate is NOT a workspace member
+# (root Cargo.toml `exclude = ["src/ronin-core/fuzz"]`), so dist never sees it and
 # it can never enter the release matrix or be published (OR-005 / HINT-005).
 #
 # Phasing (OR-013 / DDR-001): Phase-1 only. Phase 2 (Homebrew/winget/AUR) and

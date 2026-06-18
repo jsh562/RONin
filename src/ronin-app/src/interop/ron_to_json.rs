@@ -1,6 +1,6 @@
 //! RON→JSON value mapping + the FR-015 emit conventions (FR-001/015).
 //!
-//! The value map is **reused, not reinvented**: `ron-validate`'s
+//! The value map is **reused, not reinvented**: `ronin-validate`'s
 //! [`CstJsonProjection`] already encodes the RON CST value into `serde_json`
 //! (tuple→array, list→array, unit `()`→null, char→one-char string, enum
 //! `Some(x)`→x / every other variant → external-tag `{"<Variant>": payload}`,
@@ -26,10 +26,10 @@
 //! round-trip cross-check** ([`grammar_verify`]) — never as the primary converter
 //! (ADR-0008 / FR-012).
 
-use ron_core::syntax::ast::{Document, Map, Value};
-use ron_core::{CstDocument, SyntaxKind};
-use ron_types::model::{Discriminator, NodeKind, TypeModel};
-use ron_validate::CstJsonProjection;
+use ronin_core::syntax::ast::{Document, Map, Value};
+use ronin_core::{CstDocument, SyntaxKind};
+use ronin_types::model::{Discriminator, NodeKind, TypeModel};
+use ronin_validate::CstJsonProjection;
 
 use crate::interop::comments::{CommentCarrier, CommentMode};
 use crate::interop::loss::{build_loss_report, LossReport};
@@ -130,7 +130,7 @@ pub fn ron_to_json(
 fn apply_emit_conventions(
     json: &mut serde_json::Value,
     value: &Value,
-    bound: Option<(&TypeModel, &ron_types::model::TypeNode)>,
+    bound: Option<(&TypeModel, &ronin_types::model::TypeNode)>,
 ) {
     // Enum tagging is driven by the BOUND TYPE, not the RON surface form: a serde
     // enum variant can be authored as a bare ident, a named tuple, or a named
@@ -196,7 +196,7 @@ fn apply_emit_conventions(
 fn apply_map_conventions(
     json: &mut serde_json::Value,
     m: &Map,
-    _bound: Option<(&TypeModel, &ron_types::model::TypeNode)>,
+    _bound: Option<(&TypeModel, &ronin_types::model::TypeNode)>,
 ) {
     let serde_json::Value::Object(obj) = json else {
         return;
@@ -230,7 +230,7 @@ fn apply_map_conventions(
 /// type's recorded serde tagging (FR-015). Unbound / external → unchanged.
 fn apply_enum_tagging(
     json: &mut serde_json::Value,
-    bound: Option<(&TypeModel, &ron_types::model::TypeNode)>,
+    bound: Option<(&TypeModel, &ronin_types::model::TypeNode)>,
 ) {
     // The projection already emits external tagging; only a bound non-external
     // discriminator changes the shape.
@@ -298,7 +298,7 @@ fn is_string_key(key: &Value) -> bool {
 }
 
 /// The leading `Ident` name of a named tuple, or `None` for an anonymous tuple.
-fn tuple_name(t: &ron_core::syntax::ast::Tuple) -> Option<String> {
+fn tuple_name(t: &ronin_core::syntax::ast::Tuple) -> Option<String> {
     t.syntax()
         .first_token_of(SyntaxKind::Ident)
         .map(|tok| tok.text().to_string())
@@ -429,10 +429,10 @@ mod tests {
     //! non-string keys, enum tagging) over the reused `CstJsonProjection`.
 
     use super::*;
-    use ron_types::model::{TypeNode, Variant, VariantShape};
+    use ronin_types::model::{TypeNode, Variant, VariantShape};
 
     fn convert(src: &str) -> RonToJson {
-        let doc = ron_core::parse(src);
+        let doc = ronin_core::parse(src);
         ron_to_json(&doc, None, CommentMode::JsoncInline)
     }
 
@@ -498,7 +498,7 @@ mod tests {
         );
         // `Circle` is a bare-ident unit variant — the projection external-tags it
         // `{"Circle": null}`; internal tagging makes it `{"type": "Circle"}`.
-        let doc = ron_core::parse("Circle");
+        let doc = ronin_core::parse("Circle");
         let r = ron_to_json(
             &doc,
             Some(RonToJsonBinding::new(&model, "Shape")),
@@ -515,8 +515,8 @@ mod tests {
             TypeNode::new(NodeKind::Enum {
                 variants: vec![Variant {
                     serialized_name: "Ping".to_string(),
-                    shape: VariantShape::Newtype(ron_types::model::TypeRef::Inline(Box::new(
-                        TypeNode::primitive(ron_types::model::Primitive::Integer),
+                    shape: VariantShape::Newtype(ronin_types::model::TypeRef::Inline(Box::new(
+                        TypeNode::primitive(ronin_types::model::Primitive::Integer),
                     ))),
                 }],
                 discriminator: Discriminator::Adjacent {
@@ -525,7 +525,7 @@ mod tests {
                 },
             }),
         );
-        let doc = ron_core::parse("Ping(7)");
+        let doc = ronin_core::parse("Ping(7)");
         let r = ron_to_json(
             &doc,
             Some(RonToJsonBinding::new(&model, "Msg")),
@@ -537,7 +537,7 @@ mod tests {
     #[test]
     fn loss_report_and_comments_are_attached() {
         // The conversion bundles the loss map (T009) and comment carrier (T011).
-        let doc = ron_core::parse("// header\n(t: (1, 2), c: 'x')");
+        let doc = ronin_core::parse("// header\n(t: (1, 2), c: 'x')");
         let r = ron_to_json(&doc, None, CommentMode::JsoncInline);
         // The tuple + char are reported as losses.
         assert!(r.loss_report.requires_confirmation());
@@ -554,7 +554,7 @@ mod tests {
 
     #[test]
     fn canonical_literal_normalizes_spacing() {
-        let doc = ron_core::parse("{ (1,  2): 1 }");
+        let doc = ronin_core::parse("{ (1,  2): 1 }");
         let value = Document::cast(doc.root()).unwrap().value().unwrap();
         // Reach the map key.
         if let Value::Map(m) = value {

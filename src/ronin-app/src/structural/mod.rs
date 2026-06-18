@@ -5,7 +5,7 @@
 //! lossless CST: a **tree/form** view for any nested RON (US1) and a virtualized
 //! **spreadsheet/table** view for uniform sections (US2), with automatic uniform
 //! detection + a visible boundary + a user override (US3). Every structural edit
-//! routes through `ron-core`'s pure CST→CST transforms so it round-trips
+//! routes through `ronin-core`'s pure CST→CST transforms so it round-trips
 //! byte-for-byte and lands as one E007 undo unit (FR-013/FR-014).
 //!
 //! # Phase 1b scaffolding (this commit)
@@ -71,7 +71,7 @@ pub use view_state::{
 
 use egui::{RichText, Ui};
 
-use ron_core::ast;
+use ronin_core::ast;
 
 use crate::document::EditorDocument;
 use crate::reparse::ReparseWorker;

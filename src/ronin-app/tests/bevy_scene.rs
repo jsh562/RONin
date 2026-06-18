@@ -9,7 +9,7 @@
 
 use std::path::PathBuf;
 
-use ron_core::parse;
+use ronin_core::parse;
 use ronin_app::bevy::{SceneModel, SceneValueKind, SceneValueRef};
 
 /// Load a `.scn.ron` fixture's source text by file name.
@@ -126,5 +126,5 @@ fn interpretation_is_read_only_zero_bytes() {
     let src = fixture("valid.scn.ron");
     let cst = parse(&src);
     let _ = SceneModel::from_cst(&cst);
-    assert_eq!(ron_core::print(&cst), src, "byte-lossless: zero mutation");
+    assert_eq!(ronin_core::print(&cst), src, "byte-lossless: zero mutation");
 }

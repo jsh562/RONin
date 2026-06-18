@@ -32,8 +32,8 @@
 //! node — well-formed nodes stay reachable, nothing is coerced, nothing panics
 //! (FR-019).
 
-use ron_core::ast;
-use ron_core::{CstDocument, SyntaxKind, SyntaxNode};
+use ronin_core::ast;
+use ronin_core::{CstDocument, SyntaxKind, SyntaxNode};
 
 use crate::structural::view_state::{path_of, PathStep, StructuralPath};
 
@@ -265,7 +265,7 @@ pub fn capture_path(cst: &CstDocument, node: &SyntaxNode) -> Option<StructuralPa
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ron_core::parse;
+    use ronin_core::parse;
 
     #[test]
     fn empty_document_has_no_root() {

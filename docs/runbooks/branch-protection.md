@@ -22,7 +22,7 @@ OS.
 | `test (ubuntu-latest)`           | `test` matrix  | Linux test suite (OR-003) |
 | `test (windows-latest)`          | `test` matrix  | Windows test suite (OR-003) |
 | `test (macos-latest)`            | `test` matrix  | macOS test suite (OR-003) |
-| `wasm (ron-core wasm32)`         | `wasm`         | WASM-clean invariant, ADR-0002 (OR-004) |
+| `wasm (ronin-core wasm32)`         | `wasm`         | WASM-clean invariant, ADR-0002 (OR-004) |
 | `supply-chain (audit + deny)`    | `supply-chain` | cargo-audit + cargo-deny (OR-005) |
 | `release-verify (dry-run + lint)` | `release-verify` | release-pipeline dry-run/lint gate (E011 OR-015..018 / SC-001..007) |
 
@@ -68,7 +68,7 @@ gh api -X PUT repos/OWNER/REPO/branches/main/protection \
   -f 'required_status_checks[checks][][context]=test (ubuntu-latest)' \
   -f 'required_status_checks[checks][][context]=test (windows-latest)' \
   -f 'required_status_checks[checks][][context]=test (macos-latest)' \
-  -f 'required_status_checks[checks][][context]=wasm (ron-core wasm32)' \
+  -f 'required_status_checks[checks][][context]=wasm (ronin-core wasm32)' \
   -f 'required_status_checks[checks][][context]=supply-chain (audit + deny)' \
   -f 'required_status_checks[checks][][context]=release-verify (dry-run + lint)' \
   -F 'enforce_admins=true' \

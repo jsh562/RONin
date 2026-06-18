@@ -3,23 +3,23 @@
 //!
 //! Bevy mode consumes an **exported** Bevy type registry as DATA. RONin MUST NOT
 //! depend on or embed any `bevy` crate anywhere in the workspace, and the
-//! WASM-clean engine crates (`ron-core`, `ron-validate`) MUST keep building for
+//! WASM-clean engine crates (`ronin-core`, `ronin-validate`) MUST keep building for
 //! `wasm32-unknown-unknown`. This test proves both programmatically:
 //!
 //! 1. **No `bevy*` crate** appears in the *normal* (non-dev/non-build) dependency
-//!    closure of ANY workspace crate (`ron-core`, `ron-types`, `ron-validate`,
+//!    closure of ANY workspace crate (`ronin-core`, `ronin-types`, `ronin-validate`,
 //!    `ronin-app`). The umbrella `bevy` crate is also banned at workspace scope in
 //!    `deny.toml`, but cargo-deny matches `deny` entries by exact name (no name
 //!    globs), so THIS test is the comprehensive family-wide (`bevy_reflect`,
 //!    `bevy_ecs`, `bevy_remote`, …) guard. The registry is JSON data, never a
 //!    crate.
-//! 2. **`ron-core` and `ron-validate` build for `wasm32-unknown-unknown`** — the
+//! 2. **`ronin-core` and `ronin-validate` build for `wasm32-unknown-unknown`** — the
 //!    no-Bevy/registry-dependency placement (BevySource is native-only, in
-//!    `ron-types`) must not regress the wasm cleanliness the core relies on.
+//!    `ronin-types`) must not regress the wasm cleanliness the core relies on.
 //! 3. **No E010 RON⇄JSON interop dependency creeps into the WASM-clean core**
 //!    (E010/T005, FR-012, SC-006, ADR-0008): the serde `ron` crate and the JSON
-//!    conversion path live ONLY in `ronin-app`. `ron-core` gains neither `ron` nor
-//!    `serde_json`; `ron-validate` gains no `ron` (its pre-existing `serde_json`,
+//!    conversion path live ONLY in `ronin-app`. `ronin-core` gains neither `ron` nor
+//!    `serde_json`; `ronin-validate` gains no `ron` (its pre-existing `serde_json`,
 //!    the `CstJsonProjection` value type, is NOT banned). See
 //!    [`no_ron_or_json_dependency_creeps_into_the_wasm_clean_core`].
 //! 4. **`ronin-app`'s conversion path is fully offline & telemetry-free** (E010/T029,
@@ -59,7 +59,7 @@ fn workspace_root() -> PathBuf {
 }
 
 /// The workspace crates whose normal-dependency closures must be `bevy`-free.
-const WORKSPACE_CRATES: &[&str] = &["ron-core", "ron-types", "ron-validate", "ronin-app"];
+const WORKSPACE_CRATES: &[&str] = &["ronin-core", "ronin-types", "ronin-validate", "ronin-app"];
 
 /// Run `cargo metadata --format-version 1` in the workspace and parse it. Returns
 /// `None` (with an `eprintln!` skip) when `cargo` is unavailable or fails, so the
@@ -227,8 +227,8 @@ fn no_bevy_crate_anywhere_in_workspace_closure() {
     // Sanity: the closure walk is meaningful (non-trivial), so an empty result
     // can't masquerade as a clean tree.
     assert!(
-        union.contains("ron-core"),
-        "expected `ron-core` in the workspace closure union — the walk is not meaningful \
+        union.contains("ronin-core"),
+        "expected `ronin-core` in the workspace closure union — the walk is not meaningful \
          (union of {} crates)",
         union.len()
     );
@@ -247,8 +247,8 @@ fn no_ron_or_json_dependency_creeps_into_the_wasm_clean_core() {
     // for wasm32 (verified by `wasm_clean_crates_build_for_wasm32` above).
     //
     // Concretely, against the real tree:
-    //   * `ron-core`    — neither `ron` NOR `serde_json` (no JSON in the core).
-    //   * `ron-validate`— no `ron`, but its PRE-EXISTING `serde_json` (the
+    //   * `ronin-core`    — neither `ron` NOR `serde_json` (no JSON in the core).
+    //   * `ronin-validate`— no `ron`, but its PRE-EXISTING `serde_json` (the
     //                     `CstJsonProjection` value type) MUST remain — it is NOT
     //                     banned; banning it would be over-reach (HINT-001/-002).
     // The serde `ron` crate is expected only in `ronin-app`'s closure.
@@ -257,24 +257,24 @@ fn no_ron_or_json_dependency_creeps_into_the_wasm_clean_core() {
     };
     let graph = Graph::from_metadata(&meta);
 
-    let core = graph.normal_closure_names("ron-core");
-    let validate = graph.normal_closure_names("ron-validate");
+    let core = graph.normal_closure_names("ronin-core");
+    let validate = graph.normal_closure_names("ronin-validate");
     let app = graph.normal_closure_names("ronin-app");
 
     // (a) The serde `ron` crate must be absent from BOTH WASM-clean crates'
     //     closures — it is confined to the native `ronin-app` boundary (ADR-0008).
     assert!(
         !core.contains("ron"),
-        "FR-012 violation: the serde `ron` crate leaked into `ron-core`'s normal \
+        "FR-012 violation: the serde `ron` crate leaked into `ronin-core`'s normal \
          dependency closure; it MUST be confined to `ronin-app` (ADR-0008)"
     );
     assert!(
         !validate.contains("ron"),
-        "FR-012 violation: the serde `ron` crate leaked into `ron-validate`'s normal \
+        "FR-012 violation: the serde `ron` crate leaked into `ronin-validate`'s normal \
          dependency closure; it MUST be confined to `ronin-app` (ADR-0008)"
     );
 
-    // (b) No JSON crate in `ron-core` — the core gains neither `ron` nor
+    // (b) No JSON crate in `ronin-core` — the core gains neither `ron` nor
     //     `serde_json` (incl. the wider serde-json family) (FR-012, data-model).
     let core_json_offenders: Vec<&String> = core
         .iter()
@@ -283,16 +283,16 @@ fn no_ron_or_json_dependency_creeps_into_the_wasm_clean_core() {
     assert!(
         core_json_offenders.is_empty(),
         "FR-012 violation: JSON crate(s) {core_json_offenders:?} present in \
-         `ron-core`'s normal dependency closure; `ron-core` must gain NO JSON \
+         `ronin-core`'s normal dependency closure; `ronin-core` must gain NO JSON \
          dependency (incl. serde_json)"
     );
 
-    // (c) Sanity — DO NOT over-ban: `ron-validate`'s pre-existing `serde_json`
+    // (c) Sanity — DO NOT over-ban: `ronin-validate`'s pre-existing `serde_json`
     //     (the `CstJsonProjection` value type) MUST still be present, proving we
     //     banned `ron`/new deps without removing the legitimate existing one.
     assert!(
         validate.contains("serde_json"),
-        "over-ban regression: `ron-validate`'s pre-existing `serde_json` (the \
+        "over-ban regression: `ronin-validate`'s pre-existing `serde_json` (the \
          `CstJsonProjection` value type) is MISSING from its closure — E010 must \
          NOT ban it; only `ron`/new deps are banned (HINT-001)"
     );
@@ -308,8 +308,8 @@ fn no_ron_or_json_dependency_creeps_into_the_wasm_clean_core() {
     );
 
     eprintln!(
-        "[dependency_invariants] FR-012 OK: `ron` absent from ron-core/ron-validate, \
-         no JSON in ron-core, ron-validate keeps its serde_json, `ron` confined to ronin-app"
+        "[dependency_invariants] FR-012 OK: `ron` absent from ronin-core/ronin-validate, \
+         no JSON in ronin-core, ronin-validate keeps its serde_json, `ron` confined to ronin-app"
     );
 }
 
@@ -352,9 +352,9 @@ fn wasm_clean_crates_build_for_wasm32() {
         .args([
             "build",
             "-p",
-            "ron-core",
+            "ronin-core",
             "-p",
-            "ron-validate",
+            "ronin-validate",
             "--target",
             "wasm32-unknown-unknown",
             "--locked",
@@ -368,13 +368,13 @@ fn wasm_clean_crates_build_for_wasm32() {
 
     assert!(
         output.status.success(),
-        "SC-007 violation: `ron-core`/`ron-validate` failed to build for \
+        "SC-007 violation: `ronin-core`/`ronin-validate` failed to build for \
          wasm32-unknown-unknown.\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
     eprintln!(
-        "[dependency_invariants] ron-core + ron-validate build clean for wasm32-unknown-unknown"
+        "[dependency_invariants] ronin-core + ronin-validate build clean for wasm32-unknown-unknown"
     );
 }
 

@@ -15,7 +15,7 @@
 //! * A **Bevy document and a serde document open side-by-side** are each validated /
 //!   shown per their own mode in the same session (FR-012, SC-004): the Bevy doc runs
 //!   the scene validator (`ronin-bevy` findings) and the serde doc runs the serde
-//!   validator (`ron-types` findings), with no cross-talk.
+//!   validator (`ronin-types` findings), with no cross-talk.
 //! * A **per-pattern registry binding** resolves for a matching scene path (the
 //!   registry loads and scene-aware validation engages), and a **corrupt / absent**
 //!   registry config degrades to defaults — no crash, no registry, only the visible
@@ -140,15 +140,15 @@ fn scene_diag_count(app: &App) -> usize {
         .unwrap_or(0)
 }
 
-/// Count genuine serde (`ron-types`) type findings on the active document — a serde
-/// finding has no `scene_code` AND a `ron-types` code source (a scene hint may carry
-/// a `ron-types` raw source but is distinguished by `Some(scene_code)`).
+/// Count genuine serde (`ronin-types`) type findings on the active document — a serde
+/// finding has no `scene_code` AND a `ronin-types` code source (a scene hint may carry
+/// a `ronin-types` raw source but is distinguished by `Some(scene_code)`).
 fn serde_diag_count(app: &App) -> usize {
     app.active_document()
         .map(|d| {
             d.diagnostics
                 .iter()
-                .filter(|v| v.scene_code.is_none() && v.code.source() == "ron-types")
+                .filter(|v| v.scene_code.is_none() && v.code.source() == "ronin-types")
                 .count()
         })
         .unwrap_or(0)
@@ -403,7 +403,7 @@ fn per_pattern_registry_resolves_for_matching_scene() {
             .diagnostics
             .iter()
             .any(|v| {
-                v.code_str().starts_with("RON-V") && v.severity == ron_core::Severity::Error
+                v.code_str().starts_with("RON-V") && v.severity == ronin_core::Severity::Error
             }),
         "a registered mismatch must surface a RON-V error, got {:?}",
         app.active_document().map(|d| d.diagnostics.clone())

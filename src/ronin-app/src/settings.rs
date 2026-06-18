@@ -38,7 +38,7 @@ const DEFAULT_INDENT_WIDTH: u32 = 4;
 
 /// Sane minimum / maximum indent width (FR-007). A hand-edited settings file
 /// specifying an absurd indent width is clamped to this range on load and via the
-/// setter, mirroring `ron_core::FormatConfig`'s own clamp so the two never diverge.
+/// setter, mirroring `ronin_core::FormatConfig`'s own clamp so the two never diverge.
 const MIN_INDENT_WIDTH: u32 = 1;
 const MAX_INDENT_WIDTH: u32 = 16;
 
@@ -48,7 +48,7 @@ const MAX_INDENT_WIDTH: u32 = 16;
 // is clamped on load and via its setter to a sane range so a corrupt / out-of-
 // range / hand-edited settings file can NEVER disable the bound, the debounce,
 // or coalescing (it falls back to the default or the nearest range edge, never
-// "off"; TR-026). The undo cap defaults mirror `ron_core::undo`'s constants so
+// "off"; TR-026). The undo cap defaults mirror `ronin_core::undo`'s constants so
 // the two never diverge.
 
 /// Default undo-history unit-count cap: 200 units (TR-024).
@@ -109,7 +109,7 @@ const MAX_JSON_INDENT: u32 = 16;
 
 /// How the formatter treats runs of blank lines between elements (FR-007).
 ///
-/// Mirrors `ron_core::BlankLinePolicy`; kept as its own type so `ronin-app` does
+/// Mirrors `ronin_core::BlankLinePolicy`; kept as its own type so `ronin-app` does
 /// not leak the engine enum into its persisted settings schema (and so the JSON
 /// representation is owned here). [`FormattingConfig::to_engine_config`] maps it to
 /// the engine value when a format is actually invoked (Wave 2).
@@ -276,7 +276,7 @@ impl Default for WindowGeometry {
 ///
 /// The formatter-facing knobs the user can adjust on the settings surface: the
 /// indent width, the blank-line policy, and whether to format automatically on
-/// save. Mirrors `ron_core::FormatConfig` (the engine value type) plus the
+/// save. Mirrors `ronin_core::FormatConfig` (the engine value type) plus the
 /// surface-only `format_on_save` flag. Robustness contract (project-instructions
 /// §I): an absent or corrupt on-disk value falls back to the defaults and an
 /// out-of-range indent width is clamped — a hand-edited settings file can never
@@ -330,16 +330,16 @@ impl FormattingConfig {
         MAX_INDENT_WIDTH
     }
 
-    /// Build the `ron-core` [`FormatConfig`](ron_core::FormatConfig) this surface
+    /// Build the `ronin-core` [`FormatConfig`](ronin_core::FormatConfig) this surface
     /// config maps to (the engine value used when a format is actually invoked,
     /// Wave 2). The engine clamps the indent width too, so the two stay in sync.
     #[must_use]
-    pub fn to_engine_config(&self) -> ron_core::FormatConfig {
+    pub fn to_engine_config(&self) -> ronin_core::FormatConfig {
         let policy = match self.blank_line_policy {
-            BlankLinePolicy::Collapse => ron_core::BlankLinePolicy::Collapse,
-            BlankLinePolicy::Preserve => ron_core::BlankLinePolicy::Preserve,
+            BlankLinePolicy::Collapse => ronin_core::BlankLinePolicy::Collapse,
+            BlankLinePolicy::Preserve => ronin_core::BlankLinePolicy::Preserve,
         };
-        ron_core::FormatConfig::new(self.effective_indent_width(), policy)
+        ronin_core::FormatConfig::new(self.effective_indent_width(), policy)
     }
 }
 
@@ -350,7 +350,7 @@ impl FormattingConfig {
 /// on-disk value falls back to the defaults and an out-of-range value is clamped
 /// (on load via [`AppSettings::load_from`] and via the effective accessors), so a
 /// hand-edited settings file can NEVER disable the undo bound or coalescing — it
-/// can only land inside the sane range. Defaults mirror `ron_core::undo`'s
+/// can only land inside the sane range. Defaults mirror `ronin_core::undo`'s
 /// constants (200 units / 64 MiB / 500 ms) so the editor's stack and the
 /// persisted config never diverge (TR-024/TR-026/TR-027).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -402,19 +402,19 @@ impl UndoConfig {
     }
 
     /// The coalesce window as a [`Duration`](std::time::Duration), clamped to the
-    /// sane range — the value to hand to `ron_core::UndoStack` (TR-027).
+    /// sane range — the value to hand to `ronin_core::UndoStack` (TR-027).
     #[must_use]
     pub fn effective_coalesce_window(&self) -> std::time::Duration {
         std::time::Duration::from_millis(self.effective_coalesce_window_ms())
     }
 
-    /// Build the `ron_core::UndoCap` this config maps to, taken through the
+    /// Build the `ronin_core::UndoCap` this config maps to, taken through the
     /// effective (clamped) accessors so the editor's stack is always bounded
-    /// (TR-024). `ron_core::UndoCap::new` itself reverts a zero field to default,
+    /// (TR-024). `ronin_core::UndoCap::new` itself reverts a zero field to default,
     /// so the bound is doubly guarded.
     #[must_use]
-    pub fn to_engine_cap(&self) -> ron_core::UndoCap {
-        ron_core::UndoCap::new(
+    pub fn to_engine_cap(&self) -> ronin_core::UndoCap {
+        ronin_core::UndoCap::new(
             self.effective_history_count_cap(),
             self.effective_history_byte_cap(),
         )
@@ -1005,7 +1005,7 @@ mod tests {
         assert_eq!(engine.indent_width(), 2);
         assert_eq!(
             engine.blank_line_policy(),
-            ron_core::BlankLinePolicy::Preserve
+            ronin_core::BlankLinePolicy::Preserve
         );
     }
 
@@ -1019,12 +1019,12 @@ mod tests {
         assert_eq!(u.coalesce_window_ms, 500);
         // The default app settings embed the default undo config.
         assert_eq!(AppSettings::default().undo, UndoConfig::default());
-        // Defaults mirror the ron_core::undo constants (never diverge).
-        assert_eq!(u.history_count_cap, ron_core::undo::DEFAULT_UNDO_COUNT_CAP);
-        assert_eq!(u.history_byte_cap, ron_core::undo::DEFAULT_UNDO_BYTE_CAP);
+        // Defaults mirror the ronin_core::undo constants (never diverge).
+        assert_eq!(u.history_count_cap, ronin_core::undo::DEFAULT_UNDO_COUNT_CAP);
+        assert_eq!(u.history_byte_cap, ronin_core::undo::DEFAULT_UNDO_BYTE_CAP);
         assert_eq!(
             u.effective_coalesce_window(),
-            ron_core::undo::DEFAULT_COALESCE_WINDOW
+            ronin_core::undo::DEFAULT_COALESCE_WINDOW
         );
     }
 

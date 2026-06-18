@@ -1,12 +1,12 @@
 //! RON⇄JSON round-trip & interop (E010) — bidirectional conversion, derive-from-type,
 //! and the lossy-construct map, at the **native interop boundary** (ADR-0008).
 //!
-//! The primary converter is **CST-based**: RON→JSON reuses `ron-validate`'s
+//! The primary converter is **CST-based**: RON→JSON reuses `ronin-validate`'s
 //! `CstJsonProjection` (value mapping + the Pointer→`TextRange` index for
 //! source-located losses) plus a CST trivia walk for JSONC comments; JSON→RON is a
-//! `TypeModel`-guided RON-text builder reparsed via `ron_core::parse`. The pinned
+//! `TypeModel`-guided RON-text builder reparsed via `ronin_core::parse`. The pinned
 //! serde `ron` crate is the boundary **grammar verifier / round-trip cross-check**,
-//! never the primary path — so `ron-core`/`ron-validate` gain no `ron`/JSON-conversion
+//! never the primary path — so `ronin-core`/`ronin-validate` gain no `ron`/JSON-conversion
 //! dependency and stay wasm32-clean (FR-012).
 //!
 //! Modules:

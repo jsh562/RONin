@@ -19,8 +19,8 @@ use ronin_app::app::{App, NoticeKind};
 use ronin_app::interop::{derive_scaffold, DeriveScaffold, UNKNOWN_SENTINEL};
 use ronin_app::settings::AppSettings;
 
-use ron_types::extension::RonKind;
-use ron_types::model::{
+use ronin_types::extension::RonKind;
+use ronin_types::model::{
     Discriminator, Field, NodeKind, Primitive, TypeModel, TypeNode, TypeRef, Variant, VariantShape,
 };
 
@@ -112,7 +112,7 @@ fn rich_config_model() -> TypeModel {
     model
 }
 
-/// Assert a scaffold parses with zero `ron_core` diagnostics (SC-005).
+/// Assert a scaffold parses with zero `ronin_core` diagnostics (SC-005).
 fn assert_parses(scaffold: &DeriveScaffold) {
     assert!(
         scaffold.document.diagnostics().is_empty(),
@@ -129,7 +129,7 @@ fn app_with_bound_type(model: &TypeModel, root: &str) -> App {
     // Open an active (untitled) buffer to host the binding, then attach the serialized
     // type model + the bound root name — the type-pick surface the command consults.
     app.new_untitled();
-    let serialized = ron_types::to_json(model);
+    let serialized = ronin_types::to_json(model);
     if let Some(doc) = app.active_document_mut() {
         doc.bound_type = Some(ronin_app::reparse::BoundType {
             model: Arc::new(serialized),
@@ -332,7 +332,7 @@ fn derive_command_opens_a_parseable_scaffold_in_a_new_tab() {
     assert!(scaffold.contains("name: \"\""));
     assert!(scaffold.contains("mode: Fast"));
     // The scaffold parses cleanly (SC-005).
-    let doc = ron_core::parse(&scaffold);
+    let doc = ronin_core::parse(&scaffold);
     assert!(
         doc.diagnostics().is_empty(),
         "scaffold parses cleanly:\n{scaffold}"

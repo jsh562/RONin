@@ -1,13 +1,13 @@
-//! Project a `ron-core` byte-range diagnostic onto the editor's coordinate space
+//! Project a `ronin-core` byte-range diagnostic onto the editor's coordinate space
 //! (FR-008).
 //!
-//! `ron-core` reports diagnostics with **byte** ranges into the source. The
+//! `ronin-core` reports diagnostics with **byte** ranges into the source. The
 //! editor surface works in **character** offsets and `(line, column)` positions.
 //! [`map_diagnostic`] performs that conversion in a single pass over the prefix
 //! up to each offset, correctly handling multibyte UTF-8 (accented Latin, CJK,
 //! emoji) so an offset never lands inside a code point.
 
-use ron_core::{Diagnostic, DiagnosticCode, Severity};
+use ronin_core::{Diagnostic, DiagnosticCode, Severity};
 
 use crate::bevy::{SceneDiagnostic, SceneDiagnosticCode, SceneSeverity};
 use crate::interop::{LossKind, LossyConstruct};
@@ -39,7 +39,7 @@ pub struct DiagnosticView {
     /// is the character offset within the line.
     pub line_col: ((usize, usize), (usize, usize)),
     /// Severity copied from the source diagnostic. A Bevy scene-level hint /
-    /// advisory (which `ron-core` `Severity` cannot express) collapses onto the
+    /// advisory (which `ronin-core` `Severity` cannot express) collapses onto the
     /// existing non-error [`Severity::Warning`] here, while
     /// [`scene_code`](Self::scene_code) keeps the three states distinguishable.
     pub severity: Severity,
@@ -86,7 +86,7 @@ impl DiagnosticView {
 
     /// The producing-component `source` tag to render — `"ronin-interop"` for a
     /// conversion loss, `"ronin-bevy"` for a scene-level Bevy finding, else the
-    /// wrapped code's own source (`"ron-core"`/`"ron-types"`) (E009/FR-007,
+    /// wrapped code's own source (`"ronin-core"`/`"ronin-types"`) (E009/FR-007,
     /// E010/FR-006).
     #[must_use]
     pub fn source(&self) -> &'static str {
@@ -111,7 +111,7 @@ struct Position {
 /// Walks the prefix `source[..offset_clamped]` once, counting characters and
 /// newlines. An offset past the end of `source` clamps to the end; an offset
 /// that does not fall on a char boundary clamps down to the nearest boundary at
-/// or before it (defensive — `ron-core` ranges are always on boundaries).
+/// or before it (defensive — `ronin-core` ranges are always on boundaries).
 fn resolve_position(source: &str, byte_offset: usize) -> Position {
     let target = byte_offset.min(source.len());
 
@@ -175,7 +175,7 @@ pub fn map_diagnostic(diag: &Diagnostic, source: &str) -> DiagnosticView {
 /// [`scene_code`](DiagnosticView::scene_code) to its `BVY-S####`
 /// [`SceneDiagnosticCode`] (so the three states stay distinguishable) and
 /// collapses its [`SceneSeverity::Hint`]/[`SceneSeverity::Advisory`] onto the
-/// existing non-error [`Severity::Warning`] (`ron-core`'s `Severity` has no
+/// existing non-error [`Severity::Warning`] (`ronin-core`'s `Severity` has no
 /// hint/advisory level); its [`code`](DiagnosticView::code) is a non-error
 /// placeholder superseded by [`code_str`](DiagnosticView::code_str) /
 /// [`source`](DiagnosticView::source).
@@ -268,7 +268,7 @@ pub fn map_loss_report(report: &crate::interop::LossReport, source: &str) -> Vec
         .collect()
 }
 
-/// Map a Bevy [`SceneSeverity`] onto the rendered `ron-core` [`Severity`]: a hard
+/// Map a Bevy [`SceneSeverity`] onto the rendered `ronin-core` [`Severity`]: a hard
 /// `Error` stays `Error`; everything else (warning / hint / advisory) renders as
 /// the non-error [`Severity::Warning`] (the only non-error level the surface knows).
 #[inline]
@@ -285,7 +285,7 @@ mod tests {
     //! surface exactly like serde-mode type findings (FR-007).
 
     use super::*;
-    use ron_core::TextRange;
+    use ronin_core::TextRange;
 
     fn scene_diag(
         code: SceneDiagnosticCode,
@@ -303,7 +303,7 @@ mod tests {
     #[test]
     fn registered_mismatch_renders_as_a_ron_v_type_finding() {
         // A mismatch is byte-for-byte identical to a serde-mode type finding:
-        // the real RON-V code + its error severity + the ron-types source tag,
+        // the real RON-V code + its error severity + the ronin-types source tag,
         // and NO scene_code (so it is treated as a regular type finding).
         let diag = scene_diag(
             SceneDiagnosticCode::Mismatch(DiagnosticCode::TypeMismatch),
@@ -315,7 +315,7 @@ mod tests {
         assert_eq!(view.code, DiagnosticCode::TypeMismatch);
         assert!(view.scene_code.is_none());
         assert_eq!(view.code_str(), "RON-V0001");
-        assert_eq!(view.source(), "ron-types");
+        assert_eq!(view.source(), "ronin-types");
         assert_eq!(view.char_range, (5, 9));
     }
 

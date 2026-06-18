@@ -20,8 +20,8 @@
 use std::path::PathBuf;
 
 use proptest::prelude::*;
-use ron_core::{ast, parse, print, CstDocument};
-use ron_types::BevyRegistry;
+use ronin_core::{ast, parse, print, CstDocument};
+use ronin_types::BevyRegistry;
 use ronin_app::bevy::{
     expand_to_explicit, reduce_verbosity, ron_value_equals_json, ElisionOutcome, SceneModel, Scope,
     SkipReason,
@@ -544,7 +544,7 @@ fn skip_reasons_are_observable_on_outcome() {
 mod app_round_trip {
     use std::path::{Path, PathBuf};
 
-    use ron_core::{ast, parse};
+    use ronin_core::{ast, parse};
     use ronin_app::app::App;
     use ronin_app::bevy::mode::Mode;
     use ronin_app::bevy::{SceneModel, Scope};

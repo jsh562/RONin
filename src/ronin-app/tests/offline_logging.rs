@@ -254,7 +254,7 @@ fn network_audit_no_networking_or_telemetry_crates() {
     // FR-015: confirm no network-capable or telemetry crate is in the resolved
     // dependency graph. Scan the workspace `Cargo.lock` (the resolved tree) for
     // any denylisted crate name. Honest scope note: this scans the WORKSPACE lock
-    // (shared with ron-core/ron-types, which are local-first by construction), so
+    // (shared with ronin-core/ronin-types, which are local-first by construction), so
     // a positive would still be a real local-first violation to investigate.
     let lock = locate_cargo_lock();
     let contents = std::fs::read_to_string(&lock)

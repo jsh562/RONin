@@ -7,7 +7,7 @@
 //! human-readable `detail` wording (plan "Snapshot vs assertion scope").
 
 use proptest::prelude::*;
-use ron_core::parse;
+use ronin_core::parse;
 use ronin_app::interop::{
     render_json, ron_to_json, CommentMode, JsoncStyle, LossKind, LossRecovery, RonToJson,
 };

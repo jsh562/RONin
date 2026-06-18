@@ -8,7 +8,7 @@
 //! * a `.scn.ron` document in Bevy mode with a loaded registry validates through
 //!   the **scene path** (`BVY-S####` / `ronin-bevy` scene findings) (FR-013);
 //! * a `.ron` document in serde mode validates through the **serde path**
-//!   (`RON-V####` / `ron-types` findings) in the same session (regression) (FR-013);
+//!   (`RON-V####` / `ronin-types` findings) in the same session (regression) (FR-013);
 //! * switching a document's mode re-routes which validator runs (zero-byte switch,
 //!   FR-011/FR-013);
 //! * two documents in different modes coexist with no cross-talk (FR-012);
@@ -128,7 +128,7 @@ fn bind_serde_entity(doc: &mut EditorDocument) {
 }
 
 #[test]
-fn scn_ron_validates_via_scene_path_and_ron_via_serde_in_same_session() {
+fn scn_ronin_validates_via_scene_path_and_ron_via_serde_in_same_session() {
     // T021/T022 — a .scn.ron validates via the scene path and a .ron via the serde
     // path in the *same* session (FR-013).
     let worker = ReparseWorker::new();
@@ -152,20 +152,20 @@ fn scn_ron_validates_via_scene_path_and_ron_via_serde_in_same_session() {
         scene.diagnostics
     );
     // No genuine serde finding: a serde type finding has scene_code == None AND a
-    // ron-types code source. (A scene-level hint carries a non-error RON-V0006
-    // placeholder whose raw source is also ron-types, so it is distinguished by its
+    // ronin-types code source. (A scene-level hint carries a non-error RON-V0006
+    // placeholder whose raw source is also ronin-types, so it is distinguished by its
     // Some(scene_code); the rendered `source()` is "ronin-bevy".)
     assert!(
         scene
             .diagnostics
             .iter()
-            .all(|v| !(v.scene_code.is_none() && v.code.source() == "ron-types")),
+            .all(|v| !(v.scene_code.is_none() && v.code.source() == "ronin-types")),
         "the Bevy document (unregistered type) must NOT run the serde validator, got {:?}",
         scene.diagnostics
     );
 
     // (2) A serde .ron document in the SAME session: a wrong-type value → a RON-V
-    // type finding (ron-types), proving the serde path still runs unchanged.
+    // type finding (ronin-types), proving the serde path still runs unchanged.
     let mut serde_doc = EditorDocument::from_loaded(root.join("config.ron"), b"").unwrap();
     bind_serde_entity(&mut serde_doc);
     // Default ModeState is Serde (no .scn.ron extension) — left as-is.
@@ -177,7 +177,7 @@ fn scn_ron_validates_via_scene_path_and_ron_via_serde_in_same_session() {
         serde_doc
             .diagnostics
             .iter()
-            .any(|v| v.code.source() == "ron-types"),
+            .any(|v| v.code.source() == "ronin-types"),
         "the serde document must produce a RON-V type finding, got {:?}",
         serde_doc.diagnostics
     );
@@ -214,7 +214,7 @@ fn registered_scene_mismatch_renders_as_a_ron_v_finding() {
         scene
             .diagnostics
             .iter()
-            .any(|v| v.code_str().starts_with("RON-V") && v.severity == ron_core::Severity::Error),
+            .any(|v| v.code_str().starts_with("RON-V") && v.severity == ronin_core::Severity::Error),
         "a registered mismatch must render as a RON-V error, got {:?}",
         scene.diagnostics
     );
@@ -312,7 +312,7 @@ fn two_documents_in_different_modes_coexist_without_cross_talk() {
         bevy_doc
             .diagnostics
             .iter()
-            .all(|v| !(v.scene_code.is_none() && v.code.source() == "ron-types")),
+            .all(|v| !(v.scene_code.is_none() && v.code.source() == "ronin-types")),
         "the Bevy doc shows no serde findings (no cross-talk), got {:?}",
         bevy_doc.diagnostics
     );
@@ -323,7 +323,7 @@ fn two_documents_in_different_modes_coexist_without_cross_talk() {
         serde_doc
             .diagnostics
             .iter()
-            .any(|v| v.code.source() == "ron-types"),
+            .any(|v| v.code.source() == "ronin-types"),
         "the serde doc validates via the serde path"
     );
     assert!(
@@ -431,7 +431,7 @@ fn serde_only_document_diagnostics_unchanged_regression() {
     assert!(
         doc.diagnostics
             .iter()
-            .any(|v| v.code.source() == "ron-types"),
+            .any(|v| v.code.source() == "ronin-types"),
         "serde validation still produces a RON-V finding"
     );
     assert!(
@@ -446,7 +446,7 @@ fn serde_only_document_diagnostics_unchanged_regression() {
     assert!(
         doc.diagnostics
             .iter()
-            .all(|v| v.code.source() != "ron-types"),
+            .all(|v| v.code.source() != "ronin-types"),
         "fixing the value clears the serde type finding, got {:?}",
         doc.diagnostics
     );

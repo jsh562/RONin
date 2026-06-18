@@ -1,10 +1,10 @@
-//! The editing surface: syntax highlighting derived from the `ron-core` CST and
+//! The editing surface: syntax highlighting derived from the `ronin-core` CST and
 //! a multiline editor widget with a line-number gutter (FR-004/FR-005/FR-019).
 //!
 //! Two responsibilities live here:
 //!
 //! * **Highlight model** ([`build_highlight_model`]) — walk the lossless
-//!   `ron-core` CST token stream **once** and project each token's byte range
+//!   `ronin-core` CST token stream **once** and project each token's byte range
 //!   onto a [`HighlightSpan`] tagged with a [`HighlightClass`]. RONin keeps a
 //!   single tokenizer (the engine's); the editor never re-lexes (project-
 //!   instructions §II). The model is keyed by reparse `generation` so it is
@@ -34,7 +34,7 @@
 //! This widget edits the buffer in place; ordinary typing/edits **never** reformat.
 //! A buffer mutation only bumps the document's edit generation via
 //! [`EditorDocument::on_edit`] (so a coalesced *reparse* — for highlighting and
-//! diagnostics — is requested next frame). It does **not** call `ron_core::format`.
+//! diagnostics — is requested next frame). It does **not** call `ronin_core::format`.
 //! Reformatting happens exclusively through the explicit Format Document / Format
 //! Selection commands or the opt-in format-on-save path, both of which live on the
 //! [`crate::app::App`] shell and go through its single safe apply path. The reparse
@@ -58,7 +58,7 @@
 //! * **Bevy-registry-aware** authoring (registry-resolved component/field names and
 //!   snippets) → **E009**;
 //! * **RON⇄JSON interop / `derive`-driven** authoring → **E010** (interop lives
-//!   outside the editing surface and the `ron-core` engine).
+//!   outside the editing surface and the `ronin-core` engine).
 
 use std::sync::Arc;
 
@@ -66,7 +66,7 @@ use egui::text::{CCursor, CCursorRange, LayoutJob, TextFormat};
 use egui::text_edit::{TextEditOutput, TextEditState};
 use egui::{Align, Color32, FontId, Galley, Key, Modifiers, Pos2, Rect, Stroke, TextBuffer, Ui};
 
-use ron_core::{CompletionKind, Severity, SyntaxKind};
+use ronin_core::{CompletionKind, Severity, SyntaxKind};
 
 use crate::byte_to_char::ByteToChar;
 use crate::completion::Trigger;
@@ -78,7 +78,7 @@ use crate::structural::tree::render_tree_view;
 
 /// The classification a highlight span carries (FR-019).
 ///
-/// Derived 1:1 from the `ron-core` [`SyntaxKind`] of each significant token; a
+/// Derived 1:1 from the `ronin-core` [`SyntaxKind`] of each significant token; a
 /// closed, UI-facing palette so the editor never needs to know engine token
 /// kinds. Trivia and structure produce [`HighlightClass::Default`] (no special
 /// colour).
@@ -103,7 +103,7 @@ pub enum HighlightClass {
 }
 
 impl HighlightClass {
-    /// Map a `ron-core` [`SyntaxKind`] to its highlight class.
+    /// Map a `ronin-core` [`SyntaxKind`] to its highlight class.
     #[must_use]
     pub fn from_kind(kind: SyntaxKind) -> Self {
         match kind {
@@ -808,8 +808,8 @@ fn render_choice_picker(
             next.push_str(&doc.buffer[end_byte..]);
             // Only commit if the choice keeps the buffer parseable (it should, since
             // the option came from the snippet body) — never corrupt (§I).
-            if ron_core::parse(&next).diagnostics().len()
-                <= ron_core::parse(&doc.buffer).diagnostics().len()
+            if ronin_core::parse(&next).diagnostics().len()
+                <= ronin_core::parse(&doc.buffer).diagnostics().len()
             {
                 doc.buffer = next;
                 let new_end = start + choice.chars().count();
@@ -924,13 +924,13 @@ fn set_caret(ui: &Ui, output: &TextEditOutput, char_offset: usize) {
 /// row baseline in the severity colour. Multi-row ranges are underlined per row by
 /// walking the galley rows the range spans. Degenerate (empty) ranges are skipped.
 ///
-/// The `diagnostics` slice carries both `ron-core` structural findings and
-/// `ron-validate` type findings (merged by
+/// The `diagnostics` slice carries both `ronin-core` structural findings and
+/// `ronin-validate` type findings (merged by
 /// [`merge_type_diagnostics`](crate::document::merge_type_diagnostics)); both render
 /// here by severity (type Errors like structural Errors, type Warnings in the
 /// warning colour). The two are distinguishable by each view's
 /// [`code`](DiagnosticView::code)
-/// [`source`](ron_core::DiagnosticCode::source) tag, but render uniformly by
+/// [`source`](ronin_core::DiagnosticCode::source) tag, but render uniformly by
 /// severity so existing structural rendering is unchanged.
 fn draw_squiggles(ui: &Ui, galley: &Galley, galley_pos: Pos2, diagnostics: &[DiagnosticView]) {
     let dark_mode = ui.visuals().dark_mode;

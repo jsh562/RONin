@@ -1,0 +1,43 @@
+# cargo-fuzz target for ronin-core (SC-003, TR-001/TR-005).
+#
+# REQUIRES the NIGHTLY toolchain + libFuzzer (`cargo install cargo-fuzz`, then
+# `cargo +nightly fuzz run roundtrip`). It is intentionally EXCLUDED from the
+# workspace (see the root Cargo.toml `[workspace].exclude`) so a stable
+# `cargo build` / `cargo test` of the workspace does NOT try to compile it — the
+# `libfuzzer-sys` dependency only builds under `cargo fuzz`.
+#
+# This machine is stable-only and does not have cargo-fuzz/libFuzzer installed,
+# so the ≥ 1,000,000-iteration run in SC-003 cannot be executed here. The same
+# no-panic + token-concat==input + clean-non-UTF-8-rejection assertions are
+# additionally verified on STABLE via proptest in
+# `src/ronin-core/tests/roundtrip.rs` (see the "T028 — stable-toolchain fuzz
+# fallback" section) so SC-003's intent is checked in CI without nightly.
+
+# An empty `[workspace]` table makes this fuzz crate its own isolated workspace
+# (the standard `cargo fuzz init` layout), so the parent stable workspace never
+# pulls in `libfuzzer-sys`.
+[workspace]
+
+[package]
+name = "ronin-core-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.ronin-core]
+path = ".."
+
+# Required by cargo-fuzz: each fuzz target is its own binary with no test/doc
+# harness so libFuzzer owns `main`.
+[[bin]]
+name = "roundtrip"
+path = "fuzz_targets/roundtrip.rs"
+test = false
+doc = false
+bench = false

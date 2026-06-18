@@ -19,7 +19,7 @@
 //! validation of the stripped text.
 
 use crate::interop::comments::{Comment, CommentKind};
-use ron_core::TextRange;
+use ronin_core::TextRange;
 
 /// The maximum JSON nesting depth the pointer tracker descends before giving up
 /// (FR-013, SC-009).

@@ -71,9 +71,9 @@ impl From<std::io::Error> for OpenError {
 pub fn open_path(path: &Path) -> Result<EditorDocument, OpenError> {
     let raw = std::fs::read(path)?;
 
-    // Validate UTF-8 at the boundary using `ron-core`'s validator; reject cleanly
+    // Validate UTF-8 at the boundary using `ronin-core`'s validator; reject cleanly
     // without constructing a document if the bytes are not valid UTF-8.
-    if ron_core::validate_utf8(&raw).is_err() {
+    if ronin_core::validate_utf8(&raw).is_err() {
         return Err(OpenError::NotUtf8);
     }
 
@@ -653,7 +653,7 @@ pub fn reconstruct_ron_from_bytes(
     consultation: Option<&JsonToRonConsultation>,
 ) -> Result<ImportedRon, ImportError> {
     // Validate UTF-8 at the boundary; reject without creating anything (FR-013).
-    if ron_core::validate_utf8(raw).is_err() {
+    if ronin_core::validate_utf8(raw).is_err() {
         return Err(ImportError::NotUtf8);
     }
     let text = std::str::from_utf8(raw).map_err(|_| ImportError::NotUtf8)?;
@@ -672,7 +672,7 @@ pub fn reconstruct_ron_from_bytes(
                 comments.push(Comment {
                     text: ct.clone(),
                     kind: classify_comment(ct),
-                    source_range: ron_core::TextRange::new(0usize, 0usize),
+                    source_range: ronin_core::TextRange::new(0usize, 0usize),
                     anchor_pointer: pointer.clone(),
                 });
             }

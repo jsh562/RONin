@@ -1,7 +1,0 @@
----
-source: src/ron-core/tests/snapshots.rs
-expression: "tree(r##\"r#\"a \"quoted\" b\"#\"##)"
----
-Root@TextRange { start: 0, end: 17 }
-  Literal@TextRange { start: 0, end: 17 }
-    RawString@TextRange { start: 0, end: 17 } "r#\"a \"quoted\" b\"#"

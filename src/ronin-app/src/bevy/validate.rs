@@ -1,4 +1,4 @@
-//! Scene-aware validation — drives the generic, Bevy-agnostic `ron-validate`
+//! Scene-aware validation — drives the generic, Bevy-agnostic `ronin-validate`
 //! subtree-vs-type entry per component/resource, with progressive degradation
 //! and the staleness advisory (FR-005/FR-006/FR-008).
 //!
@@ -8,19 +8,19 @@
 //! path) is native [`ronin-app`] code: this module reads a [`SceneModel`] off the
 //! CST and, for each value, looks the fully-qualified type path up in the bound
 //! [`BevyRegistry`]. The *engine* it drives —
-//! [`ron_validate::validate::validate_subtree_against_type`] — is **generic and
+//! [`ronin_validate::validate::validate_subtree_against_type`] — is **generic and
 //! Bevy-agnostic** (it knows only "validate this CST sub-tree against this named
-//! model type"); the WASM-clean core (`ron-core`/`ron-validate`) gains no Bevy or
+//! model type"); the WASM-clean core (`ronin-core`/`ronin-validate`) gains no Bevy or
 //! registry dependency.
 //!
 //! # The interchange model (mirrors serde mode)
 //!
 //! Serde mode serializes its acquired E004 `TypeModel` to the frozen JSON-Schema
-//! 2020-12 + `x-ron-*` interchange via [`ron_types::to_json`] and hands the
+//! 2020-12 + `x-ron-*` interchange via [`ronin_types::to_json`] and hands the
 //! resulting [`serde_json::Value`] to the validator (see
 //! [`crate::type_acquire`]). Bevy mode reuses that **exact** serialization: a
-//! [`BevySource`](ron_types::BevySource) `acquire()` yields a `TypeModel`, which
-//! `ron_types::to_json` turns into the same `Value`. [`validate_scene`] therefore
+//! [`BevySource`](ronin_types::BevySource) `acquire()` yields a `TypeModel`, which
+//! `ronin_types::to_json` turns into the same `Value`. [`validate_scene`] therefore
 //! takes the already-serialized `&Value` (its `$defs` keyed by fully-qualified
 //! Bevy type path) and the parsed [`BevyRegistry`] (the cheap, in-memory presence
 //! lookup), so each scene value can be routed to `validate_subtree_against_type`
@@ -58,17 +58,17 @@
 //! degrades to empty/partial at ingest) or an unparseable scene region yields only
 //! the structural-remainder findings, never a panic.
 
-use ron_core::CstDocument;
-use ron_types::BevyRegistry;
+use ronin_core::CstDocument;
+use ronin_types::BevyRegistry;
 use serde_json::Value;
 
 use crate::bevy::scene::SceneModel;
 
-/// The severity of a [`SceneDiagnostic`] — a Bevy-mode superset of `ron-core`'s
+/// The severity of a [`SceneDiagnostic`] — a Bevy-mode superset of `ronin-core`'s
 /// two-variant `Severity` that adds the non-error **hint** and **advisory**
 /// levels the three registry states + the staleness advisory require (FR-006/008).
 ///
-/// `Error`/`Warning` mirror `ron_core::Severity` for the `RON-V####` mismatch
+/// `Error`/`Warning` mirror `ronin_core::Severity` for the `RON-V####` mismatch
 /// findings; `Hint` is the unconstrained "no registry" / "type not in registry"
 /// level (never a hard error); `Advisory` is the version-staleness level. The
 /// rendered [`crate::diagnostics_map::DiagnosticView`] collapses `Hint`/`Advisory`
@@ -115,15 +115,15 @@ impl SceneSeverity {
 /// The stable code of a [`SceneDiagnostic`] (FR-006/FR-007).
 ///
 /// Bevy mode's **own**, `ronin-app`-local diagnostic registry — kept here rather
-/// than in `ron-core`/`ron-validate` so those stay Bevy-agnostic (HINT-002,
+/// than in `ronin-core`/`ronin-validate` so those stay Bevy-agnostic (HINT-002,
 /// AD-001). The three scene-level codes (`BVY-S0001`/`BVY-S0002`/`BVY-S0003`) name
 /// the three distinguishable registry states + the staleness advisory; a
 /// [`SceneDiagnosticCode::Mismatch`] wraps the underlying generic
-/// [`ron_core::DiagnosticCode`] (a `RON-V####`) verbatim so a registered-mismatch
+/// [`ronin_core::DiagnosticCode`] (a `RON-V####`) verbatim so a registered-mismatch
 /// finding keeps its precise, stable identity. The [`source`](Self::source) tag
 /// (`"ronin-bevy"` for scene-level codes, the wrapped code's own
-/// [`ron_core::DiagnosticCode::source`] for a mismatch) lets a surface tell scene
-/// findings from structural ones, exactly as E006 tags `ron-types` findings.
+/// [`ronin_core::DiagnosticCode::source`] for a mismatch) lets a surface tell scene
+/// findings from structural ones, exactly as E006 tags `ronin-types` findings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 pub enum SceneDiagnosticCode {
@@ -138,7 +138,7 @@ pub enum SceneDiagnosticCode {
     StalenessAdvisory,
     /// A registered value disagrees with its reflect schema — wraps the precise
     /// generic `RON-V####` finding from `validate_subtree_against_type` (FR-005).
-    Mismatch(ron_core::DiagnosticCode),
+    Mismatch(ronin_core::DiagnosticCode),
 }
 
 impl SceneDiagnosticCode {
@@ -157,7 +157,7 @@ impl SceneDiagnosticCode {
 
     /// The producing-component `source` tag (FR-007). Scene-level codes are
     /// `"ronin-bevy"` (this native module); a wrapped mismatch keeps the generic
-    /// validator's own source tag (`"ron-types"`).
+    /// validator's own source tag (`"ronin-types"`).
     #[inline]
     #[must_use]
     pub fn source(self) -> &'static str {
@@ -175,7 +175,7 @@ impl SceneDiagnosticCode {
 /// (FR-005/FR-006/FR-007/FR-008).
 ///
 /// Carried in **document byte** coordinates (the `range` is an absolute span into
-/// the source, like every `ron-core` diagnostic) so it renders through the E006
+/// the source, like every `ronin-core` diagnostic) so it renders through the E006
 /// surface unchanged — [`crate::diagnostics_map::map_scene_diagnostic`] maps it to
 /// the editor-coordinate `DiagnosticView` (squiggle + Problems entry). A
 /// document-level finding (e.g. [`SceneDiagnosticCode::NoRegistry`]) carries a
@@ -183,7 +183,7 @@ impl SceneDiagnosticCode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SceneDiagnostic {
     /// Absolute byte range of the offending construct (document coordinates).
-    pub range: ron_core::TextRange,
+    pub range: ronin_core::TextRange,
     /// The distinguishing severity (error / warning / hint / advisory).
     pub severity: SceneSeverity,
     /// The stable scene / wrapped-validator code (+ source tag).
@@ -198,7 +198,7 @@ impl SceneDiagnostic {
     fn scene_level(
         code: SceneDiagnosticCode,
         severity: SceneSeverity,
-        range: ron_core::TextRange,
+        range: ronin_core::TextRange,
         message: impl Into<String>,
     ) -> Self {
         Self {
@@ -226,7 +226,7 @@ impl SceneDiagnostic {
     /// This finding's absolute byte range (FR-005/007).
     #[inline]
     #[must_use]
-    pub fn range(&self) -> ron_core::TextRange {
+    pub fn range(&self) -> ronin_core::TextRange {
         self.range
     }
 
@@ -247,7 +247,7 @@ impl SceneDiagnostic {
 ///   ([`SceneDiagnosticCode::TypeNotInRegistry`]) at that value's range —
 ///   unconstrained, **never** a hard error (FR-006);
 /// * **type path IN `registry`** → the generic
-///   [`ron_validate::validate::validate_subtree_against_type`] run against `model`,
+///   [`ronin_validate::validate::validate_subtree_against_type`] run against `model`,
 ///   whose `RON-V####` findings are carried verbatim as
 ///   [`SceneDiagnosticCode::Mismatch`] at their precise ranges (FR-005).
 ///
@@ -265,7 +265,7 @@ impl SceneDiagnostic {
 /// or when the registry carries no apparent version, no staleness advisory is
 /// raised (validation is unaffected).
 ///
-/// `model` is the already-serialized E004 interchange (`ron_types::to_json` of a
+/// `model` is the already-serialized E004 interchange (`ronin_types::to_json` of a
 /// `BevySource.acquire().model`) — the **same** serialization serde mode hands the
 /// validator. Pairing it with the parsed `registry` keeps the presence check cheap
 /// (`registry.contains`) and the schema lookup precise (`model.$defs.<path>`).
@@ -306,7 +306,7 @@ pub fn validate_scene(
             // validator against the serialized model, keyed by the type path. Each
             // RON-V#### finding lands at its precise construct range; an `unknown`
             // / absent def fails soft (no findings) — no false positives.
-            let findings = ron_validate::validate::validate_subtree_against_type(
+            let findings = ronin_validate::validate::validate_subtree_against_type(
                 model,
                 type_path,
                 value.value_node(),
@@ -371,13 +371,13 @@ pub fn staleness_advisory(
     ))
 }
 
-/// Map a generic `ron-core` severity (Error/Warning) onto a [`SceneSeverity`].
+/// Map a generic `ronin-core` severity (Error/Warning) onto a [`SceneSeverity`].
 /// The validator only ever emits Error/Warning; a future variant degrades to
 /// Warning (conservative — never a false hard error).
 #[inline]
-fn severity_from(severity: ron_core::Severity) -> SceneSeverity {
+fn severity_from(severity: ronin_core::Severity) -> SceneSeverity {
     match severity {
-        ron_core::Severity::Error => SceneSeverity::Error,
+        ronin_core::Severity::Error => SceneSeverity::Error,
         _ => SceneSeverity::Warning,
     }
 }
@@ -386,15 +386,15 @@ fn severity_from(severity: ron_core::Severity) -> SceneSeverity {
 /// construct): a zero-length span at offset 0. Rendering collapses it to the file
 /// start, matching how a whole-document advisory is surfaced.
 #[inline]
-fn document_origin_range() -> ron_core::TextRange {
-    ron_core::TextRange::new(0, 0)
+fn document_origin_range() -> ronin_core::TextRange {
+    ronin_core::TextRange::new(0, 0)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ron_core::parse;
-    use ron_types::{BevySource, TypeSource};
+    use ronin_core::parse;
+    use ronin_types::{BevySource, TypeSource};
 
     /// The registry-schema fixture shared with the integration suite — a tiny
     /// hand-authored export covering a struct (Transform), a referenced struct
@@ -435,11 +435,11 @@ mod tests {
     }"##;
 
     /// Acquire the fixture registry + its serialized interchange the way
-    /// production does: `BevySource::acquire()` → `ron_types::to_json`.
+    /// production does: `BevySource::acquire()` → `ronin_types::to_json`.
     fn registry_and_model() -> (BevyRegistry, Value) {
         let (registry, _diags) = BevyRegistry::from_schema_json(REGISTRY, "test", "<test>");
         let acquired = BevySource::from_schema_json(REGISTRY).acquire();
-        let model = ron_types::to_json(&acquired.model);
+        let model = ronin_types::to_json(&acquired.model);
         (registry, model)
     }
 
@@ -536,8 +536,8 @@ mod tests {
         );
         assert_eq!(SceneDiagnosticCode::NoRegistry.source(), "ronin-bevy");
         assert_eq!(
-            SceneDiagnosticCode::Mismatch(ron_core::DiagnosticCode::TypeMismatch).source(),
-            "ron-types"
+            SceneDiagnosticCode::Mismatch(ronin_core::DiagnosticCode::TypeMismatch).source(),
+            "ronin-types"
         );
     }
 

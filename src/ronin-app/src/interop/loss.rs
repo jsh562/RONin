@@ -13,7 +13,7 @@
 //! Each [`LossKind`] carries a **stable** `RON-I####` code (its [`LossKind::code`])
 //! and a human label ([`LossKind::label`]). This mirrors E009's `BVY-S####`
 //! [`crate::bevy::SceneDiagnosticCode`] namespace: a `ronin-app`-local diagnostic
-//! registry kept native-side so the WASM-clean `ron-core`/`ron-validate` stay free
+//! registry kept native-side so the WASM-clean `ronin-core`/`ronin-validate` stay free
 //! of any interop concern (FR-012). Tests and snapshots key on the **stable code +
 //! kind**, never on the human-readable [`LossyConstruct::detail`] wording (plan
 //! "Snapshot vs assertion scope").
@@ -29,7 +29,7 @@
 
 use std::collections::BTreeMap;
 
-use ron_core::TextRange;
+use ronin_core::TextRange;
 
 /// The category of one construct that cannot be represented losslessly in standard
 /// JSON (FR-004), plus the convert-remainder placeholder kind (FR-013).
@@ -406,9 +406,9 @@ impl LossReport {
 // EVERY loss is reported even when recoverable (FR-007 / STF-001) — the
 // `recovery` flag records *which*, never *whether* to list it.
 
-use ron_core::syntax::ast::{EnumVariant, List, Map, MapEntry, Struct, Tuple, Value};
-use ron_core::{CstDocument, SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken};
-use ron_validate::PointerRangeIndex;
+use ronin_core::syntax::ast::{EnumVariant, List, Map, MapEntry, Struct, Tuple, Value};
+use ronin_core::{CstDocument, SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken};
+use ronin_validate::PointerRangeIndex;
 
 use crate::interop::comments::CommentCarrier;
 use crate::interop::pointer::projection_key_string;
@@ -423,7 +423,7 @@ use crate::interop::pointer::projection_key_string;
 ///
 /// * `doc` — the source document (read-only).
 /// * `projection_index` — the [`PointerRangeIndex`] from the same
-///   [`CstJsonProjection`](ron_validate::CstJsonProjection) used to build the
+///   [`CstJsonProjection`](ronin_validate::CstJsonProjection) used to build the
 ///   JSON value (HINT-002); supplies the real source spans.
 /// * `comments` — the comment carrier for this conversion; its dropped comments
 ///   (only when the carrier is pure-standard-JSON) become `DroppedComment` losses
@@ -444,7 +444,7 @@ pub fn build_loss_report(
 ) -> LossReport {
     let mut report = LossReport::new();
     let root = doc.root();
-    if let Some(value) = ron_core::syntax::ast::Document::cast(root.clone()).and_then(|d| d.value())
+    if let Some(value) = ronin_core::syntax::ast::Document::cast(root.clone()).and_then(|d| d.value())
     {
         let mut walker = LossWalker {
             index: projection_index,
@@ -740,7 +740,7 @@ impl LossWalker<'_> {
 
     /// A `char` literal → one-char JSON string (expanded tier); a raw string →
     /// standard JSON string (the value survives, the raw form does not) (FR-004).
-    fn detect_literal(&mut self, lit: &ron_core::syntax::ast::Literal) {
+    fn detect_literal(&mut self, lit: &ronin_core::syntax::ast::Literal) {
         match lit.token_kind() {
             Some(SyntaxKind::Char) => {
                 let range = self.value_range(lit.syntax());
@@ -1018,8 +1018,8 @@ mod tests {
     /// map uses (HINT-002), with comments preserved (JSONC) so the only losses
     /// are the value constructs.
     fn report_for(src: &str, bound: bool) -> LossReport {
-        let doc = ron_core::parse(src);
-        let proj = ron_validate::CstJsonProjection::from_document(&doc);
+        let doc = ronin_core::parse(src);
+        let proj = ronin_validate::CstJsonProjection::from_document(&doc);
         let comments = CommentCarrier::from_document(&doc, CommentMode::JsoncInline);
         build_loss_report(&doc, &proj.index, &comments, bound)
     }
@@ -1134,8 +1134,8 @@ mod tests {
 
     #[test]
     fn dropped_comments_are_losses_only_in_pure_json() {
-        let doc = ron_core::parse("// c\n(x: 1)");
-        let proj = ron_validate::CstJsonProjection::from_document(&doc);
+        let doc = ronin_core::parse("// c\n(x: 1)");
+        let proj = ronin_validate::CstJsonProjection::from_document(&doc);
         // JSONC: the comment is carried, not dropped.
         let jsonc = CommentCarrier::from_document(&doc, CommentMode::JsoncInline);
         let r = build_loss_report(&doc, &proj.index, &jsonc, false);

@@ -1,8 +1,8 @@
 //! JSON→RON reconstruction — schema-aware when a `TypeModel` is bound, deterministic
-//! best-effort otherwise; emits RON text → `ron_core::parse` (FR-002/009/015, AD-003).
+//! best-effort otherwise; emits RON text → `ronin_core::parse` (FR-002/009/015, AD-003).
 //!
 //! This is the inverse of [`ron_to_json`](crate::interop::ron_to_json). It walks a
-//! `serde_json::Value`, emitting **RON text** that `ron_core::parse` then turns
+//! `serde_json::Value`, emitting **RON text** that `ronin_core::parse` then turns
 //! into a lossless [`CstDocument`] (AD-003 / HINT-005). The serde `ron` crate is
 //! used ONLY as the boundary **grammar verifier** ([`grammar_verify`]) — never as
 //! the primary converter (ADR-0008 / FR-012).
@@ -52,9 +52,9 @@
 //! the converter never stack-overflows or hangs (FR-013, SC-009). `serde_json`'s
 //! own parser is depth-limited too, but this guard governs *our* emit walk.
 
-use ron_core::CstDocument;
-use ron_types::extension::RonKind;
-use ron_types::model::{Discriminator, NodeKind, TypeModel, TypeNode, TypeRef, VariantShape};
+use ronin_core::CstDocument;
+use ronin_types::extension::RonKind;
+use ronin_types::model::{Discriminator, NodeKind, TypeModel, TypeNode, TypeRef, VariantShape};
 
 use crate::interop::comments::{CommentCarrier, CommentKind};
 use crate::interop::loss::{LossKind, LossRecovery, LossReport, LossyConstruct};
@@ -66,7 +66,7 @@ use crate::interop::loss::{LossKind, LossRecovery, LossReport, LossyConstruct};
 /// deeply-nested input cannot drive unbounded recursion / a stack overflow. A node
 /// at this depth is emitted as a flagged [`LossKind::UnparseableRegion`] placeholder
 /// (a parseable `()` sentinel) plus a note — never a crash. Kept in lockstep with
-/// `ron-core`'s own parse depth guard so the re-parse of our emitted text also
+/// `ronin-core`'s own parse depth guard so the re-parse of our emitted text also
 /// succeeds within bounds.
 pub const MAX_JSON_DEPTH: usize = 96;
 
@@ -81,7 +81,7 @@ pub struct JsonToRonBinding<'a> {
     /// The bound type model (consulted as data).
     pub model: &'a TypeModel,
     /// The document's bound root type name (a key into
-    /// [`TypeModel::named_types`](ron_types::model::TypeModel::named_types)).
+    /// [`TypeModel::named_types`](ronin_types::model::TypeModel::named_types)).
     pub root_type: &'a str,
 }
 
@@ -101,7 +101,7 @@ impl<'a> JsonToRonBinding<'a> {
 /// The complete JSON→RON reconstruction outcome (FR-002/009/015): the reconstructed
 /// RON document, the residual-ambiguity notes, and the lossy-construct map.
 ///
-/// The reconstructed [`document`](Self::document) is a real `ron_core` CST built by
+/// The reconstructed [`document`](Self::document) is a real `ronin_core` CST built by
 /// parsing the emitted RON text — lossless and ready to install in a buffer or open
 /// in a new tab. The [`text`](Self::text) is that same emitted RON source. The
 /// [`notes`](Self::notes) surface every residual ambiguity of the best-effort path
@@ -109,7 +109,7 @@ impl<'a> JsonToRonBinding<'a> {
 /// (depth-exceeded / unrepresentable regions, FR-013).
 #[derive(Debug)]
 pub struct JsonToRon {
-    /// The reconstructed RON document (a lossless `ron_core` CST).
+    /// The reconstructed RON document (a lossless `ronin_core` CST).
     pub document: CstDocument,
     /// The emitted RON source text (what [`document`](Self::document) was parsed
     /// from).
@@ -158,14 +158,14 @@ pub fn json_to_ron(
     // emitted text parses as RON (grammar verifier role, ADR-0008 / FR-012). If the
     // emit produced something the grammar rejects (it should not for well-formed
     // input), the note records it — the document is still produced via the
-    // error-tolerant `ron_core::parse` (which never drops bytes).
+    // error-tolerant `ronin_core::parse` (which never drops bytes).
     if !grammar_verify(&text) {
         builder
             .notes
             .push("emitted RON did not pass the serde `ron` grammar cross-check".to_string());
     }
 
-    let document = ron_core::parse(&text);
+    let document = ronin_core::parse(&text);
     JsonToRon {
         document,
         text,
@@ -225,7 +225,7 @@ impl Builder<'_> {
             out.push_str("()");
             self.loss_report.push(LossyConstruct::with_detail(
                 LossKind::UnparseableRegion,
-                ron_core::TextRange::new(0usize, 0usize),
+                ronin_core::TextRange::new(0usize, 0usize),
                 LossRecovery::LossyToExternal,
                 "JSON nesting exceeded the safe depth bound — emitted as a flagged placeholder",
             ));
@@ -530,7 +530,7 @@ impl Builder<'_> {
         &mut self,
         out: &mut String,
         value: &serde_json::Value,
-        variants: &[ron_types::model::Variant],
+        variants: &[ronin_types::model::Variant],
         discriminator: &Discriminator,
         pointer: &str,
         depth: usize,
@@ -814,7 +814,7 @@ mod tests {
     //! T020 — JSON→RON reconstruction (schema-aware + best-effort) unit coverage.
 
     use super::*;
-    use ron_types::model::{Field, Primitive, Variant};
+    use ronin_types::model::{Field, Primitive, Variant};
 
     fn unbound(json: serde_json::Value) -> JsonToRon {
         json_to_ron(&json, None, None)
@@ -1012,7 +1012,7 @@ mod tests {
     fn comment_read_back_reattaches_at_anchor() {
         // A carrier with a comment anchored to "/x" re-attaches before that field.
         let ron = "(\n  // about x\n  x: 1,\n)";
-        let doc = ron_core::parse(ron);
+        let doc = ronin_core::parse(ron);
         let carrier = CommentCarrier::from_document(&doc, crate::interop::CommentMode::JsoncInline);
         let json = serde_json::json!({ "x": 1 });
         let r = json_to_ron(&json, None, Some(&carrier));

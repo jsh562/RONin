@@ -40,7 +40,7 @@
 
 use egui::{Color32, RichText, Ui};
 
-use ron_core::Severity;
+use ronin_core::Severity;
 
 use super::classifier::ScalarClass;
 use super::tree::TreeNodeKind;

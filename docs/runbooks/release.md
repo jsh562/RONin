@@ -49,8 +49,8 @@ is the single deliberate trigger (OR-001 / OR-008) — it fans out to both
 `.github/workflows/release-plz.yml`) and keeps an open **Release PR** that
 carries:
 
-- **Independent per-crate version bumps** — each of `ron-core`, `ron-types`,
-  `ron-validate`, `ronin-app` is bumped from its own conventional-commit history
+- **Independent per-crate version bumps** — each of `ronin-core`, `ronin-types`,
+  `ronin-validate`, `ronin-app` is bumped from its own conventional-commit history
   (no shared version; AD-001 / OR-005).
 - **The umbrella product version** — `ronin-app`'s version is the overall RONin
   release version (OR-008); it is what you will tag in step 2.
@@ -124,8 +124,8 @@ Pushing the tag triggers, in parallel:
   partial GitHub Release (fail-fast matrix — OR-002).
 - **`.github/workflows/release-plz.yml`** `publish` job (`on: push: tags: ['v*']`)
   — runs `release-plz release`, publishing every crate whose manifest version is
-  not yet on crates.io, **in dependency order**: `ron-core` → `ron-types` →
-  `ron-validate` → `ronin-app` (OR-005). This is the only crates.io publish step.
+  not yet on crates.io, **in dependency order**: `ronin-core` → `ronin-types` →
+  `ronin-validate` → `ronin-app` (OR-005). This is the only crates.io publish step.
 
 Do **not** push per-crate tags as a trigger. Any `<crate>-v<version>` tags
 release-plz records are provenance-only (OR-008 / STF-001).
@@ -185,13 +185,13 @@ order:
 
 ```bash
 # Replace versions with the per-crate versions from the merged Release PR.
-cargo search ron-core
-cargo search ron-types
-cargo search ron-validate
+cargo search ronin-core
+cargo search ronin-types
+cargo search ronin-validate
 cargo search ronin-app
 ```
 
-`ron-core` must appear before `ron-validate` and `ronin-app` (the latter depend
+`ronin-core` must appear before `ronin-validate` and `ronin-app` (the latter depend
 on it). If `release-plz release` published a partial set (some crates live,
 others not), see Rollback (step 4) — the dependency-order publish minimizes blast
 radius but a partial publish still needs handling.
@@ -210,10 +210,10 @@ For a bad or partial crate publish:
 
 ```bash
 # Yank a bad version (new resolves skip it; existing lockfiles still work):
-cargo yank --version 1.4.0 ron-core
+cargo yank --version 1.4.0 ronin-core
 
 # Un-yank if you yanked in error:
-cargo yank --version 1.4.0 --undo ron-core
+cargo yank --version 1.4.0 --undo ronin-core
 ```
 
 - A bad publish is **yank-only** — there is no delete. The remedy for a defective
@@ -268,7 +268,7 @@ automated).
 
 - [ ] **CI gates green, including BOTH wasm32 builds** — the tag's `release.yml`
   run shows `gates (E002 CI re-run)` green (`check`, `test` on all three OSes,
-  `wasm (ron-core wasm32)`, `wasm (ron-validate wasm32)`, `supply-chain`). The
+  `wasm (ronin-core wasm32)`, `wasm (ronin-validate wasm32)`, `supply-chain`). The
   release `needs:` these, so a red gate blocks publish (OR-009). *Re-check:* the
   `gates` job conclusion on the tag run, or re-run the gates workflow.
 - [ ] **`cargo-semver-checks` green** — the `cargo semver-checks (blocking)` step
@@ -290,8 +290,8 @@ automated).
 - [ ] **Channel correct for the tag** — a `-rc`/`-nightly`/other tag is a
   GitHub *pre-release*; a bare `vX.Y.Z` is *stable* — never the reverse (OR-008 /
   SC-002). *Re-check:* the Release's pre-release flag vs the tag.
-- [ ] **All four crates live on crates.io in dependency order** — `ron-core` →
-  `ron-types` → `ron-validate` → `ronin-app` (OR-005). *Re-check:* `cargo search`
+- [ ] **All four crates live on crates.io in dependency order** — `ronin-core` →
+  `ronin-types` → `ronin-validate` → `ronin-app` (OR-005). *Re-check:* `cargo search`
   each crate.
 
 ### Maintainer-attested judgment

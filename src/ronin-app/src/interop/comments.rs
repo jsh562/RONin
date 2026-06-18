@@ -1,10 +1,10 @@
 //! The comment carrier (FR-008) — how RON comments cross the RON→JSON boundary
 //! and are read back.
 //!
-//! RON comments are CST **trivia** (`ron-core` INV-7 keeps trivia internal). This
+//! RON comments are CST **trivia** (`ronin-core` INV-7 keeps trivia internal). This
 //! module reads them via the public token stream
-//! ([`ron_core::SyntaxNode::descendant_tokens`]) — it does **NOT** add a new
-//! `ron-core` comment API (HINT-003, data-model §CommentCarrier "Comments read via
+//! ([`ronin_core::SyntaxNode::descendant_tokens`]) — it does **NOT** add a new
+//! `ronin-core` comment API (HINT-003, data-model §CommentCarrier "Comments read via
 //! the CST token stream"). Each comment is anchored to the **nearest following
 //! value** (its JSON Pointer in the [`CstJsonProjection`] coordinate space), so
 //! JSON→RON can re-attach it on read-back (round-trip symmetry, FR-008).
@@ -22,8 +22,8 @@
 
 use std::collections::BTreeMap;
 
-use ron_core::syntax::ast::{Document, Value};
-use ron_core::{CstDocument, SyntaxKind, SyntaxNode, TextRange};
+use ronin_core::syntax::ast::{Document, Value};
+use ronin_core::{CstDocument, SyntaxKind, SyntaxNode, TextRange};
 
 use crate::interop::pointer::value_pointer_map;
 
@@ -67,9 +67,9 @@ impl CommentMode {
 /// same style on read-back (FR-008).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommentKind {
-    /// A line comment `// ...` (`ron_core` [`SyntaxKind::LineComment`]).
+    /// A line comment `// ...` (`ronin_core` [`SyntaxKind::LineComment`]).
     Line,
-    /// A block comment `/* ... */` (`ron_core` [`SyntaxKind::BlockComment`]).
+    /// A block comment `/* ... */` (`ronin_core` [`SyntaxKind::BlockComment`]).
     Block,
 }
 
@@ -291,7 +291,7 @@ impl CommentCarrier {
 /// following value's JSON Pointer.
 ///
 /// Reads comments via the public token stream (INV-7 / HINT-003 — no new
-/// `ron-core` API). The value-pointer map ([`value_pointer_map`]) gives the same
+/// `ronin-core` API). The value-pointer map ([`value_pointer_map`]) gives the same
 /// pointers the [`CstJsonProjection`] index uses, so an anchored comment lands at
 /// the projection coordinate JSON→RON read-back understands.
 fn collect_comments(root: &SyntaxNode) -> Vec<Comment> {
@@ -311,7 +311,7 @@ fn collect_comments(root: &SyntaxNode) -> Vec<Comment> {
         };
         let range = token.text_range();
         // Anchor to the nearest value that begins at or after the comment's end —
-        // "leading trivia binds to the following significant token" (ron-core
+        // "leading trivia binds to the following significant token" (ronin-core
         // AD-001). A comment after the last value (trailing/dangling) has no
         // following value and anchors to the root pointer `""`.
         let anchor = nearest_following_pointer(&starts, range.end());
@@ -357,7 +357,7 @@ mod tests {
     use super::*;
 
     fn carrier(src: &str, mode: CommentMode) -> CommentCarrier {
-        let doc = ron_core::parse(src);
+        let doc = ronin_core::parse(src);
         CommentCarrier::from_document(&doc, mode)
     }
 

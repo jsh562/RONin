@@ -7,9 +7,9 @@
 //!   `type_source` is a small JSON-Schema `SchemaFile` is loaded; opening a matching
 //!   document resolves to a `Bound` binding (Entity, config) AND, driving the App's
 //!   real off-frame [`ReparseWorker`] to completion, produces a `RON-V####` type
-//!   diagnostic (source `ron-types`) at the wrong value (FR-011/FR-013).
+//!   diagnostic (source `ronin-types`) at the wrong value (FR-011/FR-013).
 //! * A document whose path matches no rule (and has no override) shows
-//!   `no type bound` and produces zero `ron-types` diagnostics (structural-only).
+//!   `no type bound` and produces zero `ronin-types` diagnostics (structural-only).
 //! * A per-document override flips the binding to `(override)` and validation uses
 //!   the override's type (origin Override > config).
 //! * A corrupt `.ronin/bindings.json` loads as an empty config → `NoBinding`, no
@@ -138,13 +138,13 @@ fn drive_app_reparse(app: &mut App) {
     }
 }
 
-/// Count `ron-types` diagnostics on the active document.
+/// Count `ronin-types` diagnostics on the active document.
 fn type_diag_count(app: &App) -> usize {
     app.active_document()
         .map(|d| {
             d.diagnostics
                 .iter()
-                .filter(|v| v.code.source() == "ron-types")
+                .filter(|v| v.code.source() == "ronin-types")
                 .count()
         })
         .unwrap_or(0)
@@ -193,11 +193,11 @@ fn matching_file_is_bound_shown_and_validated() {
         "the indicator label must show the bound type + (config) origin"
     );
 
-    // A RON-V type diagnostic (source ron-types) must be present at the wrong value.
+    // A RON-V type diagnostic (source ronin-types) must be present at the wrong value.
     let type_views: Vec<_> = doc
         .diagnostics
         .iter()
-        .filter(|v| v.code.source() == "ron-types")
+        .filter(|v| v.code.source() == "ronin-types")
         .cloned()
         .collect();
     assert!(
@@ -231,7 +231,7 @@ fn matching_file_is_bound_shown_and_validated() {
 #[test]
 fn non_matching_file_shows_no_type_bound_and_structural_only() {
     // FR-011/FR-015: a document whose path matches no rule (and no override) shows
-    // "no type bound" and produces zero ron-types diagnostics.
+    // "no type bound" and produces zero ronin-types diagnostics.
     let project = temp_project("nomatch");
     let schema = write_entity_schema(&project, "entity.schema.json");
     write_bindings(&project, &schema);
@@ -256,7 +256,7 @@ fn non_matching_file_shows_no_type_bound_and_structural_only() {
     assert_eq!(
         type_diag_count(&app),
         0,
-        "a non-matching file must produce zero ron-types diagnostics (structural-only)"
+        "a non-matching file must produce zero ronin-types diagnostics (structural-only)"
     );
 
     // UI wiring: the "no type bound" indicator must render in the shell.

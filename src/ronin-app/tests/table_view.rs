@@ -733,11 +733,11 @@ fn sc010_benchmark_realized_rows_bounded_and_independent_of_n() {
 
 use ronin_app::structural::sections::{scan_table_sections, SectionShape as Shape, TableSection};
 use ronin_app::structural::view_state::resolve_path;
-use ron_core::ast;
+use ronin_core::ast;
 
 /// Parse `src` and scan it for table-able sections.
 fn scan(src: &str) -> Vec<TableSection> {
-    scan_table_sections(&ron_core::parse(src))
+    scan_table_sections(&ronin_core::parse(src))
 }
 
 #[test]
@@ -802,7 +802,7 @@ fn scan_scalar_only_struct_has_no_sections() {
 
 #[test]
 fn record_map_model_has_leading_readonly_key_column() {
-    let cst = ron_core::parse("(hulls: { (1): (hp: 1, name: \"a\"), (2): (hp: 2, name: \"b\") })");
+    let cst = ronin_core::parse("(hulls: { (1): (hp: 1, name: \"a\"), (2): (hp: 2, name: \"b\") })");
     let section = StructuralPath::from_steps(vec![PathStep::Field("hulls".to_string())]);
     let model = TableModel::derive_section(&cst, &section, Shape::RecordMap, &[])
         .expect("record map derives a model");
@@ -833,7 +833,7 @@ fn record_map_model_has_leading_readonly_key_column() {
 
 #[test]
 fn tuple_list_model_has_positional_editable_scalar_cells() {
-    let cst = ron_core::parse("(coords: [(1, 2), (3, 4), (5, 6)])");
+    let cst = ronin_core::parse("(coords: [(1, 2), (3, 4), (5, 6)])");
     let section = StructuralPath::from_steps(vec![PathStep::Field("coords".to_string())]);
     let model = TableModel::derive_section(&cst, &section, Shape::TupleList, &[])
         .expect("tuple list derives a model");
@@ -858,7 +858,7 @@ fn tuple_list_model_has_positional_editable_scalar_cells() {
 #[test]
 fn record_list_model_unchanged_via_derive_section() {
     // RecordList through the dispatcher is identical to the legacy derive path.
-    let cst = ron_core::parse("[(a: 1, b: 2), (a: 3, c: 4)]");
+    let cst = ronin_core::parse("[(a: 1, b: 2), (a: 3, c: 4)]");
     let section = StructuralPath::root();
     let via_section = TableModel::derive_section(&cst, &section, Shape::RecordList, &[])
         .expect("record list derives via derive_section");
@@ -877,7 +877,7 @@ fn resolve_path_index_step_descends_into_a_tuple() {
     // The TupleList cell path is `section / Index(row) / Index(pos)`; the second
     // Index must descend into the row tuple (not only a list) so a tuple-cell edit /
     // drill-in resolves. This pins resolve_path's PathStep::Index tuple arm.
-    let cst = ron_core::parse("(coords: [(10, 20), (30, 40)])");
+    let cst = ronin_core::parse("(coords: [(10, 20), (30, 40)])");
     let root = cst.root();
     let cell_path = StructuralPath::from_steps(vec![
         PathStep::Field("coords".to_string()),
@@ -907,7 +907,7 @@ fn derive_any_over_a_map_has_leading_readonly_key_column() {
     // A Map projects a leading read-only `(key)` column + value projection. Here every
     // value is a record (mixed names allowed for reach), so the value columns are the
     // union of their fields.
-    let cst = ron_core::parse("(m: { (1): A(hp: 1), (2): B(mp: 2) })");
+    let cst = ronin_core::parse("(m: { (1): A(hp: 1), (2): B(mp: 2) })");
     let path = StructuralPath::from_steps(vec![PathStep::Field("m".to_string())]);
     let model = AnyTableModel::derive_any(&cst, &path, &[]).expect("a map projects a table");
 
@@ -922,7 +922,7 @@ fn derive_any_over_a_map_has_leading_readonly_key_column() {
 #[test]
 fn derive_any_over_a_scalar_list_has_single_value_column() {
     // A list of scalars (not records, not tuples) projects a single `value` column.
-    let cst = ron_core::parse("(xs: [10, 20, 30])");
+    let cst = ronin_core::parse("(xs: [10, 20, 30])");
     let path = StructuralPath::from_steps(vec![PathStep::Field("xs".to_string())]);
     let model = AnyTableModel::derive_any(&cst, &path, &[]).expect("a scalar list projects");
 
@@ -941,7 +941,7 @@ fn derive_any_over_a_scalar_list_has_single_value_column() {
 #[test]
 fn derive_any_over_a_tuple_list_has_positional_columns() {
     // A list whose every element is a tuple projects positional `.0/.1/…` columns.
-    let cst = ron_core::parse("(c: [(1, 2), (3, 4)])");
+    let cst = ronin_core::parse("(c: [(1, 2), (3, 4)])");
     let path = StructuralPath::from_steps(vec![PathStep::Field("c".to_string())]);
     let model = AnyTableModel::derive_any(&cst, &path, &[]).expect("a tuple list projects");
 
@@ -955,7 +955,7 @@ fn derive_any_over_a_tuple_list_has_positional_columns() {
 fn derive_any_over_a_mixed_name_record_list_unions_columns() {
     // Permissive for reach: a list of records with MIXED struct names still tables,
     // with the union of their fields in first-seen order (unlike the strict classifier).
-    let cst = ron_core::parse("[A(a: 1, b: 2), B(a: 3, c: 4)]");
+    let cst = ronin_core::parse("[A(a: 1, b: 2), B(a: 3, c: 4)]");
     let model = AnyTableModel::derive_any(&cst, &StructuralPath::root(), &[])
         .expect("a mixed-name record list projects");
     assert_eq!(col_names(&model), vec!["a", "b", "c"]);
@@ -967,7 +967,7 @@ fn derive_any_over_a_single_struct_is_a_field_value_grid() {
     // E012 (Part A2): a single struct projects a field/value table — a leading
     // read-only `(field)` column + a `value` column, one row per field. Each value
     // cell is editable where it is a scalar, and is the field's value (path/Field(name)).
-    let cst = ron_core::parse("Point(x: 1, y: 2)");
+    let cst = ronin_core::parse("Point(x: 1, y: 2)");
     let model =
         AnyTableModel::derive_any(&cst, &StructuralPath::root(), &[]).expect("a struct projects");
 
@@ -995,7 +995,7 @@ fn derive_any_over_a_struct_keeps_nested_value_drill_marker() {
     // A nested struct/tuple field stays a tree/form drill-in (`Nested`); a nested
     // list/map field opens AS A TABLE (`NestedTable`) — the value cell keeps its drill
     // marker so it opens as its own table.
-    let cst = ron_core::parse("Config(tags: [\"a\"], pos: (1, 2), inner: Meta(k: 1))");
+    let cst = ronin_core::parse("Config(tags: [\"a\"], pos: (1, 2), inner: Meta(k: 1))");
     let model =
         AnyTableModel::derive_any(&cst, &StructuralPath::root(), &[]).expect("a struct projects");
 
@@ -1027,7 +1027,7 @@ fn derive_any_over_a_struct_keeps_nested_value_drill_marker() {
 fn derive_any_over_a_single_tuple_is_a_one_row_positional_grid() {
     // E012 (Part A2): a single tuple projects a 1-row positional table — columns
     // `.0/.1/…`, one row whose cells are editable scalars at path/Index(i).
-    let cst = ron_core::parse("(1, 2, 3)");
+    let cst = ronin_core::parse("(1, 2, 3)");
     let model =
         AnyTableModel::derive_any(&cst, &StructuralPath::root(), &[]).expect("a tuple projects");
 
@@ -1044,12 +1044,12 @@ fn derive_any_over_a_single_tuple_is_a_one_row_positional_grid() {
 #[test]
 fn derive_any_returns_none_for_a_scalar_leaf() {
     // A scalar leaf is NOT a table — the outline never selects one (Part A2).
-    let int_cst = ron_core::parse("42");
+    let int_cst = ronin_core::parse("42");
     assert!(
         AnyTableModel::derive_any(&int_cst, &StructuralPath::root(), &[]).is_none(),
         "a scalar integer leaf is not a table"
     );
-    let str_cst = ron_core::parse("\"hello\"");
+    let str_cst = ronin_core::parse("\"hello\"");
     assert!(
         AnyTableModel::derive_any(&str_cst, &StructuralPath::root(), &[]).is_none(),
         "a scalar string leaf is not a table"
@@ -1060,7 +1060,7 @@ fn derive_any_returns_none_for_a_scalar_leaf() {
 fn list_cell_is_nested_table_while_struct_cell_stays_nested() {
     // E013: a cell whose value is a List/Map is `NestedTable` (open as table); a cell
     // whose value is a struct stays `Nested` (tree/form drill-in).
-    let cst = ron_core::parse("[(items: [1, 2], meta: (k: 1))]");
+    let cst = ronin_core::parse("[(items: [1, 2], meta: (k: 1))]");
     let model = AnyTableModel::derive_any(&cst, &StructuralPath::root(), &[]).expect("projects");
 
     let items = model.columns.iter().position(|c| c.field_name == "items").unwrap();
@@ -1083,7 +1083,7 @@ fn breadcrumb_prefix_chain_marks_list_map_segments_clickable() {
     // clickable iff its prefix resolves to a List or Map (the openable kinds).
     // Doc: root struct → `hulls` MAP → key (1) → struct → `cells` LIST → index 0 →
     // struct → `coord` TUPLE.
-    let cst = ron_core::parse(
+    let cst = ronin_core::parse(
         "(hulls: { (1): (cells: [(coord: (0, 0))]) })",
     );
     // Path down to the `coord` tuple value.

@@ -5,7 +5,7 @@
 # Runs `cargo publish --dry-run --locked` for EACH publishable crate, in the SAME
 # dependency / publish order as the live release (OR-005):
 #
-#     ron-core -> ron-types -> ron-validate -> ronin-app
+#     ronin-core -> ronin-types -> ronin-validate -> ronin-app
 #
 # and MUST succeed for each. The root-excluded `fuzz` crate is absent from this
 # set (never published — OR-005).
@@ -15,13 +15,13 @@
 # ---------------------------------------------------------------------------
 # Before the FIRST release, none of these crates exist on crates.io yet. A
 # `cargo publish --dry-run`/verify pass for a DEPENDENT crate normally tries to
-# resolve its workspace siblings (e.g. ron-validate -> ron-core,
-# ronin-app -> ron-core/ron-types/ron-validate) FROM crates.io, which fails
-# because they are not published yet. Only `ron-core` (no workspace path-deps)
+# resolve its workspace siblings (e.g. ronin-validate -> ronin-core,
+# ronin-app -> ronin-core/ronin-types/ronin-validate) FROM crates.io, which fails
+# because they are not published yet. Only `ronin-core` (no workspace path-deps)
 # fully dry-runs/verifies pre-first-publish.
 #
 # So this check is PUBLISH-ORDER-AWARE:
-#   - ron-core      : full `cargo publish --dry-run --locked` (verify ON) — it has
+#   - ronin-core      : full `cargo publish --dry-run --locked` (verify ON) — it has
 #                     no workspace path-deps, so it must verify cleanly.
 #   - dependents    : `cargo publish --dry-run --locked --no-verify` (verify OFF)
 #                     PRE-FIRST-PUBLISH. `--no-verify` skips the from-registry
@@ -31,7 +31,7 @@
 #
 # Once a crate's dependencies are live on crates.io, drop the `--no-verify` for
 # that crate so its full verify pass runs too (TODO: remove the dependents'
-# `--no-verify` after the first successful release publishes ron-core/types/validate).
+# `--no-verify` after the first successful release publishes ronin-core/types/validate).
 #
 # The live publish (release-plz, dependency-ordered) covers the residual that a
 # dry-run cannot: the actual from-registry verify of each dependent AFTER its
@@ -44,10 +44,10 @@ set -euo pipefail
 # Crate (manifest-dir : verify-mode). "verify" = full dry-run; "noverify" =
 # --no-verify (unpublished-path-dep-safe pre-first-publish).
 declare -a CRATES=(
-  "ron-core:verify"
-  "ron-types:verify"        # ron-types has NO workspace path-dep (leaf) -> verify
-  "ron-validate:noverify"   # depends on ron-core (path) -> noverify pre-publish
-  "ronin-app:noverify"      # depends on ron-core/ron-types/ron-validate -> noverify
+  "ronin-core:verify"
+  "ronin-types:verify"        # ronin-types has NO workspace path-dep (leaf) -> verify
+  "ronin-validate:noverify"   # depends on ronin-core (path) -> noverify pre-publish
+  "ronin-app:noverify"      # depends on ronin-core/ronin-types/ronin-validate -> noverify
 )
 
 fail=0

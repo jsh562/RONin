@@ -1,9 +1,0 @@
----
-source: src/ron-core/tests/format_properties.rs
-expression: "snap(\"[\\n1,\\n2,\\n3\\n]\")"
----
-[
-    1,
-    2,
-    3,
-]

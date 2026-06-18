@@ -1,0 +1,7 @@
+---
+source: src/ronin-core/tests/format_properties.rs
+expression: "snap(\"[\\n// nothing here\\n]\")"
+---
+[
+    // nothing here
+]

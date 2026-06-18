@@ -57,7 +57,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use ron_types::{BevyRegistry, BevySource, TypeSource};
+use ronin_types::{BevyRegistry, BevySource, TypeSource};
 
 use crate::binding::{contain_type_source, glob_matches, pattern_specificity};
 
@@ -610,7 +610,7 @@ pub enum RegistryLoad {
         /// config/source change, never persisted.
         registry: BevyRegistry,
         /// The **already-serialized** E004 interchange for `registry` — the
-        /// `ron_types::to_json` of `BevySource::from_registry(registry).acquire().model`,
+        /// `ronin_types::to_json` of `BevySource::from_registry(registry).acquire().model`,
         /// the same serialization serde mode hands the validator (E009/IP-004).
         ///
         /// Acquired **once** at [`ModeState::load_registry`] time so the per-frame /
@@ -869,11 +869,11 @@ impl ModeState {
         // Acquire the serialized E004 interchange ONCE, here at load time, so the
         // per-frame / per-keystroke validation path never re-serializes the schema
         // (E009/IP-004). `BevySource::from_registry` reuses the SAME serialization
-        // serde mode hands the validator: `acquire()` → `ron_types::to_json`. The
+        // serde mode hands the validator: `acquire()` → `ronin_types::to_json`. The
         // registry is cloned into the source (it consumes one) and kept alongside
         // for the cheap presence lookup `validate_scene` pairs with the model.
         let model =
-            ron_types::to_json(&BevySource::from_registry(registry.clone()).acquire().model);
+            ronin_types::to_json(&BevySource::from_registry(registry.clone()).acquire().model);
         self.load = RegistryLoad::Loaded {
             registry,
             model: Arc::new(model),

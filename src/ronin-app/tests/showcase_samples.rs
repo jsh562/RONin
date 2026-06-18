@@ -21,8 +21,8 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use ron_core::ast;
-use ron_core::{parse, Severity, SyntaxNode};
+use ronin_core::ast;
+use ronin_core::{parse, Severity, SyntaxNode};
 
 use ronin_app::app::App;
 use ronin_app::bevy::mode::Mode;

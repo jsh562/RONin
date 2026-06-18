@@ -45,8 +45,8 @@
 //! linear in its element count (FR-026). It is a pure read over the CST: classifying
 //! changes **zero** document bytes (FR-020).
 
-use ron_core::ast;
-use ron_core::{SyntaxKind, SyntaxNode};
+use ronin_core::ast;
+use ronin_core::{SyntaxKind, SyntaxNode};
 
 use super::table::{Column, ColumnClass};
 
@@ -360,8 +360,8 @@ pub(crate) fn scalar_class_of(value: &ast::Value) -> Option<ScalarClass> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ron_core::ast;
-    use ron_core::parse;
+    use ronin_core::ast;
+    use ronin_core::parse;
 
     /// Parse `src` (whose top-level value must be a list) and classify it.
     fn classify_src(src: &str) -> Verdict {

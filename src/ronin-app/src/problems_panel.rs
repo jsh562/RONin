@@ -10,7 +10,7 @@
 //! caller's diagnostic order (which mirrors the buffer's storage order) is
 //! untouched and the returned index always refers to the original slice.
 
-use ron_core::Severity;
+use ronin_core::Severity;
 
 use crate::diagnostics_map::DiagnosticView;
 
@@ -20,7 +20,7 @@ use crate::diagnostics_map::DiagnosticView;
 /// ascending — by sorting a copy of the diagnostic indices (the input slice is
 /// never reordered). Each row shows a severity icon, the stable `RON-Pxxxx` /
 /// `RON-Vxxxx` code, the message, the one-based `line:col`, and a `source` tag
-/// (`(ron-core)` for structural findings, `(ron-types)` for type findings) so a
+/// (`(ronin-core)` for structural findings, `(ronin-types)` for type findings) so a
 /// reader can tell the two apart. Returns `Some(i)`, where `i` indexes the
 /// **original** `diagnostics` slice, when the user clicks a row this frame;
 /// otherwise `None`. An empty slice renders a faint "No problems" state. Clicking a
@@ -45,8 +45,8 @@ pub fn problems_panel(ui: &mut egui::Ui, diagnostics: &[DiagnosticView]) -> Opti
         let d = &diagnostics[idx];
         let (line, col) = d.line_col.0;
         // Lines/columns are zero-based internally; present them one-based. The
-        // `source` tag distinguishes type (`ron-types`) from structural
-        // (`ron-core`) findings without disturbing the existing fields.
+        // `source` tag distinguishes type (`ronin-types`) from structural
+        // (`ronin-core`) findings without disturbing the existing fields.
         let label = format!(
             "{} {}  {}  [{}:{}]  ({})",
             severity_icon(d.severity),

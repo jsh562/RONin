@@ -39,8 +39,8 @@
 //! deep document cannot blow the stack. It is a pure read over the CST — scanning
 //! changes **zero** document bytes (FR-020).
 
-use ron_core::ast;
-use ron_core::{CstDocument, SyntaxNode};
+use ronin_core::ast;
+use ronin_core::{CstDocument, SyntaxNode};
 
 use super::classifier::{self, record_fields, record_shape, FallbackReason};
 use super::view_state::{PathStep, StructuralPath};
@@ -299,7 +299,7 @@ fn join_label(steps: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ron_core::parse;
+    use ronin_core::parse;
 
     fn scan(src: &str) -> Vec<TableSection> {
         scan_table_sections(&parse(src))

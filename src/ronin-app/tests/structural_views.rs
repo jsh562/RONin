@@ -22,7 +22,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use ron_core::{ast, parse, SyntaxNode};
+use ronin_core::{ast, parse, SyntaxNode};
 use ronin_app::document::EditorDocument;
 use ronin_app::reparse::ReparseWorker;
 use ronin_app::structural::classifier::{classify, FallbackReason};

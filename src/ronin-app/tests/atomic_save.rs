@@ -49,12 +49,12 @@ fn unique_temp_dir(tag: &str) -> PathBuf {
     dir
 }
 
-/// The directory holding the shared serde/Bevy RON corpus (`ron-core` fixtures),
+/// The directory holding the shared serde/Bevy RON corpus (`ronin-core` fixtures),
 /// reached relative to this crate's manifest dir.
 fn corpus_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
-        .join("ron-core")
+        .join("ronin-core")
         .join("tests")
         .join("corpus")
         .join("valid")

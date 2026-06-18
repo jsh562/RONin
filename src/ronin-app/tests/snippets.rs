@@ -24,7 +24,7 @@ use std::path::PathBuf;
 use egui_kittest::kittest::Queryable;
 use egui_kittest::Harness;
 
-use ron_core::parse;
+use ronin_core::parse;
 use ronin_app::app::{App, NoticeKind};
 use ronin_app::settings::AppSettings;
 use ronin_app::snippets::{

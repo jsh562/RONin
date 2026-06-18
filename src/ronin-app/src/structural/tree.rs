@@ -15,15 +15,15 @@
 //! # How an edit flows (FR-002/FR-003/FR-013/FR-014)
 //!
 //! The view never mutates the buffer directly. Each op resolves the target node's
-//! [`StructuralPath`] against the live CST, derives a `ron-core`
-//! [`StructuralOp`](ron_core::StructuralOp) — a [`ParentRef`](ron_core::ParentRef)
+//! [`StructuralPath`] against the live CST, derives a `ronin-core`
+//! [`StructuralOp`](ronin_core::StructuralOp) — a [`ParentRef`](ronin_core::ParentRef)
 //! plus a child index — and calls
 //! [`EditorDocument::apply_structural_edit`](crate::document::EditorDocument::apply_structural_edit),
 //! which records ONE E007 undo unit, prints the new CST byte-losslessly, and
-//! requests an off-frame reparse. A [`BlockedReason`](ron_core::BlockedReason)
+//! requests an off-frame reparse. A [`BlockedReason`](ronin_core::BlockedReason)
 //! (e.g. a rename collision) is surfaced inline with no byte change and no undo
 //! entry (FR-003/FR-014). The path→op resolution lives here in `ronin-app`
-//! (ADR-0007); the pure CST→CST transform lives in `ron-core`.
+//! (ADR-0007); the pure CST→CST transform lives in `ronin-core`.
 //!
 //! # Inline editors, never a modal (FR-002)
 //!
@@ -46,9 +46,9 @@ use std::time::Instant;
 
 use egui::{Key, RichText, Ui};
 
-use ron_core::ast;
-use ron_core::transform::{ParentRef, StructuralOp};
-use ron_core::{BlockedReason, CstDocument, SyntaxNode};
+use ronin_core::ast;
+use ronin_core::transform::{ParentRef, StructuralOp};
+use ronin_core::{BlockedReason, CstDocument, SyntaxNode};
 
 use crate::byte_to_char::ByteCharIndex;
 use crate::diagnostics_map::DiagnosticView;
@@ -533,7 +533,7 @@ fn option_shape_of(node: &SyntaxNode) -> Option<OptionShape> {
             // `Some(inner)`: a named tuple `Some` with one positional item.
             let name = t
                 .syntax()
-                .first_token_of(ron_core::SyntaxKind::Ident)
+                .first_token_of(ronin_core::SyntaxKind::Ident)
                 .map(|tok| tok.text().to_string());
             if name.as_deref() == Some("Some") {
                 let inner = t.items().next().map(|v| v.syntax().text())?;
@@ -587,7 +587,7 @@ fn classify_editable(
                 // Bool → toggle; everything else (strings / numbers / chars /
                 // unmapped scalars) → the text-field fallback (FR-002 totality).
                 let widget = match lit.token_kind() {
-                    Some(ron_core::SyntaxKind::TrueKw | ron_core::SyntaxKind::FalseKw) => {
+                    Some(ronin_core::SyntaxKind::TrueKw | ronin_core::SyntaxKind::FalseKw) => {
                         LeafWidget::Bool
                     }
                     _ => LeafWidget::Text,
@@ -650,7 +650,7 @@ fn summarize(node: &SyntaxNode) -> String {
 
 /// Collect the diagnostics whose char range overlaps `node`'s char range (FR-018).
 ///
-/// `ron-core` ranges are byte ranges; the [`DiagnosticView`] carries char ranges,
+/// `ronin-core` ranges are byte ranges; the [`DiagnosticView`] carries char ranges,
 /// so we compare against the node's char extent (computed from its byte range over
 /// the document text). Overlap (not containment) is used so a finding that lands on
 /// the field name or spans the value still attaches to the node.
@@ -775,7 +775,7 @@ impl EditorDocument {
         &self,
         path: &StructuralPath,
     ) -> Result<(ParentRef, usize), BlockedReason> {
-        let cst = ron_core::parse(&self.buffer);
+        let cst = ronin_core::parse(&self.buffer);
         resolve_parent_and_index(&cst, path).ok_or(BlockedReason::TargetNotFound)
     }
 
@@ -811,7 +811,7 @@ impl EditorDocument {
         worker: &ReparseWorker,
         now: Instant,
     ) -> Result<(), BlockedReason> {
-        let cst = ron_core::parse(&self.buffer);
+        let cst = ronin_core::parse(&self.buffer);
         let parent_node =
             resolve_path(&cst.root(), parent_path).ok_or(BlockedReason::TargetNotFound)?;
         let parent = parent_ref_of(&parent_node).ok_or(BlockedReason::InvalidPayload)?;
@@ -837,7 +837,7 @@ impl EditorDocument {
         worker: &ReparseWorker,
         now: Instant,
     ) -> Result<(), BlockedReason> {
-        let cst = ron_core::parse(&self.buffer);
+        let cst = ronin_core::parse(&self.buffer);
         let parent_node =
             resolve_path(&cst.root(), parent_path).ok_or(BlockedReason::TargetNotFound)?;
         let parent = parent_ref_of(&parent_node).ok_or(BlockedReason::InvalidPayload)?;
@@ -860,7 +860,7 @@ impl EditorDocument {
         now: Instant,
     ) -> Result<(), BlockedReason> {
         let (parent, index) = self.tree_resolve_parent(path)?;
-        // RemoveField / RemoveElement share the same removal path in ron-core;
+        // RemoveField / RemoveElement share the same removal path in ronin-core;
         // pick the op matching the parent so the addressing is type-correct.
         let op = match parent {
             ParentRef::List(_) | ParentRef::Tuple(_) => {
@@ -881,7 +881,7 @@ impl EditorDocument {
         worker: &ReparseWorker,
         now: Instant,
     ) -> Result<(), BlockedReason> {
-        let cst = ron_core::parse(&self.buffer);
+        let cst = ronin_core::parse(&self.buffer);
         let parent_node =
             resolve_path(&cst.root(), parent_path).ok_or(BlockedReason::TargetNotFound)?;
         let parent = parent_ref_of(&parent_node).ok_or(BlockedReason::InvalidPayload)?;
@@ -922,7 +922,7 @@ impl EditorDocument {
         worker: &ReparseWorker,
         now: Instant,
     ) -> Result<(), BlockedReason> {
-        let cst = ron_core::parse(&self.buffer);
+        let cst = ronin_core::parse(&self.buffer);
         let variant = resolve_path(&cst.root(), path).ok_or(BlockedReason::TargetNotFound)?;
         if ast::EnumVariant::cast(variant.clone()).is_none() {
             return Err(BlockedReason::InvalidPayload);
@@ -1815,7 +1815,7 @@ fn blocked_message(reason: BlockedReason) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ron_core::parse;
+    use ronin_core::parse;
 
     fn model_of(src: &str) -> TreeFormModel {
         TreeFormModel::derive(&parse(src), &[])

@@ -51,9 +51,9 @@
 //! (analogous to [`json_to_ron`](crate::interop::json_to_ron)'s `MAX_JSON_DEPTH`
 //! guard) and never crashes or hangs.
 
-use ron_core::{CstDocument, TextRange};
-use ron_types::extension::RonKind;
-use ron_types::model::{
+use ronin_core::{CstDocument, TextRange};
+use ronin_types::extension::RonKind;
+use ronin_types::model::{
     Discriminator, Field, NodeKind, Primitive, TypeModel, TypeNode, TypeRef, Variant, VariantShape,
 };
 
@@ -87,7 +87,7 @@ const FILL_IN_DETAIL: &str = "placeholder \u{2014} fill in (the field type is un
 /// in" diagnostics (FR-010, data-model §DerivedScaffold).
 ///
 /// [`text`](Self::text) is the emitted RON source; [`document`](Self::document) is
-/// that same text parsed into a lossless `ron_core` CST, ready to open in a new tab.
+/// that same text parsed into a lossless `ronin_core` CST, ready to open in a new tab.
 /// [`fill_in_diagnostics`](Self::fill_in_diagnostics) is the one-list source of the
 /// inline "placeholder — fill in" diagnostics (one per `unknown` sentinel /
 /// depth-bounded cut), surfaced through the SAME E006 surface as conversion losses
@@ -97,7 +97,7 @@ pub struct DeriveScaffold {
     /// The emitted RON scaffold source text (what [`document`](Self::document) was
     /// parsed from).
     pub text: String,
-    /// The scaffold parsed into a lossless `ron_core` CST (always parses, SC-005).
+    /// The scaffold parsed into a lossless `ronin_core` CST (always parses, SC-005).
     pub document: CstDocument,
     /// The inline "placeholder — fill in" diagnostics — one [`LossyConstruct`] per
     /// `unknown`-resolved sentinel (and per depth-bounded recursion cut), each
@@ -138,10 +138,10 @@ pub fn derive_scaffold(model: &TypeModel, root_type: &str) -> DeriveScaffold {
     emitter.emit_node(&mut text, root, 0);
     text.push('\n');
 
-    // The scaffold MUST parse cleanly (SC-005). `ron_core::parse` is error-tolerant
+    // The scaffold MUST parse cleanly (SC-005). `ronin_core::parse` is error-tolerant
     // and never drops bytes, so this always yields a CST; the per-kind policy keeps
     // the emitted text grammar-valid.
-    let document = ron_core::parse(&text);
+    let document = ronin_core::parse(&text);
 
     DeriveScaffold {
         text,

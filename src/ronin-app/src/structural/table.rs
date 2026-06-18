@@ -42,14 +42,14 @@
 //! # How an edit flows (FR-006/FR-007/FR-013/FR-014)
 //!
 //! The view never mutates the buffer directly. Each op resolves the section's
-//! [`StructuralPath`] against the live CST, derives a `ron-core`
-//! [`StructuralOp`](ron_core::StructuralOp) (a [`ParentRef`](ron_core::ParentRef)
+//! [`StructuralPath`] against the live CST, derives a `ronin-core`
+//! [`StructuralOp`](ronin_core::StructuralOp) (a [`ParentRef`](ronin_core::ParentRef)
 //! over the list plus a child index / field name) and calls
 //! [`EditorDocument::apply_structural_edit`](crate::document::EditorDocument::apply_structural_edit),
 //! which records ONE E007 undo unit, prints the new CST byte-losslessly, and
 //! requests an off-frame reparse (FR-013/FR-014). A blocked op surfaces inline with
 //! no byte change and no undo entry. The path→op resolution lives here in
-//! `ronin-app` (ADR-0007); the pure CST→CST transform lives in `ron-core`.
+//! `ronin-app` (ADR-0007); the pure CST→CST transform lives in `ronin-core`.
 //!
 //! # Diagnostics surface consistently with the text view (FR-018 / SC-008)
 //!
@@ -65,9 +65,9 @@ use std::time::Instant;
 use egui::{Key, RichText, Ui};
 use egui_extras::{Column as TableColumn, TableBuilder};
 
-use ron_core::ast;
-use ron_core::transform::{ParentRef, StructuralOp};
-use ron_core::{BlockedReason, CstDocument, SyntaxNode};
+use ronin_core::ast;
+use ronin_core::transform::{ParentRef, StructuralOp};
+use ronin_core::{BlockedReason, CstDocument, SyntaxNode};
 
 use crate::byte_to_char::ByteCharIndex;
 use crate::diagnostics_map::DiagnosticView;
@@ -1015,7 +1015,7 @@ fn summarize(node: &SyntaxNode) -> String {
 
 /// Collect the diagnostics whose char range overlaps `node`'s char range (FR-018).
 ///
-/// `ron-core` ranges are byte ranges; the [`DiagnosticView`] carries char ranges,
+/// `ronin-core` ranges are byte ranges; the [`DiagnosticView`] carries char ranges,
 /// so we compare against the node's char extent (computed from its byte range over
 /// the document text). Mirrors the tree view's attachment so a cell + a tree node
 /// surface the same finding consistently (FR-018).
@@ -1144,7 +1144,7 @@ impl EditorDocument {
     /// Re-resolve the list addressed by `section` against the live buffer to a
     /// [`ParentRef::List`], or [`BlockedReason::TargetNotFound`] (FR-016).
     fn table_resolve_list(&self, section: &StructuralPath) -> Result<ParentRef, BlockedReason> {
-        let cst = ron_core::parse(&self.buffer);
+        let cst = ronin_core::parse(&self.buffer);
         let node = resolve_path(&cst.root(), section).ok_or(BlockedReason::TargetNotFound)?;
         if ast::List::cast(node.clone()).is_some() {
             Ok(ParentRef::List(node))
@@ -1160,7 +1160,7 @@ impl EditorDocument {
         section: &StructuralPath,
         row: usize,
     ) -> Result<(ParentRef, SyntaxNode), BlockedReason> {
-        let cst = ron_core::parse(&self.buffer);
+        let cst = ronin_core::parse(&self.buffer);
         let row_path = section.child(PathStep::Index(row));
         let node = resolve_path(&cst.root(), &row_path).ok_or(BlockedReason::TargetNotFound)?;
         match ast::Value::cast(node.clone()) {
@@ -1244,7 +1244,7 @@ impl EditorDocument {
         worker: &ReparseWorker,
         now: Instant,
     ) -> Result<(), BlockedReason> {
-        let cst = ron_core::parse(&self.buffer);
+        let cst = ronin_core::parse(&self.buffer);
         let node = resolve_path(&cst.root(), value_ref).ok_or(BlockedReason::TargetNotFound)?;
         let (parent, index) = Self::parent_and_index_of(&node).ok_or(BlockedReason::InvalidPayload)?;
         self.apply_structural_edit(
@@ -1262,7 +1262,7 @@ impl EditorDocument {
     /// value node `node` within it (the address [`StructuralOp::SetValue`] needs), or
     /// `None` when `node` is not a value-position child of an editable collection.
     fn parent_and_index_of(node: &SyntaxNode) -> Option<(ParentRef, usize)> {
-        use ron_core::SyntaxKind;
+        use ronin_core::SyntaxKind;
         let immediate = node.parent()?;
         match immediate.kind() {
             // A struct field / map entry / enum-variant payload entry wraps the value.
@@ -1304,7 +1304,7 @@ impl EditorDocument {
     ///
     /// `value` is the new element's literal RON text (e.g. `(name: "c", hp: 3)`).
     /// An appended row inherits the collection's layout; appending into an empty
-    /// collection uses the document default (AD-005, handled in `ron-core` T004).
+    /// collection uses the document default (AD-005, handled in `ronin-core` T004).
     pub fn apply_table_append_row(
         &mut self,
         section: &StructuralPath,
@@ -2384,7 +2384,7 @@ fn blocked_message(reason: BlockedReason) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ron_core::parse;
+    use ronin_core::parse;
 
     fn model_of(src: &str) -> TableModel {
         TableModel::derive(&parse(src), &StructuralPath::root(), &[])

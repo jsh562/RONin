@@ -23,7 +23,7 @@
 //!
 //! # E007 — Bounded CST-backed undo/redo (OBJ3)
 //!
-//! The document owns a WASM-clean [`UndoStack`](ron_core::UndoStack) keyed to its
+//! The document owns a WASM-clean [`UndoStack`](ronin_core::UndoStack) keyed to its
 //! [`CursorState`] ([`EditorDocument::undo`]). The shell records a snapshot at
 //! coalesce-unit boundaries off the per-frame hot path
 //! ([`EditorDocument::record_undo_snapshot`]) — at most once per coalesce window,
@@ -34,7 +34,7 @@
 //! operate **solely** on the in-memory buffer/CST/cursor and never read or write
 //! the file (TR-018). The coalesce *timing* decision is computed here
 //! (`Instant` elapsed since the last edit vs the configured window) and passed to
-//! `ron-core` as a plain `bool`, keeping `ron-core` clock-free (TR-014).
+//! `ronin-core` as a plain `bool`, keeping `ronin-core` clock-free (TR-014).
 //!
 //! The dirty-tracking and `edit_generation` machinery here is the seam both OBJ2
 //! and OBJ3 build on.
@@ -45,8 +45,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use ron_core::transform::{apply_structural, StructuralOp, TransformOutcome};
-use ron_core::{BlockedReason, UndoEntry, UndoStack};
+use ronin_core::transform::{apply_structural, StructuralOp, TransformOutcome};
+use ronin_core::{BlockedReason, UndoEntry, UndoStack};
 
 use crate::bevy::mode::{Mode, ModeState};
 use crate::binding::{BindingOrigin, BindingState, DocumentOverride, TypeBinding};
@@ -511,7 +511,7 @@ pub struct EditorDocument {
     last_undo_generation: Option<u64>,
     /// The instant the last undo snapshot was recorded (E007 OBJ3 — TR-027).
     ///
-    /// The caller-side coalesce timing source (`ron-core` measures no clock,
+    /// The caller-side coalesce timing source (`ronin-core` measures no clock,
     /// TR-014): [`record_undo_snapshot`](Self::record_undo_snapshot) compares the
     /// elapsed time since this against the configured coalesce window to decide
     /// whether the new edit extends the current undo unit or starts a new one.
@@ -605,7 +605,7 @@ impl EditorDocument {
             undo: UndoStack::new(),
             last_undo_generation: None,
             last_undo_instant: None,
-            undo_coalesce_window: ron_core::undo::DEFAULT_COALESCE_WINDOW,
+            undo_coalesce_window: ronin_core::undo::DEFAULT_COALESCE_WINDOW,
             view_state: ViewSelectionAndFocus::new(),
             projection: None,
             tree_error: None,
@@ -659,7 +659,7 @@ impl EditorDocument {
             undo: UndoStack::new(),
             last_undo_generation: None,
             last_undo_instant: None,
-            undo_coalesce_window: ron_core::undo::DEFAULT_COALESCE_WINDOW,
+            undo_coalesce_window: ronin_core::undo::DEFAULT_COALESCE_WINDOW,
             view_state: ViewSelectionAndFocus::new(),
             projection: None,
             tree_error: None,
@@ -716,7 +716,7 @@ impl EditorDocument {
             undo: UndoStack::new(),
             last_undo_generation: None,
             last_undo_instant: None,
-            undo_coalesce_window: ron_core::undo::DEFAULT_COALESCE_WINDOW,
+            undo_coalesce_window: ronin_core::undo::DEFAULT_COALESCE_WINDOW,
             view_state: ViewSelectionAndFocus::new(),
             projection: None,
             tree_error: None,
@@ -875,7 +875,7 @@ impl EditorDocument {
     /// keystroke, so it stays off the per-frame hot path (TR-016/TR-023, SC-008).
     fn undo_entry_of_current(&self) -> UndoEntry<CursorState> {
         UndoEntry::new(
-            ron_core::parse(&self.buffer),
+            ronin_core::parse(&self.buffer),
             self.buffer.clone(),
             self.cursor,
         )
@@ -889,10 +889,10 @@ impl EditorDocument {
     /// [`edit_generation`](Self::edit_generation) has advanced past the last
     /// recorded generation (a burst of edits in one frame snapshots once, the
     /// latest text). The coalesce *timing* decision is made here, caller-side
-    /// (`ron-core` measures no clock, TR-014): the new edit **extends** the current
+    /// (`ronin-core` measures no clock, TR-014): the new edit **extends** the current
     /// undo unit when it falls within the configured coalesce window of the prior
     /// snapshot, and **starts a new unit** otherwise (TR-027). A new edit after an
-    /// undo clears the redo stack inside `ron-core` (TR-012).
+    /// undo clears the redo stack inside `ronin-core` (TR-012).
     ///
     /// Returns `true` when a snapshot was recorded (the buffer had advanced).
     pub fn record_undo_snapshot(&mut self, now: Instant) -> bool {
@@ -1041,7 +1041,7 @@ impl EditorDocument {
     /// Bumps the monotonic [`edit_generation`](Self::edit_generation) so the next
     /// [`request_reparse`](Self::request_reparse) ships the latest text and any
     /// in-flight stale result is later discarded by generation comparison. This is
-    /// the *only* per-frame edit hook; it never calls `ron_core::parse` directly.
+    /// the *only* per-frame edit hook; it never calls `ronin_core::parse` directly.
     ///
     /// It also marks the structural projection **stale** (E008 — FR-015): an edit
     /// has been requested but the off-frame reparse that re-derives the projection
@@ -1681,7 +1681,7 @@ impl EditorDocument {
     ///
     /// 1. Parse the **live buffer** into a CST (the resolved source of truth the
     ///    caller's [`StructuralOp`] addresses against).
-    /// 2. Call `ron-core`'s pure [`apply_structural`]; the op's [`ParentRef`]
+    /// 2. Call `ronin-core`'s pure [`apply_structural`]; the op's [`ParentRef`]
     ///    /node addressing is `(kind + start-offset)`-based and is re-resolved
     ///    inside the transform against this exact CST.
     /// 3. On [`TransformOutcome::Applied`] install the new document text by
@@ -1699,11 +1699,11 @@ impl EditorDocument {
     /// from a typing run, so its undo restores exactly the pre-edit bytes and its
     /// redo replays exactly the post-edit bytes (FR-014, SC-002).
     ///
-    /// `now` is the caller-side clock for the undo coalesce decision (`ron-core`
+    /// `now` is the caller-side clock for the undo coalesce decision (`ronin-core`
     /// measures no clock — TR-014); the structural snapshot is always recorded as a
     /// non-coalescing boundary regardless of timing.
     ///
-    /// [`ParentRef`]: ron_core::ParentRef
+    /// [`ParentRef`]: ronin_core::ParentRef
     pub fn apply_structural_edit(
         &mut self,
         op: StructuralOp,
@@ -1711,7 +1711,7 @@ impl EditorDocument {
         now: Instant,
     ) -> Result<(), BlockedReason> {
         // 1. The resolved CST the op addresses against is the live buffer's parse.
-        let cst = ron_core::parse(&self.buffer);
+        let cst = ronin_core::parse(&self.buffer);
         // 2/3/4. Apply the pure transform; only an `Applied` outcome mutates.
         match apply_structural(&cst, op) {
             TransformOutcome::Applied(new_cst) => {
@@ -1722,7 +1722,7 @@ impl EditorDocument {
                 // Install the new text by printing the new CST: untouched regions
                 // are byte-for-byte identical (FR-013); only the touched subtree
                 // changed.
-                self.buffer = ron_core::print(&new_cst);
+                self.buffer = ronin_core::print(&new_cst);
                 // One logical op = one undo unit. Bump the generation so the next
                 // `record_undo_snapshot` snapshots THIS new state, and force a fresh
                 // (non-coalescing) unit so undo restores exactly the prior bytes.
@@ -1768,7 +1768,7 @@ impl EditorDocument {
     /// 4. Request an off-frame reparse so validation + the projection re-derive
     ///    against the new text.
     ///
-    /// `now` is the caller-side clock for the undo coalesce decision (`ron-core`
+    /// `now` is the caller-side clock for the undo coalesce decision (`ronin-core`
     /// measures no clock — TR-014); the commit snapshot is always recorded as a
     /// non-coalescing boundary regardless of timing.
     ///
@@ -1778,7 +1778,7 @@ impl EditorDocument {
     /// committed here.
     pub fn commit_transformed_cst(
         &mut self,
-        new_cst: &ron_core::CstDocument,
+        new_cst: &ronin_core::CstDocument,
         worker: &ReparseWorker,
         now: Instant,
     ) {
@@ -1787,7 +1787,7 @@ impl EditorDocument {
         self.record_undo_snapshot(now);
         // Install the new text by printing the new CST: untouched regions are
         // byte-for-byte identical (FR-016); only the elided/expanded fields changed.
-        self.buffer = ron_core::print(new_cst);
+        self.buffer = ronin_core::print(new_cst);
         // One logical op = one undo unit. Bump the generation so the next snapshot
         // captures THIS new state, and force a fresh (non-coalescing) unit so undo
         // restores exactly the prior bytes (SC-006).
@@ -1832,7 +1832,7 @@ impl EditorDocument {
         // *separate* undo unit and never merges with a prior keystroke run (FR-003).
         self.record_undo_snapshot(now);
         // Install the converted text directly — it is JSON/JSONC, not a RON tree, so
-        // it is NOT routed through `ron_core::print` (that would re-parse + corrupt
+        // it is NOT routed through `ronin_core::print` (that would re-parse + corrupt
         // it). The source bytes are unchanged until exactly this assignment.
         self.buffer = text;
         // One logical op = one undo unit. Bump the generation so the next snapshot
@@ -1856,7 +1856,7 @@ impl EditorDocument {
 /// document's active mode (FR-013):
 ///
 /// * **Serde mode** (`result.type_diagnostics`) → unchanged: deduped against the
-///   structural set via [`ron_validate::dedup_against_structural`] (a type finding
+///   structural set via [`ronin_validate::dedup_against_structural`] (a type finding
 ///   overlapping a structural one is suppressed — structural wins, FR-017), then
 ///   mapped via [`map_diagnostic`]. Byte-for-byte the prior behavior.
 /// * **Bevy mode** (`result.scene_diagnostics`) → each [`SceneDiagnostic`] is
@@ -1880,7 +1880,7 @@ pub fn merge_type_diagnostics(result: &ParseResult, buffer: &str) -> Vec<Diagnos
     // Serde mode: append the deduped type set (structural wins on overlap, FR-017).
     // Suppress type findings that overlap a structural one. The structural set is
     // passed by reference and is never mutated.
-    let type_diags = ron_validate::dedup_against_structural(
+    let type_diags = ronin_validate::dedup_against_structural(
         result.type_diagnostics.clone(),
         &result.diagnostics,
     );

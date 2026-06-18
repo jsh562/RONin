@@ -11,9 +11,9 @@ The Cargo workspace:
 
 | Crate | Role |
 |-------|------|
-| `ron-core` | I/O-free, WASM-clean RON engine (lossless CST: parse / format / transform) |
-| `ron-types` | Static Rust type extraction → normalized type model |
-| `ron-validate` | Schema-optional, type-aware validation |
+| `ronin-core` | I/O-free, WASM-clean RON engine (lossless CST: parse / format / transform) |
+| `ronin-types` | Static Rust type extraction → normalized type model |
+| `ronin-validate` | Schema-optional, type-aware validation |
 | `ronin-app` | The egui/eframe desktop editor (also installable via `cargo install` / `cargo binstall`) |
 
 ## Install

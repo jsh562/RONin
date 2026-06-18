@@ -3,9 +3,9 @@
 //!
 //! Snippets are **entirely** a `ronin-app` (native) concern: the built-in set is
 //! compiled in here, the optional user file is read from the OS config dir via
-//! `serde_json`, and expansion / tab-stop navigation live here too. `ron-core`
+//! `serde_json`, and expansion / tab-stop navigation live here too. `ronin-core`
 //! owns no snippet logic (project-instructions §II); this module only *consumes*
-//! `ron_core::parse` to verify that an expanded body round-trips before it is ever
+//! `ronin_core::parse` to verify that an expanded body round-trips before it is ever
 //! committed to a buffer (§I, never corrupt user data).
 //!
 //! # Pieces
@@ -30,7 +30,7 @@
 //! A snippet is *useful* only if every expansion (even with the default
 //! placeholder values left untouched) produces parseable, round-trippable RON.
 //! [`Snippet::default_expansion_round_trips`] and [`SnippetSet`]'s merge use
-//! [`body_round_trips`] (which calls `ron_core::parse`) to keep a snippet whose
+//! [`body_round_trips`] (which calls `ronin_core::parse`) to keep a snippet whose
 //! default expansion fails to parse out of the effective set — a malformed entry
 //! is dropped at load, never allowed to insert corrupt text.
 //!
@@ -269,12 +269,12 @@ pub fn BUILT_INS() -> Vec<Snippet> {
 /// Whether `text` parses to a clean CST with no diagnostics (FR-018).
 ///
 /// The single round-trip gate used everywhere a snippet body / expansion must be
-/// proven safe before it can reach a buffer. Delegates to `ron_core::parse` and
+/// proven safe before it can reach a buffer. Delegates to `ronin_core::parse` and
 /// checks for **zero** diagnostics: an expansion that parses cleanly round-trips
 /// losslessly through the CST (project-instructions §I).
 #[must_use]
 pub fn body_round_trips(text: &str) -> bool {
-    ron_core::parse(text).diagnostics().is_empty()
+    ronin_core::parse(text).diagnostics().is_empty()
 }
 
 /// The status of a [`UserSnippetFile`] load (FR-017).
@@ -1033,8 +1033,8 @@ pub fn insert_snippet(buffer: &str, caret_char: usize, body: &str) -> Option<Sni
     // Verify-before-commit (Principle I / FR-018): the splice must not add a NEW
     // parse diagnostic. We allow it to reduce diagnostics (completing an in-progress
     // construct) but never to introduce one the original buffer did not have.
-    let before = ron_core::parse(buffer).diagnostics().len();
-    let after = ron_core::parse(&new_buffer).diagnostics().len();
+    let before = ronin_core::parse(buffer).diagnostics().len();
+    let after = ronin_core::parse(&new_buffer).diagnostics().len();
     if after > before {
         return None;
     }

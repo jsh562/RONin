@@ -4,8 +4,8 @@
 
 `ronin-app` is the application shell that wires the RONin workspace into an interactive editor:
 
-- **Lossless editing** over the `ron-core` CST — comments, ordering, and formatting are preserved on every save.
-- **Type-aware validation** (`ron-validate`) with inline diagnostics + a Problems panel, schema-optional and progressively degrading.
+- **Lossless editing** over the `ronin-core` CST — comments, ordering, and formatting are preserved on every save.
+- **Type-aware validation** (`ronin-validate`) with inline diagnostics + a Problems panel, schema-optional and progressively degrading.
 - **Structural & table editing** — tree/form and spreadsheet views over the same document.
 - **Non-destructive persistence** — atomic save + crash-recovery sidecars; bounded CST-backed undo/redo.
 - **Bevy mode** — scene-aware validation + defaults elision driven by an exported Bevy type registry (consumed as data; no `bevy` dependency).

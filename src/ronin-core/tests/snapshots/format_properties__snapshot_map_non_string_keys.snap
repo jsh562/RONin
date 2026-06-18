@@ -1,0 +1,5 @@
+---
+source: src/ronin-core/tests/format_properties.rs
+expression: "snap(\"{1:\\\"one\\\",'c':true}\")"
+---
+{1: "one", 'c': true}

@@ -203,13 +203,13 @@ fn selection_is_table_able(doc: &EditorDocument, path: &StructuralPath) -> bool 
     };
     let root = parse.cst.root();
     matches!(
-        resolve_path(&root, path).and_then(ron_core::ast::Value::cast),
+        resolve_path(&root, path).and_then(ronin_core::ast::Value::cast),
         Some(
-            ron_core::ast::Value::List(_)
-                | ron_core::ast::Value::Map(_)
-                | ron_core::ast::Value::Struct(_)
-                | ron_core::ast::Value::Tuple(_)
-                | ron_core::ast::Value::EnumVariant(_)
+            ronin_core::ast::Value::List(_)
+                | ronin_core::ast::Value::Map(_)
+                | ronin_core::ast::Value::Struct(_)
+                | ronin_core::ast::Value::Tuple(_)
+                | ronin_core::ast::Value::EnumVariant(_)
         )
     )
 }

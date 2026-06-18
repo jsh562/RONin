@@ -6,7 +6,7 @@
 //!
 //! * [`scene`] — interprets a `.scn.ron` CST into resources + entities +
 //!   per-entity components keyed by fully-qualified type path (FR-004).
-//! * [`validate`] — drives the generic, Bevy-agnostic `ron-validate`
+//! * [`validate`] — drives the generic, Bevy-agnostic `ronin-validate`
 //!   subtree-vs-type entry per component/resource, with progressive degradation
 //!   and the staleness advisory (FR-005/FR-006/FR-008).
 //! * [`mode`] — per-document mode selection (`{serde, Bevy}`) and the
@@ -14,7 +14,7 @@
 //! * [`elision`] — lossless defaults elision / expand-to-explicit via the E008
 //!   structural transforms (FR-014/FR-015/FR-016).
 //!
-//! The Bevy registry **ingestion** itself lives native-side in `ron-types`
+//! The Bevy registry **ingestion** itself lives native-side in `ronin-types`
 //! (`BevySource`); this module is the application-layer scene interpretation and
 //! orchestration that the WASM-clean core never sees.
 

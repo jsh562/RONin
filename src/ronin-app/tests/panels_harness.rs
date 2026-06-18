@@ -45,7 +45,7 @@ fn diagnostics_seam_shows_empty_state_when_no_problems() {
 
 #[test]
 fn diagnostics_seam_lists_a_diagnostic_row() {
-    use ron_core::{DiagnosticCode, Severity};
+    use ronin_core::{DiagnosticCode, Severity};
 
     let view = DiagnosticView {
         char_range: (4, 5),

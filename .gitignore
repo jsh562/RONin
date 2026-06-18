@@ -1,6 +1,6 @@
 # Rust build artifacts
 /target/
-/src/ron-core/fuzz/target/
+/src/ronin-core/fuzz/target/
 **/*.rs.bk
 *.pdb
 

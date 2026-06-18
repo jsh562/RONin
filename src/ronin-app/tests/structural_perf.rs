@@ -26,7 +26,7 @@
 
 use std::time::{Duration, Instant};
 
-use ron_core::Diagnostic;
+use ronin_core::Diagnostic;
 
 use ronin_app::diagnostics_map::{map_diagnostic, DiagnosticView};
 use ronin_app::document::EditorDocument;
@@ -94,8 +94,8 @@ fn diagnostics_for_source(source: &str) -> Vec<DiagnosticView> {
         }
         if start < end {
             let diag = Diagnostic::new(
-                ron_core::DiagnosticCode::UnexpectedToken,
-                ron_core::TextRange::new(start, end),
+                ronin_core::DiagnosticCode::UnexpectedToken,
+                ronin_core::TextRange::new(start, end),
                 "synthetic",
             );
             views.push(map_diagnostic(&diag, source));
@@ -269,10 +269,10 @@ fn localize_structural_derive_cost() {
     eprintln!("source bytes = {}", src.len());
 
     let t0 = Instant::now();
-    let cst = ron_core::parse(&src);
+    let cst = ronin_core::parse(&src);
     let parse_ms = t0.elapsed().as_secs_f64() * 1000.0;
     let structural_diags = cst.diagnostics().len();
-    eprintln!("ron_core::parse = {parse_ms:.3} ms");
+    eprintln!("ronin_core::parse = {parse_ms:.3} ms");
     eprintln!("structural diagnostics from cst = {structural_diags}");
 
     let diags = diagnostics_for_source(&src);

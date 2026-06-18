@@ -21,8 +21,8 @@
 #     ronin-app's version) is the single release trigger (HINT-002 / STF-001);
 #     per-crate git tags release-plz records are provenance-only, never a trigger.
 #
-# The root-excluded `src/ron-core/fuzz` crate is NOT a workspace member (root
-# Cargo.toml `exclude = ["src/ron-core/fuzz"]`), so release-plz never sees it; it
+# The root-excluded `src/ronin-core/fuzz` crate is NOT a workspace member (root
+# Cargo.toml `exclude = ["src/ronin-core/fuzz"]`), so release-plz never sees it; it
 # can never be versioned or published (OR-005 / HINT-005). The explicit
 # `[[package]]` block below additionally pins `publish = false` as defense in
 # depth in case the crate is ever re-added as a member.
@@ -80,27 +80,27 @@ dependencies_update = false
 # crates whose manifest version is not yet on crates.io, and it ALWAYS publishes
 # in DEPENDENCY ORDER. release-plz derives the order from the Cargo dependency
 # graph automatically; the explicit per-crate blocks below make the intended
-# order — ron-core -> ron-types -> ron-validate -> ronin-app — auditable.
+# order — ronin-core -> ronin-types -> ronin-validate -> ronin-app — auditable.
 #
-#   ron-core      : leaf, no workspace deps                       (publish 1st)
-#   ron-types     : leaf, no workspace deps                       (publish 2nd)
-#   ron-validate  : depends on ron-core                           (publish 3rd)
-#   ronin-app     : depends on ron-core + ron-types + ron-validate;
+#   ronin-core      : leaf, no workspace deps                       (publish 1st)
+#   ronin-types     : leaf, no workspace deps                       (publish 2nd)
+#   ronin-validate  : depends on ronin-core                           (publish 3rd)
+#   ronin-app     : depends on ronin-core + ronin-types + ronin-validate;
 #                   carries the UMBRELLA product version (OR-008) (publish last)
 # ---------------------------------------------------------------------------
 
 [[package]]
-name = "ron-core"
+name = "ronin-core"
 publish = true
 # Independent version source-of-truth is this crate's own Cargo.toml; bumped per
 # its own conventional commits. No version linkage to the others.
 
 [[package]]
-name = "ron-types"
+name = "ronin-types"
 publish = true
 
 [[package]]
-name = "ron-validate"
+name = "ronin-validate"
 publish = true
 
 [[package]]
@@ -117,6 +117,6 @@ git_release_enable = false
 # `exclude`d in the root Cargo.toml, so release-plz never enumerates it (OR-005).
 # ---------------------------------------------------------------------------
 [[package]]
-name = "ron-core-fuzz"
+name = "ronin-core-fuzz"
 release = false
 publish = false

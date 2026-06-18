@@ -10,8 +10,8 @@
 # cargo invocations):
 #   - check         : rustfmt + clippy (-D warnings)             [OR-001, OR-002]
 #   - test          : cargo test on Linux/Windows/macOS          [OR-003, OR-009]
-#   - wasm          : ron-core builds for wasm32-unknown-unknown  [OR-004]
-#   - wasm-validate : ron-validate builds for wasm32-unknown-unknown [FR-023]
+#   - wasm          : ronin-core builds for wasm32-unknown-unknown  [OR-004]
+#   - wasm-validate : ronin-validate builds for wasm32-unknown-unknown [FR-023]
 #   - supply-chain  : cargo-audit + cargo-deny                    [OR-005]
 #
 # NOTE: this workflow intentionally does NOT add `cargo-semver-checks` or any
@@ -30,7 +30,7 @@
 #   - All cargo build/test invocations use `--locked` against the committed
 #     Cargo.lock (OR-007); the stable toolchain comes from rust-toolchain.toml
 #     with no per-job channel override (OR-008 / SC-011).
-#   - `--workspace` never builds the root-excluded `src/ron-core/fuzz` crate,
+#   - `--workspace` never builds the root-excluded `src/ronin-core/fuzz` crate,
 #     keeping the nightly-only fuzz crate off the stable matrix (OR-009 / SC-007).
 #
 # BRANCH-PROTECTION NOTE: a job that runs in a *called* (reusable) workflow is
@@ -89,10 +89,10 @@ jobs:
       - name: cargo test
         run: cargo test --workspace --locked
 
-  # Compile ron-core to wasm32-unknown-unknown to enforce the WASM-clean
+  # Compile ronin-core to wasm32-unknown-unknown to enforce the WASM-clean
   # invariant (ADR-0002 / IP-003); Linux only (AD-006) [OR-004].
   wasm:
-    name: wasm (ron-core wasm32)
+    name: wasm (ronin-core wasm32)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -103,15 +103,15 @@ jobs:
           targets: wasm32-unknown-unknown
       - name: Cache cargo registry + target
         uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
-      - name: Build ron-core for wasm32
-        run: cargo build -p ron-core --target wasm32-unknown-unknown --locked
+      - name: Build ronin-core for wasm32
+        run: cargo build -p ronin-core --target wasm32-unknown-unknown --locked
 
-  # Compile ron-validate to wasm32-unknown-unknown to enforce the WASM-clean
+  # Compile ronin-validate to wasm32-unknown-unknown to enforce the WASM-clean
   # validator invariant (ADR-0006 / FR-023): proves `jsonschema` with
   # `default-features = false` keeps the network/TLS resolver (reqwest/rustls)
   # out and the validator portable. Mirrors the `wasm` job; Linux only (AD-006).
   wasm-validate:
-    name: wasm (ron-validate wasm32)
+    name: wasm (ronin-validate wasm32)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -122,8 +122,8 @@ jobs:
           targets: wasm32-unknown-unknown
       - name: Cache cargo registry + target
         uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
-      - name: Build ron-validate for wasm32
-        run: cargo build -p ron-validate --target wasm32-unknown-unknown --locked
+      - name: Build ronin-validate for wasm32
+        run: cargo build -p ronin-validate --target wasm32-unknown-unknown --locked
 
   # Supply-chain scanning: cargo-audit (RustSec advisories) + cargo-deny
   # (deny.toml license/ban/advisory/source policy). Runs on PR/push AND the

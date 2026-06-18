@@ -11,8 +11,8 @@
 # inlined jobs) are:
 #   - check        : rustfmt + clippy (-D warnings)             [OR-001, OR-002]
 #   - test         : cargo test on Linux/Windows/macOS          [OR-003, OR-009]
-#   - wasm         : ron-core builds for wasm32-unknown-unknown  [OR-004]
-#   - wasm-validate: ron-validate builds for wasm32-unknown-unknown [FR-023]
+#   - wasm         : ronin-core builds for wasm32-unknown-unknown  [OR-004]
+#   - wasm-validate: ronin-validate builds for wasm32-unknown-unknown [FR-023]
 #   - supply-chain : cargo-audit + cargo-deny (PR/push + cron)   [OR-005]
 #
 # Triggers preserved from E002 (unchanged):

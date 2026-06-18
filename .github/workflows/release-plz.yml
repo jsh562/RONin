@@ -13,7 +13,7 @@
 #   2. publish     (on push: tag vX.Y.Z) — the maintainer-pushed UMBRELLA tag is
 #      the single release trigger (HINT-002 / STF-001). Runs `release-plz release`
 #      which publishes each crate whose manifest version is not yet on crates.io,
-#      IN DEPENDENCY ORDER (ron-core -> ron-types -> ron-validate -> ronin-app —
+#      IN DEPENDENCY ORDER (ronin-core -> ronin-types -> ronin-validate -> ronin-app —
 #      OR-005). EXACTLY ONE step performs the crates.io publish (no double
 #      publish). This is the ONLY job that can see CARGO_REGISTRY_TOKEN (T019).
 #
@@ -114,8 +114,8 @@ jobs:
   # ===========================================================================
   # PUBLISH (OR-005 / HINT-002): the maintainer-pushed UMBRELLA tag `vX.Y.Z` is
   # the single release trigger. `release-plz release` publishes each crate whose
-  # manifest version is not yet on crates.io, IN DEPENDENCY ORDER (ron-core ->
-  # ron-types -> ron-validate -> ronin-app). EXACTLY ONE step performs the
+  # manifest version is not yet on crates.io, IN DEPENDENCY ORDER (ronin-core ->
+  # ronin-types -> ronin-validate -> ronin-app). EXACTLY ONE step performs the
   # crates.io publish (no double-publish). This is the ONLY job that can see
   # CARGO_REGISTRY_TOKEN (T019 / OR-011).
   # ===========================================================================
@@ -149,8 +149,8 @@ jobs:
           tool: release-plz@0.3.135
       # --- THE SINGLE crates.io PUBLISH STEP (OR-005 / T019 — exactly one).
       # `release-plz release` resolves the dependency graph and publishes each
-      # not-yet-published crate version in DEPENDENCY ORDER (ron-core ->
-      # ron-types -> ron-validate -> ronin-app). The root-excluded fuzz crate is
+      # not-yet-published crate version in DEPENDENCY ORDER (ronin-core ->
+      # ronin-types -> ronin-validate -> ronin-app). The root-excluded fuzz crate is
       # never a member, so it is never published (OR-005 / HINT-005).
       #
       # CARGO_REGISTRY_TOKEN — the ONLY repository secret (OR-011) — is injected

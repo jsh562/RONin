@@ -63,13 +63,13 @@ fn drive_until_landed(app: &mut App) {
     }
 }
 
-/// Count `ron-types` (type) diagnostics on the active document.
+/// Count `ronin-types` (type) diagnostics on the active document.
 fn type_diag_count(app: &App) -> usize {
     app.active_document()
         .map(|d| {
             d.diagnostics
                 .iter()
-                .filter(|v| v.code.source() == "ron-types")
+                .filter(|v| v.code.source() == "ronin-types")
                 .count()
         })
         .unwrap_or(0)

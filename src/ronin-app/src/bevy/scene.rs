@@ -45,7 +45,7 @@
 //! * **Unparseable regions are skipped** — an entry whose key or value did not
 //!   parse is omitted and the parseable remainder is still modeled.
 
-use ron_core::{ast, CstDocument, SyntaxNode, TextRange};
+use ronin_core::{ast, CstDocument, SyntaxNode, TextRange};
 
 /// Whether a [`SceneValueRef`] is a top-level scene resource or an entity's
 /// component (data-model `SceneModel`).
@@ -326,7 +326,7 @@ fn entry_type_path(entry: &ast::MapEntry) -> Option<String> {
         return None;
     };
     match lit.token_kind() {
-        Some(ron_core::SyntaxKind::String | ron_core::SyntaxKind::RawString) => {
+        Some(ronin_core::SyntaxKind::String | ronin_core::SyntaxKind::RawString) => {
             unquote_string(&lit.text()?)
         }
         _ => None,
@@ -342,7 +342,7 @@ fn entry_entity_id(entry: &ast::MapEntry) -> Option<i128> {
     let ast::Value::Literal(lit) = entry.key()? else {
         return None;
     };
-    if lit.token_kind() != Some(ron_core::SyntaxKind::Integer) {
+    if lit.token_kind() != Some(ronin_core::SyntaxKind::Integer) {
         return None;
     }
     // RON integers may carry `_` separators; strip them before parsing.
@@ -399,7 +399,7 @@ fn unquote_string(verbatim: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ron_core::parse;
+    use ronin_core::parse;
 
     /// The type paths of a value-ref slice, in order.
     fn paths(refs: &[SceneValueRef]) -> Vec<&str> {

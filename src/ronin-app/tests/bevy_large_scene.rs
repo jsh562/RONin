@@ -59,8 +59,8 @@
 
 use std::time::{Duration, Instant};
 
-use ron_core::parse;
-use ron_types::{BevyRegistry, BevySource, TypeSource};
+use ronin_core::parse;
+use ronin_types::{BevyRegistry, BevySource, TypeSource};
 use ronin_app::bevy::{validate_scene, SceneModel, SceneValueKind};
 use ronin_app::settings::AppSettings;
 use serde_json::Value;
@@ -73,7 +73,7 @@ use serde_json::Value;
 const INHERITED_RESPONSIVENESS_WINDOW: Duration = Duration::from_secs(5);
 
 /// The hand-authored registry-schema export shared with the rest of the Bevy
-/// suite (lives in the `ron-types` fixtures). The large scene's component paths
+/// suite (lives in the `ronin-types` fixtures). The large scene's component paths
 /// are deliberately a MIX of registered (`bevy_transform...::Transform`,
 /// `bevy_pbr::light::Visibility`) and unregistered (`my_game::...`) so the
 /// validation pass drives BOTH the `validate_subtree_against_type` engine path
@@ -81,7 +81,7 @@ const INHERITED_RESPONSIVENESS_WINDOW: Duration = Duration::from_secs(5);
 fn registry_schema_json() -> String {
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
-        .join("ron-types")
+        .join("ronin-types")
         .join("tests")
         .join("fixtures")
         .join("bevy_registry_schema.json");
@@ -90,12 +90,12 @@ fn registry_schema_json() -> String {
 }
 
 /// Acquire the registry + its serialized interchange exactly as production does:
-/// `BevySource::acquire()` → `ron_types::to_json`, paired with the parsed
+/// `BevySource::acquire()` → `ronin_types::to_json`, paired with the parsed
 /// `BevyRegistry` for the membership lookup (the same wiring the US1 suite uses).
 fn registry_and_model(json: &str) -> (BevyRegistry, Value) {
     let (registry, _diags) = BevyRegistry::from_schema_json(json, "test", "<registry>");
     let acquired = BevySource::from_schema_json(json).acquire();
-    let model = ron_types::to_json(&acquired.model);
+    let model = ronin_types::to_json(&acquired.model);
     (registry, model)
 }
 
@@ -364,7 +364,7 @@ fn large_awkward_scene_changes_zero_bytes() {
     let _ = validate_scene(&model, &registry, &cst, None);
 
     assert_eq!(
-        ron_core::print(&cst),
+        ronin_core::print(&cst),
         src,
         "interpret + validate over a large awkward scene mutates zero bytes"
     );

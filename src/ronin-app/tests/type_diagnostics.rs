@@ -7,8 +7,8 @@
 //! assert:
 //!
 //! * a precise **type** squiggle appears — a [`DiagnosticView`] carrying a
-//!   `RON-V####` code whose [`source`](ron_core::DiagnosticCode::source) is
-//!   `"ron-types"`, at the expected char range (FR-004);
+//!   `RON-V####` code whose [`source`](ronin_core::DiagnosticCode::source) is
+//!   `"ronin-types"`, at the expected char range (FR-004);
 //! * a Problems-panel entry exists for it and is rendered through the real
 //!   `problems_panel` widget via the renderer-free `egui_kittest` harness (FR-004);
 //! * editing to fix the value refreshes — the type diagnostic disappears on the
@@ -17,7 +17,7 @@
 //!   (click-to-jump, FR-004).
 //!
 //! The worker round-trip is the true off-frame path (FR-006): the worker thread
-//! runs `ron-validate` after the structural parse and ships the merged result
+//! runs `ronin-validate` after the structural parse and ships the merged result
 //! back; the document republishes the whole type set each pass. The worker is
 //! driven with a bounded spin-poll (no fixed sleeps), mirroring the existing
 //! `edit_feedback.rs` / `problems_nav.rs` harness.
@@ -51,7 +51,7 @@ fn drive_reparse(doc: &mut EditorDocument, worker: &ReparseWorker) {
 
 /// A minimal `TypeModel`: an `Entity { id: integer, name: string }` with both
 /// fields required. Serialized as JSON-Schema 2020-12 + `$defs`, the interchange
-/// `ron-validate` consumes (E004).
+/// `ronin-validate` consumes (E004).
 fn entity_model() -> serde_json::Value {
     serde_json::json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -90,11 +90,11 @@ fn type_error_yields_squiggle_and_problem_then_refreshes_on_fix() {
     drive_reparse(&mut doc, &worker);
 
     // There must be at least one type finding, and a precise type squiggle exists:
-    // a DiagnosticView with a RON-V#### code whose source() == "ron-types".
+    // a DiagnosticView with a RON-V#### code whose source() == "ronin-types".
     let type_views: Vec<_> = doc
         .diagnostics
         .iter()
-        .filter(|v| v.code.source() == "ron-types")
+        .filter(|v| v.code.source() == "ronin-types")
         .cloned()
         .collect();
     assert!(
@@ -111,8 +111,8 @@ fn type_error_yields_squiggle_and_problem_then_refreshes_on_fix() {
             v.code.code()
         );
         assert!(
-            v.code.source() == "ron-types",
-            "type diagnostic source must be ron-types"
+            v.code.source() == "ronin-types",
+            "type diagnostic source must be ronin-types"
         );
     }
 
@@ -129,7 +129,7 @@ fn type_error_yields_squiggle_and_problem_then_refreshes_on_fix() {
             .unwrap()
         + 1;
     let mismatch = type_views.iter().find(|v| {
-        v.code == ron_core::DiagnosticCode::TypeMismatch && v.char_range == (value_start, value_end)
+        v.code == ronin_core::DiagnosticCode::TypeMismatch && v.char_range == (value_start, value_end)
     });
     assert!(
         mismatch.is_some(),
@@ -141,13 +141,13 @@ fn type_error_yields_squiggle_and_problem_then_refreshes_on_fix() {
     assert!(
         type_views
             .iter()
-            .any(|v| v.code == ron_core::DiagnosticCode::MissingRequiredField),
+            .any(|v| v.code == ronin_core::DiagnosticCode::MissingRequiredField),
         "the missing required `name` field must surface as a type diagnostic, \
          got {type_views:?}"
     );
 
     // Problems panel: render the real widget through the renderer-free harness and
-    // confirm a type entry (tagged `ron-types`) is listed. Capture the click index.
+    // confirm a type entry (tagged `ronin-types`) is listed. Capture the click index.
     let diagnostics = doc.diagnostics.clone();
     let clicked = std::cell::Cell::new(None);
     let mut harness = Harness::new_ui(|ui| {
@@ -156,14 +156,14 @@ fn type_error_yields_squiggle_and_problem_then_refreshes_on_fix() {
         }
     });
     harness.run();
-    // A type finding's row is tagged with the `ron-types` source. There may be
+    // A type finding's row is tagged with the `ronin-types` source. There may be
     // more than one such row (type mismatch + missing required), so match any.
     assert!(
         harness
-            .query_all_by_label_contains("(ron-types)")
+            .query_all_by_label_contains("(ronin-types)")
             .next()
             .is_some(),
-        "the Problems panel must list a type entry tagged (ron-types)"
+        "the Problems panel must list a type entry tagged (ronin-types)"
     );
     // The type-mismatch row's RON-V0001 code is shown; click it.
     harness.get_by_label_contains("RON-V0001").click();
@@ -173,7 +173,7 @@ fn type_error_yields_squiggle_and_problem_then_refreshes_on_fix() {
         .expect("clicking the type-mismatch Problems row must return its index");
     assert_eq!(
         doc.diagnostics[idx].code,
-        ron_core::DiagnosticCode::TypeMismatch,
+        ronin_core::DiagnosticCode::TypeMismatch,
         "the clicked row must be the type-mismatch finding"
     );
 
@@ -199,7 +199,7 @@ fn type_error_yields_squiggle_and_problem_then_refreshes_on_fix() {
     let remaining_type: Vec<_> = doc
         .diagnostics
         .iter()
-        .filter(|v| v.code.source() == "ron-types")
+        .filter(|v| v.code.source() == "ronin-types")
         .collect();
     assert!(
         remaining_type.is_empty(),
@@ -222,8 +222,8 @@ fn no_binding_yields_only_structural_diagnostics() {
     assert!(
         doc.diagnostics
             .iter()
-            .all(|v| v.code.source() == "ron-core"),
-        "without a binding, no type (ron-types) diagnostics may appear, got {:?}",
+            .all(|v| v.code.source() == "ronin-core"),
+        "without a binding, no type (ronin-types) diagnostics may appear, got {:?}",
         doc.diagnostics
     );
     // The structural parse of well-formed-but-wrong-type RON is itself valid, so

@@ -267,7 +267,7 @@ fn rename_collision_blocks_inline_with_no_undo_entry() {
     let err = doc
         .apply_tree_rename(&path, "y".to_string(), &worker, Instant::now())
         .expect_err("renaming x to y must collide");
-    assert_eq!(err, ron_core::BlockedReason::RenameCollision);
+    assert_eq!(err, ronin_core::BlockedReason::RenameCollision);
     assert_eq!(doc.buffer, before, "a blocked rename changes no bytes");
     assert_eq!(
         doc.undo_depth(),
@@ -357,11 +357,11 @@ fn field_with_diagnostic_shows_inline_indicator() {
     doc.on_edit();
     drive_reparse(&mut doc, &worker);
 
-    // The text view sees a type diagnostic (RON-V####, source ron-types).
+    // The text view sees a type diagnostic (RON-V####, source ronin-types).
     let type_diag = doc
         .diagnostics
         .iter()
-        .find(|v| v.code.source() == "ron-types")
+        .find(|v| v.code.source() == "ronin-types")
         .cloned()
         .expect("a type diagnostic is present");
 
@@ -622,7 +622,7 @@ fn rename_control_is_discoverable_and_applies_one_undo_unit() {
     let err = doc
         .apply_tree_rename(&path, "y".to_string(), &worker, Instant::now())
         .expect_err("a colliding rename is blocked");
-    assert_eq!(err, ron_core::BlockedReason::RenameCollision);
+    assert_eq!(err, ronin_core::BlockedReason::RenameCollision);
     assert_eq!(doc.buffer, before, "a blocked rename changes no bytes");
     assert_eq!(
         doc.undo_depth(),
