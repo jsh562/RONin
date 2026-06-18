@@ -1185,6 +1185,98 @@ fn navigator_lists_sections_and_selection_switches_grid() {
     );
 }
 
+/// The alternate "Table (sections)" tab (`render_table_sections_seam`): a scanner-driven
+/// navigator that groups detected sections by top-level ancestor and labels each with
+/// its `(rows×cols)` dimensions, sharing the central grid + selection with the outline tab.
+#[test]
+fn table_sections_navigator_groups_lists_dims_and_shares_grid() {
+    use egui_kittest::kittest::Queryable;
+    use std::cell::RefCell;
+
+    let worker = Rc::new(ReparseWorker::new());
+    let mut doc = EditorDocument::new_untitled(1);
+    doc.buffer = MULTI_SECTION_SRC.to_string();
+    doc.on_edit();
+    drive_reparse(&mut doc, &worker);
+    let before = doc.buffer.clone();
+    let doc = Rc::new(RefCell::new(doc));
+
+    // Frame 1: the grouped-sections navigator shows its `Tables` header, a group for the
+    // `rows` ancestor, and section leaves carrying their `(rows×cols)` dimensions (the `×`
+    // separator is unique to this navigator — the outline shows plain child counts).
+    {
+        let doc_ui = Rc::clone(&doc);
+        let worker_ui = Rc::clone(&worker);
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(700.0, 360.0))
+            .build_ui(move |ui| {
+                let mut d = doc_ui.borrow_mut();
+                ronin_app::panels::render_table_sections_seam(ui, &mut d, &worker_ui);
+            });
+        harness.run();
+        assert!(
+            harness.query_all_by_label_contains("Tables").next().is_some(),
+            "the grouped-sections navigator shows its `Tables` header"
+        );
+        assert!(
+            harness.query_all_by_label_contains("rows").next().is_some(),
+            "the `rows` section/group is listed"
+        );
+        assert!(
+            harness
+                .query_all_by_label_contains("\u{00D7}")
+                .next()
+                .is_some(),
+            "section leaves carry their (rows×cols) dimensions"
+        );
+    }
+
+    // Select the `coords` TupleList section; the grouped-sections grid renders its
+    // positional `.0` column.
+    let coords_path = StructuralPath::from_steps(vec![PathStep::Field("coords".to_string())]);
+    doc.borrow_mut()
+        .view_state_mut()
+        .set_selected_table_section(Some(coords_path));
+    {
+        let doc_ui = Rc::clone(&doc);
+        let worker_ui = Rc::clone(&worker);
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(700.0, 360.0))
+            .build_ui(move |ui| {
+                let mut d = doc_ui.borrow_mut();
+                ronin_app::panels::render_table_sections_seam(ui, &mut d, &worker_ui);
+            });
+        harness.run();
+        assert!(
+            harness.query_all_by_label_contains(".0").next().is_some(),
+            "selecting coords renders the TupleList positional .0 column"
+        );
+    }
+
+    // Shared selection: switching to the OUTLINE tab shows the SAME selected grid.
+    {
+        let doc_ui = Rc::clone(&doc);
+        let worker_ui = Rc::clone(&worker);
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(700.0, 360.0))
+            .build_ui(move |ui| {
+                let mut d = doc_ui.borrow_mut();
+                ronin_app::panels::render_table_seam(ui, &mut d, &worker_ui);
+            });
+        harness.run();
+        assert!(
+            harness.query_all_by_label_contains(".0").next().is_some(),
+            "both Table tabs share `selected_table_section` (outline shows coords too)"
+        );
+    }
+
+    assert_eq!(
+        doc.borrow().buffer,
+        before,
+        "the grouped-sections navigator is byte-free"
+    );
+}
+
 #[test]
 fn scalar_only_document_renders_root_as_field_value_grid_never_empty() {
     use egui_kittest::kittest::Queryable;

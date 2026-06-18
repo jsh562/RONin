@@ -380,8 +380,14 @@ pub enum ActiveView {
     /// The structural tree/form view — the **default on open** (FR-017).
     #[default]
     TreeForm,
-    /// The virtualized spreadsheet/table view of a uniform section.
+    /// The virtualized spreadsheet/table view — the tree-traversal **outline**
+    /// navigator (the default Table surface).
     Table,
+    /// An alternate Table surface using the scanner-driven **grouped-sections**
+    /// navigator (a comparison variant alongside [`Table`]). Same central grid +
+    /// breadcrumb + back/forward; only the left navigator differs. Treated as a
+    /// structural view exactly like [`Table`].
+    TableSections,
 }
 
 /// Which structural surface an [`EditFocus`] lives on (FR-004/FR-009).

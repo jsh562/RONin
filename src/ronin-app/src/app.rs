@@ -4127,6 +4127,16 @@ impl App {
                             crate::panels::render_table_seam(ui, doc, worker);
                         }
                     }
+                    ActiveView::TableSections => {
+                        // Comparison variant of the Table view: the same central grid +
+                        // breadcrumb + back/forward, but a scanner-driven grouped-sections
+                        // navigator on the left instead of the tree outline. Split borrow
+                        // (`&mut doc` + `&self.worker`) is sound (separate fields).
+                        let worker = &self.worker;
+                        if let Some(doc) = self.workspace.get_mut(idx) {
+                            crate::panels::render_table_sections_seam(ui, doc, worker);
+                        }
+                    }
                 }
             }
             _ => {
@@ -4159,7 +4169,8 @@ impl App {
             // Switching only changes the active-view selection; the buffer is never
             // touched, so every view projects the same lossless CST source (FR-020).
             ui.selectable_value(&mut view, ActiveView::TreeForm, "Tree/form");
-            ui.selectable_value(&mut view, ActiveView::Table, "Table");
+            ui.selectable_value(&mut view, ActiveView::Table, "Table (outline)");
+            ui.selectable_value(&mut view, ActiveView::TableSections, "Table (sections)");
             ui.selectable_value(&mut view, ActiveView::Text, "Text");
             if doc.view_state().is_stale() {
                 // FR-015: a user-perceivable stale marker while a reparse is pending.

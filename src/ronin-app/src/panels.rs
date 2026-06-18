@@ -34,7 +34,7 @@ use crate::reparse::ReparseWorker;
 use crate::structural::indicators;
 use crate::structural::table::{breadcrumb_segments, render_table_view_any};
 use crate::structural::tree::{TreeNode, TreeNodeKind};
-use crate::structural::view_state::{resolve_path, StructuralPath};
+use crate::structural::view_state::{resolve_path, PathStep, StructuralPath};
 
 /// Host the structural **table-view tree-outline navigator** for `doc` (E008 / E012 /
 /// E013 — T035, [COMPLETES FR-005]).
@@ -118,6 +118,122 @@ pub fn render_table_seam(ui: &mut egui::Ui, doc: &mut EditorDocument, worker: &R
 
     if let Some(path) = breadcrumb_clicked {
         doc.view_state_mut().navigate_table_section(path);
+    }
+}
+
+/// Host the **grouped-sections** Table navigator — the comparison variant of the
+/// tree-outline [`render_table_seam`] (selectable as `ActiveView::TableSections`).
+///
+/// Same central grid + breadcrumb + Back/Forward/Up as the outline view; the left
+/// panel instead lists the scanner-detected table sections
+/// ([`EditorDocument::cached_table_sections`]) — only the genuinely table-able shapes
+/// (uniform record lists, record maps, equal-arity tuple lists) — **grouped by their
+/// top-level ancestor** (the first [`PathStep`] of each section's path), each group a
+/// collapsible header whose sections are sorted by row count (largest first) and
+/// labeled `name (rows×cols)`. Clicking a section selects it (shared
+/// `selected_table_section`, so switching between the two Table tabs keeps the same
+/// viewed level). Byte-free (FR-020).
+pub fn render_table_sections_seam(
+    ui: &mut egui::Ui,
+    doc: &mut EditorDocument,
+    worker: &ReparseWorker,
+) {
+    render_binding_indicator(ui, doc);
+
+    // Clone the scanned sections out so the borrow on `doc` is released before the
+    // mutable view-state writes below (the scan is cached per parse generation).
+    let sections = doc.cached_table_sections().to_vec();
+    if sections.is_empty() {
+        ui.weak(
+            "No table-able sections in this document \u{2014} it has no uniform record lists, \
+             record maps, or tuple lists. Switch to Tree/form.",
+        );
+        return;
+    }
+
+    // The grid renders the stored selection when it still resolves to a table-able node,
+    // else the document root (shared with the outline seam — never empty).
+    let stored = doc.view_state().selected_table_section().cloned();
+    let selected = stored
+        .filter(|p| selection_is_table_able(doc, p))
+        .unwrap_or_else(StructuralPath::root);
+
+    // Group sections by top-level ancestor (first path step), preserving first-seen
+    // group order; within a group, largest (most rows) first.
+    let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
+    for (idx, section) in sections.iter().enumerate() {
+        let key = section
+            .path
+            .steps()
+            .first()
+            .map(step_label)
+            .unwrap_or_else(|| "(root)".to_string());
+        match groups.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, members)) => members.push(idx),
+            None => groups.push((key, vec![idx])),
+        }
+    }
+    for (_, members) in &mut groups {
+        members.sort_by(|&a, &b| sections[b].rows.cmp(&sections[a].rows));
+    }
+
+    let mut clicked: Option<StructuralPath> = None;
+    egui::Panel::left("ronin_table_sections_nav")
+        .resizable(true)
+        .default_size(240.0)
+        .show_inside(ui, |ui| {
+            ui.strong("Tables");
+            ui.separator();
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                for (group_label, members) in &groups {
+                    egui::CollapsingHeader::new(group_label)
+                        .id_salt(("ronin_tbl_sections_group", group_label))
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            for &idx in members {
+                                let section = &sections[idx];
+                                let is_selected = section.path == selected;
+                                let label = format!(
+                                    "{}  ({}\u{00D7}{})",
+                                    section.label, section.rows, section.cols
+                                );
+                                if ui.selectable_label(is_selected, label).clicked() {
+                                    clicked = Some(section.path.clone());
+                                }
+                            }
+                        });
+                }
+            });
+        });
+
+    // Persist a click through `navigate_table_section` so back/forward records it.
+    if let Some(path) = clicked {
+        doc.view_state_mut().navigate_table_section(path);
+        return;
+    }
+
+    // The central area is identical to the outline seam: Back/Forward/Up + breadcrumb,
+    // then the selected node projected as a table via `derive_any`.
+    let mut breadcrumb_clicked: Option<StructuralPath> = None;
+    egui::CentralPanel::default().show_inside(ui, |ui| {
+        render_table_nav_controls(ui, doc);
+        render_breadcrumb(ui, doc, &selected, &mut breadcrumb_clicked);
+        ui.separator();
+        render_table_view_any(ui, doc, worker, &selected);
+    });
+
+    if let Some(path) = breadcrumb_clicked {
+        doc.view_state_mut().navigate_table_section(path);
+    }
+}
+
+/// A readable label for one [`PathStep`] (the grouped-sections navigator's group key):
+/// a field / variant-field name verbatim, a map key as `(key)`, an index as `[i]`.
+fn step_label(step: &PathStep) -> String {
+    match step {
+        PathStep::Field(name) | PathStep::VariantField(name) => name.clone(),
+        PathStep::Key(text) => format!("({text})"),
+        PathStep::Index(i) => format!("[{i}]"),
     }
 }
 
