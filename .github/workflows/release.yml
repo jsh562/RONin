@@ -208,7 +208,7 @@ jobs:
           # TODO(OR-010): keep cargo-dist@<ver> == dist-workspace.toml version.
           tool: cargo-dist@0.30.0
       - name: Download per-target artifacts
-        uses: actions/download-artifact@v4 # TODO(OR-010): resolve to full commit SHA before first release — offline now; SHA not resolvable offline
+        uses: actions/download-artifact@v8 # TODO(OR-010): resolve to full commit SHA before first release — offline now; SHA not resolvable offline
         with:
           pattern: artifacts-*
           path: target/distrib
@@ -262,7 +262,7 @@ jobs:
           # TODO(OR-010): keep cargo-dist@<ver> == dist-workspace.toml version.
           tool: cargo-dist@0.30.0,cargo-cyclonedx@0.5.7
       - name: Download all artifacts
-        uses: actions/download-artifact@v4 # TODO(OR-010): resolve to full commit SHA before first release — offline now; SHA not resolvable offline
+        uses: actions/download-artifact@v8 # TODO(OR-010): resolve to full commit SHA before first release — offline now; SHA not resolvable offline
         with:
           pattern: artifacts-*
           path: target/distrib
