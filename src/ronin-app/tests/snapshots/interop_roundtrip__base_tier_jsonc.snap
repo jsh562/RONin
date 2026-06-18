@@ -1,0 +1,14 @@
+---
+source: src/ronin-app/tests/interop_roundtrip.rs
+expression: jsonc(src)
+---
+// player config
+{
+  "name": "hero",
+  // the starting level
+  "level": 3,
+  "scores": [
+    10,
+    20
+  ]
+}

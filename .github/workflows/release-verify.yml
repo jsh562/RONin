@@ -1,0 +1,169 @@
+# Release-pipeline VERIFICATION gate — feature 00011-release-distribution
+# (Phase 8 / OR-015..018 / SC-001..007 / T029..T036).
+#
+# This is the DRY-RUN + LINT CI gate that PROVES the release pipeline's config is
+# correct WITHOUT cutting a live release. It is a PR/push gate, NOT a release
+# trigger: it runs on `pull_request` + `push: main`, never on a tag, and NEVER
+# publishes/uploads/attests anything (OR-015). The live tag-triggered release
+# (real artifact upload, real crates.io publish, real attestation/SBOM emission)
+# is exercised ONLY by an actual maintainer-pushed tag via release.yml /
+# release-plz.yml — never here.
+#
+# EVERY tool install + check below is a REQUIRED step: a missing/failed tool
+# install fails the job (never a silent skip) (OR-015). Tools that are not
+# vendored on the runner — `dist` (cargo-dist), `cargo-semver-checks`,
+# `cargo-cyclonedx`, `actionlint` — are installed via the already-SHA-pinned
+# `taiki-e/install-action` (the same pin used by gates.yml/release.yml), so NO
+# new un-pinnable action is introduced.
+#
+# WHAT RUNS WHERE:
+#   - PURE offline check SCRIPTS (no tooling): ci/check-*.py, ci/check-*.sh —
+#     SHA-pin scan, manifest-metadata, tag->channel routing, provenance/SBOM
+#     static check, SC-007 hardening. These are also runnable locally.
+#   - CI-only tool steps: `dist plan` / `dist generate --check`, `actionlint`,
+#     `cargo publish --dry-run`, `cargo semver-checks` — require the installed
+#     tools and a full toolchain, so they run only in this CI job.
+#
+# SHA-PIN PROVENANCE: actions/checkout, dtolnay/rust-toolchain,
+# Swatinem/rust-cache, taiki-e/install-action — pins COPIED VERBATIM from the
+# already-pinned .github/workflows/{gates,ci,release,release-plz}.yml (single
+# source of truth; Dependabot bumps them in "/").
+name: release-verify
+
+# PR GATE (NOT a release trigger): runs on PRs and pushes to main so config drift
+# / a broken pin is caught before merge. No `tags:` trigger (that is release.yml's
+# job), no `pull_request_target` (no fork-secret exposure — OR-011 / SC-007).
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# LEAST-PRIVILEGE (OR-011 / SC-007): read-only. This job never writes a Release,
+# never attests, never publishes — it only inspects config + dry-runs. No secret
+# is referenced (no CARGO_REGISTRY_TOKEN), so fork PRs run it identically.
+permissions:
+  contents: read
+
+# Deterministic, reproducible cargo behavior (OR-010 / OR-012).
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  # ===========================================================================
+  # release-verify (T029): single job that installs the dry-run/lint tooling as
+  # REQUIRED steps and runs the whole verification suite (T030..T036).
+  # ===========================================================================
+  release-verify:
+    name: release-verify (dry-run + lint)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout (full history for dist plan / generate)
+        uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
+        with:
+          # dist plan/generate read the git tag history; full history keeps them
+          # deterministic.
+          fetch-depth: 0
+
+      - name: Install Rust toolchain (stable pin)
+        # Honors the stable pin in rust-toolchain.toml (OR-014) — same pin as the
+        # E002 gates and the release workflows.
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
+
+      # --- T029: install the dry-run/lint tooling as REQUIRED steps. A failed
+      # install fails the job (never a silent skip) (OR-015). cargo-dist's version
+      # MUST match dist-workspace.toml `cargo-dist-version` so `dist generate
+      # --check` compares against the SAME generator that produced release.yml
+      # (HINT-001). ---
+      - name: Install dist + cargo-semver-checks + cargo-cyclonedx + actionlint (pinned)
+        uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
+        with:
+          # TODO(OR-010): keep cargo-dist@<ver> == dist-workspace.toml
+          # cargo-dist-version (0.30.0). cargo-cyclonedx version matches release.yml.
+          tool: cargo-dist@0.30.0,cargo-semver-checks@0.42.0,cargo-cyclonedx@0.5.7,actionlint@1.7.7
+
+      # ----------------------------------------------------------------------
+      # PURE OFFLINE CHECK SCRIPTS (no tooling needed; also runnable locally).
+      # Each exits non-zero on any violation -> fails this REQUIRED job.
+      # ----------------------------------------------------------------------
+
+      # --- T034 (part 1) {COMPLETES OR-017}: every third-party action across all
+      # workflows is a full 40-hex commit SHA — no @vN/tag refs. STRICT: flags any
+      # NEW tag-pin; the 5 known offline TODO(OR-010) actions in release.yml are a
+      # narrow, enumerated allowlist tracked in the script. ---
+      - name: SHA-pin check (every third-party action is a full commit SHA)
+        run: python ci/check-sha-pins.py
+
+      # --- T033 {OR-017}: manifest-metadata — each of the 4 publishable crates
+      # declares repository + keywords + categories + readme; Cargo.lock present;
+      # rust-toolchain.toml pins stable. ---
+      - name: Manifest-metadata check (repository/keywords/categories/readme)
+        run: python ci/check-manifest-metadata.py
+
+      # --- T031 {COMPLETES SC-002}: tag->channel routing — vX.Y.Z -> stable;
+      # -rc.N/-nightly/any suffix -> pre-release; inverse-never. Python (extracts
+      # + verifies the workflow regex) AND bash (executes the real shell test). ---
+      - name: Channel-routing check (Python, anti-drift + inverse-never)
+        run: python ci/check-channel-routing.py
+      - name: Channel-routing check (bash, real shell semantics)
+        run: bash ci/check-channel-routing.sh
+
+      # --- T035 {COMPLETES SC-005}: static check that release.yml has the
+      # provenance + single-SBOM steps + cargo-auditable, scoped to the publish
+      # (host) job. Live gh attestation verify / SBOM attach / cargo audit bin are
+      # DEFERRED to the readiness gate (SC-006/RR-001) — see docs/runbooks/release.md. ---
+      - name: Provenance + SBOM + cargo-auditable static check
+        run: python ci/check-provenance-sbom.py
+
+      # --- T036 {COMPLETES SC-007}: cross-workflow hardening — release re-runs the
+      # gates before publish (needs:), least-privilege top-level perms, no
+      # pull_request* triggers, --locked everywhere. ---
+      - name: Release-hardening (SC-007) static check
+        run: python ci/check-release-hardening.py
+
+      # ----------------------------------------------------------------------
+      # CI-ONLY TOOL STEPS (require the installed tooling; not runnable offline).
+      # ----------------------------------------------------------------------
+
+      # --- T030 {OR-015,SC-001}: dist plan asserts the config is valid (4 targets,
+      # installers, checksums, binstall metadata, channel routing). A config error
+      # fails the step (OR-015a). Uses a sample stable tag for a deterministic plan. ---
+      - name: dist plan (config valid — 4 targets/installers/checksums/binstall)
+        run: dist plan --tag=v0.0.0 --output-format=json
+
+      # --- T030 {OR-015,SC-001} (HINT-001): dist generate --check asserts the
+      # committed release.yml matches what `dist generate` would emit — any drift
+      # fails the step (OR-015b). NOTE: the committed release.yml is hand-pinned to
+      # full SHAs after generate (HINT-001); if a future dist version reorders the
+      # generated graph, regenerate + re-pin and re-run this check. ---
+      - name: dist generate --check (committed release.yml has no drift)
+        run: dist generate --check
+
+      # --- T034 (part 2) {COMPLETES OR-017}: actionlint over ALL workflow YAML.
+      # A passing result == zero actionlint findings (OR-015c). ---
+      - name: actionlint (zero findings over all workflow YAML)
+        run: actionlint -color
+
+      # --- T032 {COMPLETES SC-003}: cargo publish --dry-run --locked per crate in
+      # dependency order (ronin-core -> ronin-types -> ronin-validate -> ronin-app),
+      # handling unpublished workspace path-deps deterministically (--no-verify on
+      # dependents pre-first-publish; see the script's comment). The fuzz crate is
+      # absent (never published — OR-005). ---
+      - name: cargo publish --dry-run per crate (dep order, path-dep aware)
+        run: bash ci/publish-dry-run.sh
+
+      # --- T032 {OR-016/OR-004}: blocking cargo-semver-checks. A breaking API
+      # change without the matching bump exits non-zero and FAILS this required
+      # job (not advisory) — the same blocking gate release-plz enforces (OR-004).
+      # --locked keeps it reproducible against the committed Cargo.lock (OR-010).
+      # NOTE: pre-first-publish (no prior version on crates.io) semver-checks has
+      # no baseline to compare against and reports "no relevant changes"/skips the
+      # crate; once a baseline exists on crates.io it becomes a hard breaking-change
+      # gate. It is wired here so the gate is live from the first published version. ---
+      - name: cargo semver-checks (blocking breaking-change gate)
+        run: cargo semver-checks check-release --locked --workspace

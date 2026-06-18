@@ -2,13 +2,36 @@
 name = "ronin-app"
 version = "0.1.0"
 edition.workspace = true
-# Native egui/eframe 0.34 + egui_kittest require a newer toolchain than ron-core's
+# Native egui/eframe 0.34 + egui_kittest require a newer toolchain than ronin-core's
 # 1.77 MSRV; native deps are confined to ronin-app, so this override is local-only.
 rust-version = "1.92"
 license.workspace = true
-description = "RONin desktop application shell (stub; full implementation deferred to E003)."
+repository.workspace = true
+description = "RONin — a desktop editor for RON (Rusty Object Notation): lossless editing, type-aware validation, Bevy scene mode, and RON⇄JSON interop."
+keywords = ["ron", "editor", "gui", "egui", "bevy"]
+categories = ["text-editors", "development-tools"]
+readme = "README.md"
+
+# `cargo binstall` metadata (E011 OR-003). Points binstall at the GitHub Release
+# tarball assets produced by `dist` (see dist-workspace.toml) so
+# `cargo binstall ronin-app` fetches the prebuilt binary instead of compiling.
+# `pkg-fmt = "tar.gz"` matches dist's windows/unix-archive = ".tar.gz"; the
+# pkg-url placeholders resolve to the dist default asset name
+# `ronin-app-<target>.tar.gz` on the release tagged `v<version>`. No separately
+# hosted install URL — zero extra infra (OR-003 / OR-012).
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }.tar.gz"
+pkg-fmt = "tar.gz"
+bin-dir = "{ bin }{ binary-ext }"
 
 [dependencies]
+# Cross-platform atomic file replace for the never-corrupt save seam (E007,
+# TR-002, AD-001). `atomicwrites` replaces-over-existing atomically — on Windows
+# via `ReplaceFileW`/`MoveFileEx`, on POSIX via `rename(2)` — which plain
+# `std::fs::rename`/`tempfile::persist` CANNOT do over an existing target on
+# Windows. Native-only: confined to `ronin-app`; `ronin-core` stays rowan-only and
+# WASM-clean (TR-014, HINT-002). No network/transport dep is introduced.
+atomicwrites = "0.4.4"
 directories = "6.0.0"
 # Use eframe's `glow` (OpenGL) backend, not `wgpu`: the wgpu/DX12 path pulls a
 # `windows-core` version that conflicts in this graph, and a render harness for
@@ -22,9 +45,26 @@ eframe = { version = "0.34", default-features = false, features = [
     "x11",
 ] }
 egui = "0.34"
+# Glob matching for binding resolution (E006 US2 — FR-008/FR-012). `globset`
+# gives path-aware glob matching with deterministic, robust parsing; specificity
+# is computed from the pattern string independently of the matcher.
+globset = "0.4.16"
 egui_extras = "0.34"
 rfd = "0.17.2"
-ron-core = { version = "0.1.0", path = "../ron-core" }
+ronin-core = { version = "0.1.0", path = "../ronin-core" }
+# RON⇄JSON interop boundary (E010, ADR-0008). The serde `ron` crate is the
+# canonical-grammar VERIFIER / round-trip cross-check at the native interop
+# boundary — NOT the primary converter (the CST-based path carries fidelity).
+# Native-only: confined to `ronin-app`; `ronin-core` stays rowan-only and the
+# WASM-clean `ronin-core`/`ronin-validate` gain no `ron`-crate dependency (FR-012,
+# SC-006). Exact-version pin = supply-chain control (reproducible; no unreviewed
+# grammar-surface bumps; keeps cargo-deny/audit on a vetted version).
+ron = "=0.12.1"
+# Type-model acquisition (E006 US2 Phase 4b — FR-014/FR-024). ronin-app is the
+# native app, so it may depend on the native-gated `ronin-types`; only the
+# WASM-clean `ronin-core`/`ronin-validate` must stay free of it.
+ronin-types = { version = "0.1.0", path = "../ronin-types" }
+ronin-validate = { version = "0.1.0", path = "../ronin-validate" }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 tracing = "0.1.44"
@@ -33,3 +73,10 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
 [dev-dependencies]
 egui_kittest = "0.34.3"
+# Property tests for the defaults-elision core (E009 US3, T030/T031): the
+# bit-for-bit float-equality rule and the shrink->expand->shrink byte-identical
+# stability invariant. Already in the workspace lock via `ronin-core`.
+proptest = "1.11.0"
+# JSONC RON->JSON output snapshots for the E010 interop round-trip tests (T007).
+# Already in the workspace lock via `ronin-core`/`ronin-validate`.
+insta = "1.47.2"

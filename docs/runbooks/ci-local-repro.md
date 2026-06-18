@@ -42,18 +42,18 @@ cargo test --workspace --locked
 - Runs on `ubuntu-latest`, `windows-latest`, and `macos-latest` in CI; run it on
   your OS locally. If a failure is OS-specific (paths, CRLF vs LF), reproduce on
   that OS.
-- `--workspace` never builds `src/ron-core/fuzz` (it is `exclude`d in the root
+- `--workspace` never builds `src/ronin-core/fuzz` (it is `exclude`d in the root
   `Cargo.toml`), so the nightly-only fuzz crate stays off the stable build
   (OR-009 / SC-007).
 
 ### `wasm` job — WASM-clean build (OR-004, ADR-0002)
 
 ```bash
-cargo build -p ron-core --target wasm32-unknown-unknown --locked
+cargo build -p ronin-core --target wasm32-unknown-unknown --locked
 ```
 
 - Fails if a filesystem / UI / async / native dependency has leaked into
-  `ron-core`. If the target is missing locally:
+  `ronin-core`. If the target is missing locally:
   `rustup target add wasm32-unknown-unknown`.
 
 ### `supply-chain` job — audit + deny (OR-005)
@@ -74,7 +74,7 @@ cargo deny check
 cargo fmt --all -- --check \
   && cargo clippy --workspace --all-targets --locked -- -D warnings \
   && cargo test --workspace --locked \
-  && cargo build -p ron-core --target wasm32-unknown-unknown --locked \
+  && cargo build -p ronin-core --target wasm32-unknown-unknown --locked \
   && cargo audit \
   && cargo deny check
 ```

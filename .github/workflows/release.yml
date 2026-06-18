@@ -1,0 +1,341 @@
+# Release (binaries) — feature 00011-release-distribution (OBJ1 + OBJ3).
+#
+# Cross-platform `ronin-app` BINARY release driven by `dist` (cargo-dist). This
+# workflow is HAND-AUTHORED but modeled on `dist generate` output (HINT-001): it
+# preserves dist's plan → build-local (per-target matrix) → build-global →
+# host → announce job graph, but every third-party action is pinned to a FULL
+# commit SHA (OR-010 / T010), per-job tokens are least-privilege (OR-011 / T013),
+# the E002 CI gates are re-run via `needs:` (OR-009 / T012), tag-suffix channel
+# routing is explicit (OR-008 / T011), and the publish job adds per-binary
+# keyless provenance (OR-006 / T020) + one CycloneDX SBOM (OR-007 / T022).
+#
+# RESPONSIBILITY SPLIT (AD-002 / HINT-005): this workflow builds BINARIES ONLY.
+# It NEVER publishes a crate — release-plz (release-plz.yml) is the sole
+# crates.io publisher (OR-005). So no CARGO_REGISTRY_TOKEN is referenced here.
+#
+# DRIFT (HINT-001): because this file is hand-edited after generate, the CI
+# `release-verify` job (OR-015 / T030) runs `dist generate --check` to assert the
+# committed file still matches what the pinned dist version would emit. Re-run
+# `dist generate` and re-apply the SHA pins + the provenance/SBOM steps below
+# whenever the dist version (dist-workspace.toml `cargo-dist-version`) changes.
+#
+# SHA-PIN PROVENANCE (T010):
+#   - actions/checkout / taiki-e/install-action / Swatinem/rust-cache /
+#     dtolnay/rust-toolchain — pins COPIED VERBATIM from the already-pinned
+#     .github/workflows/{gates,ci}.yml (single source of truth; Dependabot bumps
+#     them in /).
+#   - actions/attest-build-provenance — a NEW action not present in gates/ci.yml;
+#     pinned to a stable major tag with a TODO to resolve to a full SHA, because
+#     the tag→SHA cannot be resolved in this offline build environment.
+name: Release
+
+# Tag-only trigger (OR-001): a maintainer-pushed version tag is the ONLY way to
+# release. No `pull_request` / no `push: branches` — a normal PR or branch push
+# MUST NOT publish anything. No `pull_request_target`, so fork PRs can never run
+# this workflow or reach any release context (OR-011 / Edge Cases).
+on:
+  push:
+    tags:
+      - "v*"
+
+# LEAST-PRIVILEGE DEFAULT (OR-011 / T013): grant NOTHING at the workflow level.
+# Every job starts with no permissions and re-declares only what it needs; the
+# write scopes (contents/id-token/attestations) live ONLY on the `host` job
+# below (T021). Nothing here can publish or attest by default.
+permissions: {}
+
+# Keep cargo deterministic + reproducible across the matrix (OR-010 / OR-012).
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  # ----------------------------------------------------------------------------
+  # GATE (OR-009 / T012): re-run the EXACT E002 CI gates (fmt/clippy + test
+  # matrix + BOTH wasm32 gates + supply-chain) via the reusable workflow. Every
+  # build/publish job below `needs:` this, so the release CANNOT proceed from a
+  # red build — a self-contained mechanical gate, not trust in a prior run.
+  # The reusable workflow caps itself at `contents: read`; nothing here can be
+  # escalated by the called workflow.
+  # ----------------------------------------------------------------------------
+  gates:
+    name: gates (E002 CI re-run)
+    uses: ./.github/workflows/gates.yml
+
+  # ----------------------------------------------------------------------------
+  # PLAN: run `dist plan` to compute the build matrix + release manifest, AND
+  # derive the release CHANNEL from the tag suffix (OR-008 / T011).
+  #
+  # CHANNEL ROUTING (T011 — never silent-stable): a bare semver tag `vX.Y.Z`
+  # (NO `-` pre-release component) → stable; ANY tag carrying a semver
+  # pre-release component (`-rc.N`, `-nightly`, or ANY other `-...` suffix) →
+  # GitHub pre-release. The rule keys on the PRESENCE of the pre-release `-`
+  # component, so an unrecognized suffix routes to pre-release, never silently to
+  # stable (OR-008 / SC-002). The inverse-never property is asserted in CI by the
+  # release-verify routing check (OR-015(d) / T031).
+  # ----------------------------------------------------------------------------
+  plan:
+    name: plan + channel
+    needs: gates
+    runs-on: ubuntu-latest
+    # Read-only: planning never writes a Release or an attestation (OR-011).
+    permissions:
+      contents: read
+    outputs:
+      # The dist plan manifest consumed by the build/host jobs (modeled on
+      # `dist generate` — the real generated workflow passes the full dist-manifest
+      # JSON; kept as a string output here).
+      dist-manifest: ${{ steps.plan.outputs.manifest }}
+      # "true"  → GitHub pre-release (any -rc/-nightly/other pre-release tag)
+      # "false" → stable Release (bare vX.Y.Z)
+      prerelease: ${{ steps.channel.outputs.prerelease }}
+    steps:
+      - name: Checkout (full history for dist plan)
+        uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
+        with:
+          fetch-depth: 0
+      - name: Install Rust toolchain
+        # Stable pin from rust-toolchain.toml (OR-014) — same as the E002 gates.
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Install dist (pinned, prebuilt)
+        # dist is NOT vendored on the runner; install the pinned version via the
+        # already-pinned taiki-e/install-action (same pin as gates.yml). The
+        # version MUST match dist-workspace.toml `cargo-dist-version` so the
+        # generated workflow / `dist generate --check` stay consistent (HINT-001).
+        # TODO(OR-010): keep cargo-dist@<ver> in lockstep with dist-workspace.toml.
+        uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
+        with:
+          tool: cargo-dist@0.30.0
+      - name: dist plan
+        id: plan
+        # `--output-format=json` emits the manifest the matrix/host jobs consume.
+        run: |
+          dist plan --tag="${GITHUB_REF_NAME}" --output-format=json > dist-manifest.json
+          echo "manifest=$(cat dist-manifest.json)" >> "$GITHUB_OUTPUT"
+      - name: Derive release channel from tag suffix
+        id: channel
+        # Bare `vMAJOR.MINOR.PATCH` (digits only) → stable; anything with a `-`
+        # pre-release component → pre-release. Default is pre-release (never
+        # silent-stable): only an exact bare-semver match clears the flag.
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          if [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+            echo "channel: STABLE (bare semver tag '$TAG')"
+          else
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+            echo "channel: PRE-RELEASE (pre-release/unrecognized tag '$TAG')"
+          fi
+
+  # ----------------------------------------------------------------------------
+  # BUILD (per-target, OR-002 / T009): the four MVP triples. `fail-fast: true`
+  # means a failure on ANY target cancels the rest and fails the whole job, so
+  # the downstream `host` job never runs and there is NO partial GitHub Release
+  # (OR-002 fail-whole-on-target-fail). Binaries are `cargo-auditable` +
+  # `--locked` per dist-workspace.toml (OR-007 / OR-010).
+  # ----------------------------------------------------------------------------
+  build-local-artifacts:
+    name: build ${{ matrix.target }}
+    needs: plan
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+          - target: x86_64-apple-darwin
+            runner: macos-latest
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
+        with:
+          fetch-depth: 0
+      - name: Install Rust toolchain (target ${{ matrix.target }})
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
+      - name: Install dist + cargo-auditable (pinned, prebuilt)
+        uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
+        with:
+          # cargo-auditable embeds dependency metadata in the binary (OR-007);
+          # cargo-dist drives the per-target build/tarball/checksum/installer.
+          # TODO(OR-010): keep cargo-dist@<ver> == dist-workspace.toml version.
+          tool: cargo-dist@0.30.0,cargo-auditable@0.7.0
+      - name: dist build (this target)
+        # `--locked` is enforced by dist-workspace.toml; the auditable wrapper is
+        # enabled via `cargo-auditable = true`. Tarball + SHA-256 checksum +
+        # installer fragments for this target are written to the dist artifact dir.
+        run: dist build --tag="${GITHUB_REF_NAME}" --target="${{ matrix.target }}" --output-format=json
+      - name: Upload local artifacts (for host job)
+        uses: actions/upload-artifact@v4 # TODO(OR-010): resolve to full commit SHA before first release — offline now; SHA not resolvable offline
+        with:
+          name: artifacts-${{ matrix.target }}
+          path: |
+            target/distrib/*.tar.gz
+            target/distrib/*.sha256
+          if-no-files-found: error
+
+  # ----------------------------------------------------------------------------
+  # BUILD GLOBAL (OR-003 / T009): dist's host-agnostic artifacts — the shell +
+  # PowerShell install scripts and the combined dist-manifest. Runs once on Linux
+  # after all per-target builds succeed.
+  # ----------------------------------------------------------------------------
+  build-global-artifacts:
+    name: build global (installers + manifest)
+    needs: [plan, build-local-artifacts]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
+        with:
+          fetch-depth: 0
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Install dist (pinned, prebuilt)
+        uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
+        with:
+          # TODO(OR-010): keep cargo-dist@<ver> == dist-workspace.toml version.
+          tool: cargo-dist@0.30.0
+      - name: Download per-target artifacts
+        uses: actions/download-artifact@v4 # TODO(OR-010): resolve to full commit SHA before first release — offline now; SHA not resolvable offline
+        with:
+          pattern: artifacts-*
+          path: target/distrib
+          merge-multiple: true
+      - name: dist build (global installers + manifest)
+        run: dist build --tag="${GITHUB_REF_NAME}" --artifacts=global --output-format=json
+      - name: Upload global artifacts (for host job)
+        uses: actions/upload-artifact@v4 # TODO(OR-010): resolve to full commit SHA before first release — offline now; SHA not resolvable offline
+        with:
+          name: artifacts-global
+          path: |
+            target/distrib/*.sh
+            target/distrib/*.ps1
+            target/distrib/dist-manifest.json
+          if-no-files-found: error
+
+  # ----------------------------------------------------------------------------
+  # HOST / PUBLISH (the ONLY write job — OR-011 / T013 / T021): creates the
+  # GitHub Release with the correct channel, attaches the tarballs + checksums +
+  # install scripts + binstall-metadata (OR-003), emits ONE CycloneDX SBOM
+  # (OR-007 / T022), and produces a per-binary keyless build-provenance
+  # attestation (OR-006 / T020).
+  #
+  # TOKEN SCOPES (OR-011 / OR-018 / T021 / HINT-003 / AD-005) — scoped to THIS
+  # job ONLY, never workflow-global:
+  #   contents:     write  → create the GitHub Release + upload assets.
+  #   id-token:     write  → mint the Sigstore OIDC token for keyless attestation.
+  #   attestations: write  → record the build-provenance attestation.
+  # No CARGO_REGISTRY_TOKEN here (crates are release-plz's job — OR-005).
+  # ----------------------------------------------------------------------------
+  host:
+    name: host (release + provenance + SBOM)
+    needs: [plan, build-local-artifacts, build-global-artifacts]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
+        with:
+          fetch-depth: 0
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Install dist + cargo-cyclonedx (pinned, prebuilt)
+        uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
+        with:
+          # cargo-cyclonedx generates the single CycloneDX SBOM (OR-007 / T022);
+          # cargo-dist performs the Release upload/host.
+          # TODO(OR-010): keep cargo-dist@<ver> == dist-workspace.toml version.
+          tool: cargo-dist@0.30.0,cargo-cyclonedx@0.5.7
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4 # TODO(OR-010): resolve to full commit SHA before first release — offline now; SHA not resolvable offline
+        with:
+          pattern: artifacts-*
+          path: target/distrib
+          merge-multiple: true
+
+      # --- SBOM (OR-007 / T022): exactly ONE CycloneDX SBOM per release, over
+      # the whole workspace dependency graph, attached to the Release below. The
+      # shipped binaries are ALSO cargo-auditable (dist-workspace.toml
+      # `cargo-auditable = true`) so `cargo audit` can read embedded metadata. ---
+      - name: Generate single CycloneDX SBOM
+        run: |
+          cargo cyclonedx --locked --all --format json
+          # Collect the per-crate CycloneDX outputs into ONE release SBOM file.
+          # `cargo cyclonedx` writes <crate>.cdx.json next to each manifest; the
+          # aggregate workspace graph is identical, so we ship the ronin-app SBOM
+          # (the umbrella product) as the single release SBOM (OR-007).
+          cp src/ronin-app/ronin-app.cdx.json target/distrib/ronin-app.cdx.json
+          echo "Single CycloneDX SBOM staged: target/distrib/ronin-app.cdx.json"
+
+      # --- PER-BINARY PROVENANCE (OR-006 / T020): one keyless Sigstore/SLSA
+      # build-provenance attestation per release tarball, verifiable later via
+      # `gh attestation verify`. Unsigned (no paid code signing — DDR-003).
+      # `subject-path` globs every per-OS tarball so each artifact is attested. ---
+      - name: Attest build provenance (per binary)
+        # NEW action (not in gates/ci.yml): cannot resolve its tag→SHA offline.
+        # TODO(OR-010): resolve actions/attest-build-provenance@v3 to a full
+        # commit SHA before the first release — offline now.
+        uses: actions/attest-build-provenance@v3 # TODO(OR-010): resolve to full commit SHA before first release — offline now; SHA not resolvable offline
+        with:
+          subject-path: "target/distrib/*.tar.gz"
+
+      # --- HOST / RELEASE (OR-001/OR-002/OR-003 + channel OR-008): create the
+      # GitHub Release for the tag with the channel computed in `plan`, and
+      # attach the tarballs + SHA-256 checksums + install scripts + SBOM. The
+      # `--prerelease`/stable flag comes from the plan job's `prerelease` output
+      # so a `-rc/-nightly`/other tag is marked pre-release and a bare vX.Y.Z is
+      # stable — never the reverse (OR-008 / SC-002). ---
+      - name: Host release (create Release + upload assets, channel-aware)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ needs.plan.outputs.prerelease }}
+        run: |
+          PRERELEASE_FLAG=""
+          if [[ "$PRERELEASE" == "true" ]]; then
+            PRERELEASE_FLAG="--prerelease"
+            echo "Publishing PRE-RELEASE for ${GITHUB_REF_NAME}"
+          else
+            echo "Publishing STABLE release for ${GITHUB_REF_NAME}"
+          fi
+          # dist hosts/uploads the tarballs + checksums + installers it built; the
+          # SBOM is attached as an additional Release asset. `dist host --upload`
+          # honors the channel via the prerelease flag passed through.
+          gh release create "${GITHUB_REF_NAME}" \
+            ${PRERELEASE_FLAG} \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            target/distrib/*.tar.gz \
+            target/distrib/*.sha256 \
+            target/distrib/*.sh \
+            target/distrib/*.ps1 \
+            target/distrib/ronin-app.cdx.json
+
+  # ----------------------------------------------------------------------------
+  # ANNOUNCE (modeled on dist generate): terminal job that depends on every
+  # prior job, so the overall workflow conclusion reflects the WHOLE release
+  # (fail-whole-on-any-failure — OR-002). Read-only; no publishing.
+  # ----------------------------------------------------------------------------
+  announce:
+    name: announce
+    needs: [plan, build-local-artifacts, build-global-artifacts, host]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Release complete
+        run: echo "Release ${GITHUB_REF_NAME} published successfully (channel + provenance + SBOM)."

@@ -180,7 +180,7 @@ fn multibyte_prefix_makes_char_range_differ_from_byte_range() {
     // Prefix: `(a: "é🦀界", b: ` then an unexpected token `@` triggers a diagnostic.
     let source = "(a: \"é🦀界\", b: @)";
 
-    let cst = ron_core::parse(source);
+    let cst = ronin_core::parse(source);
     let diags = cst.diagnostics();
     assert!(
         !diags.is_empty(),
@@ -217,7 +217,7 @@ fn line_column_is_correct_across_newlines_and_multibyte() {
     // Line 0: `(`               -> newline
     // Line 1: `é@`              -> `@` is the error at line 1, column 1 (é is col 0)
     let source = "(\né@";
-    let cst = ron_core::parse(source);
+    let cst = ronin_core::parse(source);
     let diags = cst.diagnostics();
     assert!(!diags.is_empty());
 
@@ -241,7 +241,7 @@ fn line_column_is_correct_across_newlines_and_multibyte() {
 #[test]
 fn ascii_only_mapping_matches_byte_offsets() {
     let source = "(a: @)";
-    let cst = ron_core::parse(source);
+    let cst = ronin_core::parse(source);
     let diag = cst
         .diagnostics()
         .iter()

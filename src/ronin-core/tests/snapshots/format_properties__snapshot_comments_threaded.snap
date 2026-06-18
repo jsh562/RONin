@@ -1,0 +1,11 @@
+---
+source: src/ronin-core/tests/format_properties.rs
+expression: "snap(\"// header\\nFoo(\\n// before x\\nx: 1, // inline x\\ny: 2,\\n// before close\\n)\")"
+---
+// header
+Foo(
+    // before x
+    x: 1, // inline x
+    y: 2,
+    // before close
+)

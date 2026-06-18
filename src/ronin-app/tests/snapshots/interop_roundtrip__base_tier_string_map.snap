@@ -1,0 +1,10 @@
+---
+source: src/ronin-app/tests/interop_roundtrip.rs
+expression: jsonc(src)
+---
+{
+  "settings": {
+    "volume": 80,
+    "mute": false
+  }
+}

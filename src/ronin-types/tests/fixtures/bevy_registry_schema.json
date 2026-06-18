@@ -1,0 +1,92 @@
+{
+  "bevyVersion": "0.16.0",
+  "registryFormat": "bevy/registry/schema",
+  "$defs": {
+    "bevy_transform::components::transform::Transform": {
+      "typePath": "bevy_transform::components::transform::Transform",
+      "shortPath": "Transform",
+      "crateName": "bevy_transform",
+      "modulePath": "bevy_transform::components::transform",
+      "kind": "Struct",
+      "additionalProperties": false,
+      "x_future_field_for_tolerance": { "ignored": true },
+      "properties": {
+        "translation": { "$ref": "#/$defs/glam::Vec3" },
+        "rotation": { "$ref": "#/$defs/glam::Quat" },
+        "scale": { "$ref": "#/$defs/glam::Vec3" }
+      },
+      "required": ["translation", "rotation", "scale"],
+      "reflectTypes": ["Default", "Component", "Serialize", "Deserialize"],
+      "default": {
+        "translation": [0.0, 0.0, 0.0],
+        "rotation": [0.0, 0.0, 0.0, 1.0],
+        "scale": [1.0, 1.0, 1.0]
+      }
+    },
+    "glam::Vec3": {
+      "typePath": "glam::Vec3",
+      "shortPath": "Vec3",
+      "kind": "Struct",
+      "additionalProperties": false,
+      "properties": {
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "z": { "type": "number" }
+      },
+      "required": ["x", "y", "z"],
+      "reflectTypes": ["Default", "Serialize", "Deserialize"]
+    },
+    "glam::Quat": {
+      "typePath": "glam::Quat",
+      "shortPath": "Quat",
+      "kind": "TupleStruct",
+      "prefixItems": [
+        { "type": "number" },
+        { "type": "number" },
+        { "type": "number" },
+        { "type": "number" }
+      ],
+      "reflectTypes": ["Default", "Serialize", "Deserialize"]
+    },
+    "bevy_pbr::light::Visibility": {
+      "typePath": "bevy_pbr::light::Visibility",
+      "shortPath": "Visibility",
+      "kind": "Enum",
+      "oneOf": [
+        { "kind": "Unit", "shortPath": "Inherited" },
+        { "kind": "Unit", "shortPath": "Hidden" },
+        { "kind": "Unit", "shortPath": "Visible" }
+      ],
+      "reflectTypes": ["Default", "Component", "Serialize", "Deserialize"],
+      "unknown_enum_metadata": 42
+    },
+    "bevy_core::name::TagList": {
+      "typePath": "bevy_core::name::TagList",
+      "shortPath": "TagList",
+      "kind": "List",
+      "items": { "type": "string" },
+      "reflectTypes": ["Default", "Serialize", "Deserialize"]
+    },
+    "bevy_utils::label::LabelMap": {
+      "typePath": "bevy_utils::label::LabelMap",
+      "shortPath": "LabelMap",
+      "kind": "Map",
+      "keyType": { "type": "string" },
+      "additionalProperties": { "$ref": "#/$defs/glam::Vec3" },
+      "reflectTypes": ["Default", "Serialize", "Deserialize"]
+    },
+    "core::primitive::f32": {
+      "typePath": "core::primitive::f32",
+      "shortPath": "f32",
+      "kind": "Value",
+      "type": "number",
+      "reflectTypes": ["Default", "Serialize", "Deserialize"]
+    },
+    "some_mod::experimental::FancyThing": {
+      "typePath": "some_mod::experimental::FancyThing",
+      "shortPath": "FancyThing",
+      "kind": "AtomicFutureKind",
+      "reflectTypes": ["Serialize", "Deserialize"]
+    }
+  }
+}

@@ -23,7 +23,7 @@
 //! capable dependencies are local: `directories` (resolving the OS config/log
 //! dirs), `rfd` (the native file-open/save dialog), `arboard` (system clipboard,
 //! pulled transitively by egui), the `tracing*` stack (this local-file logger),
-//! and `std::fs`. User-provided Rust source is parsed statically by `ron-core`
+//! and `std::fs`. User-provided Rust source is parsed statically by `ronin-core`
 //! and never executed. The `deny.toml` security gate and the
 //! `network_audit_no_networking_or_telemetry_crates` regression test in
 //! `tests/offline_logging.rs` enforce this policy continuously.

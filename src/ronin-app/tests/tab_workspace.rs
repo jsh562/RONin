@@ -10,7 +10,10 @@
 
 use std::io::Write;
 
-use ronin_app::app::{App, PromptChoice};
+use egui_kittest::kittest::Queryable;
+use egui_kittest::Harness;
+
+use ronin_app::app::{render_tab_strip, App, PromptChoice};
 use ronin_app::document::{ByteFidelityProfile, CursorState, EditorDocument, SavedSnapshot};
 use ronin_app::settings::AppSettings;
 use ronin_app::workspace::{ClosedDocumentRecord, EditorWorkspace, RECENTLY_CLOSED_CAP};
@@ -526,4 +529,74 @@ fn close_all_with_clean_tabs_closes_them_without_prompting() {
     assert_eq!(app.document_count(), 0, "clean tabs close immediately");
     let _ = std::fs::remove_file(&a);
     let _ = std::fs::remove_file(&b);
+}
+
+// ---------------------------------------------------------------------------
+// tab click switches the active document (UI Fix 1) — egui_kittest widget test
+// ---------------------------------------------------------------------------
+
+#[test]
+fn clicking_an_inactive_tab_switches_the_active_document() {
+    // Regression guard (UI Fix 1): the tab's click must be read off the INNER
+    // selectable-label response, not the `dnd_drag_source` outer response (which
+    // senses drag, never click). Before the fix `.clicked()` never fired and the
+    // active tab never moved on a click.
+    //
+    // The full `App::ui` pass needs a live `eframe::Frame` that egui_kittest does
+    // not synthesize here, so this drives the extracted `render_tab_strip` widget
+    // (the exact code `render_tab_bar` runs) through the renderer-free harness — the
+    // same widget-level boundary `open_and_view`/`problems_nav` use.
+    let mut ws = EditorWorkspace::new();
+    ws.open(untitled_with("first", 1)); // Untitled-1 at index 0
+    ws.open(untitled_with("second", 2)); // Untitled-2 at index 1 (active on open)
+    assert_eq!(
+        ws.active_index(),
+        Some(1),
+        "the second-opened tab is active before any click"
+    );
+
+    // Capture the action `render_tab_strip` returns across the two-pass run egui
+    // needs to register a click. An `Rc<Cell<..>>` is shared between the harness
+    // closure (which the harness must own) and this test scope, which reads it back.
+    let switched = std::rc::Rc::new(std::cell::Cell::new(None));
+    let switched_in = std::rc::Rc::clone(&switched);
+
+    // The harness closure must own its data, so render a throwaway workspace with the
+    // same two tabs — an identical tab strip (same titles "Untitled-1"/"Untitled-2",
+    // second active).
+    let mut render_ws = EditorWorkspace::new();
+    render_ws.open(untitled_with("first", 1));
+    render_ws.open(untitled_with("second", 2));
+
+    let mut harness = Harness::new_ui(move |ui| {
+        let actions = render_tab_strip(ui, &render_ws);
+        if let Some(idx) = actions.switch_to {
+            switched_in.set(Some(idx));
+        }
+    });
+    harness.run();
+
+    // Click the INACTIVE tab (index 0 = "Untitled-1") and re-run so egui registers
+    // the click on the next frame.
+    harness.get_by_label_contains("Untitled-1").click();
+    harness.run();
+
+    let idx = switched
+        .get()
+        .expect("clicking an inactive tab must yield a switch_to action");
+    assert_eq!(idx, 0, "the clicked tab is index 0 (Untitled-1)");
+
+    // Apply the action the way `render_tab_bar` does and assert the active document
+    // actually moved to the clicked tab.
+    assert!(ws.switch(idx), "switch to the clicked tab succeeds");
+    assert_eq!(
+        ws.active_index(),
+        Some(0),
+        "after a click on Untitled-1 the active document is the clicked tab"
+    );
+    assert_eq!(
+        ws.get(ws.active_index().unwrap()).unwrap().title(),
+        "Untitled-1",
+        "the active document title moved to the clicked tab"
+    );
 }

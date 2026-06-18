@@ -1,0 +1,23 @@
+// A scene whose component values disagree with the registered reflect schema:
+// a wrong field type, a wrong tuple arity, and an unknown enum variant. Every
+// component path IS registered, so scene-aware validation can flag each
+// mismatch at its precise CST range (FR-005).
+(
+    resources: {},
+    entities: {
+        0: (
+            components: {
+                // `translation.x` is a string, not a number (wrong field type);
+                // `rotation` is a 3-element tuple, not the registered 4-element
+                // `Quat` (wrong arity).
+                "bevy_transform::components::transform::Transform": (
+                    translation: (x: "not-a-number", y: 0.0, z: 0.0),
+                    rotation: (0.0, 0.0, 0.0),
+                    scale: (x: 1.0, y: 1.0, z: 1.0),
+                ),
+                // `Sideways` is not one of Inherited/Hidden/Visible (bad variant).
+                "bevy_pbr::light::Visibility": Sideways,
+            },
+        ),
+    },
+)

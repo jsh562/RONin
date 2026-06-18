@@ -355,6 +355,26 @@ impl EditorWorkspace {
         self.open(EditorDocument::new_untitled(seq))
     }
 
+    /// Open reconstructed RON text in a **new** untitled tab and make it active —
+    /// the non-destructive JSON→RON import-to-new-tab surface (E010 US2 — T023,
+    /// FR-002).
+    ///
+    /// The reconstructed `ron_text` becomes a fresh `Untitled-N` buffer that is
+    /// **dirty** (never-saved: the user chose where, if anywhere, to save the
+    /// reconstructed RON), leaving the **source JSON untouched** — this never opens
+    /// or writes the input file (FR-002). The caller requests an initial parse on the
+    /// new tab (so it gets diagnostics/highlighting) exactly as a freshly opened
+    /// document does. Returns the new tab's index.
+    pub fn open_imported_ron(&mut self, ron_text: String) -> usize {
+        let seq = self.next_untitled_seq();
+        let mut doc = EditorDocument::new_untitled(seq);
+        // Install the reconstructed RON as the live buffer; `on_edit` bumps the edit
+        // generation so the buffer is dirty and a parse is requested by the caller.
+        doc.buffer = ron_text;
+        doc.on_edit();
+        self.open(doc)
+    }
+
     /// Find the index of an open document whose path equals `target` (FR-025).
     ///
     /// Used for focus-existing: never-saved (path-less) buffers are exempt and so

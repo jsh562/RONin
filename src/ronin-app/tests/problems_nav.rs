@@ -112,7 +112,7 @@ fn problems_panel_shows_empty_state_for_no_diagnostics() {
 
 #[test]
 fn problems_panel_orders_rows_by_source_location_without_mutating_input() {
-    use ron_core::{DiagnosticCode, Severity};
+    use ronin_core::{DiagnosticCode, Severity};
     use ronin_app::diagnostics_map::DiagnosticView;
 
     // Two diagnostics supplied out of source order: the input order must be
@@ -123,6 +123,8 @@ fn problems_panel_orders_rows_by_source_location_without_mutating_input() {
         line_col: ((2, 4), (2, 5)),
         severity: Severity::Error,
         code: DiagnosticCode::UnexpectedToken,
+        scene_code: None,
+        loss_code: None,
         message: "later problem".to_string(),
     };
     let earlier = DiagnosticView {
@@ -130,6 +132,8 @@ fn problems_panel_orders_rows_by_source_location_without_mutating_input() {
         line_col: ((0, 3), (0, 4)),
         severity: Severity::Error,
         code: DiagnosticCode::MissingValue,
+        scene_code: None,
+        loss_code: None,
         message: "earlier problem".to_string(),
     };
     // Input order: [later, earlier]. The earlier-located one must be clickable as

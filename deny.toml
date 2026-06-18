@@ -31,15 +31,51 @@ allow = [
     "CC0-1.0",
     "OFL-1.1",
     "Ubuntu-font-1.0",
+    # Added for the jsonschema tree (E006, ronin-validate only):
+    # MIT-0 — borrow-or-share (via fluent-uri → referencing → jsonschema).
+    # MIT No Attribution; OSI-approved, strictly more permissive than MIT.
+    "MIT-0",
+    # E007 atomic-write dependency (ronin-app only): `atomicwrites` and its
+    # transitive deps (tempfile, fastrand, getrandom, once_cell, cfg-if, and the
+    # windows-sys/windows-targets/windows_x86_64_msvc/windows-link tree) are ALL
+    # MIT / Apache-2.0 — already covered by the allow-list above, so no NEW
+    # license entry is required. Listed here only to document the audit.
 ]
 confidence-threshold = 0.8
 
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
-# ron-core must stay WASM-clean: no native/cc-built or platform-specific runtime
+# ronin-core must stay WASM-clean: no native/cc-built or platform-specific runtime
 # deps. These bans document the intent; the wasm32 build gate (T030) is the proof.
-deny = []
+#
+# ronin-validate (E006) must stay WASM-clean AND fully offline (ADR-0006, FR-023):
+# it takes `jsonschema` with `default-features = false`, which keeps the default
+# `resolve-http`/TLS resolver — and therefore `reqwest`/`rustls` — out of the
+# tree. The bans below assert those network-transport crates never appear
+# anywhere in the workspace; their presence would mean a `default-features=false`
+# regression and would re-introduce network access. (cargo-tree confirms both are
+# currently ABSENT from the ronin-validate tree on native and wasm32.)
+#
+# NOTE: cargo-deny bans are workspace-wide and cannot be scoped per-crate, so the
+# complementary invariant — `jsonschema`/`serde_json` must stay OUT of `ronin-core`
+# (it stays rowan-only; HINT-002, AD-007) — is NOT expressed here (those crates
+# are legitimately present in ronin-validate/ronin-app). That boundary is enforced
+# instead by ronin-core's own manifest plus the T036 dependency-invariant test and
+# the ronin-core wasm32 build gate.
+# E009 Bevy mode (registry-as-data): RONin consumes an exported Bevy type
+# registry as DATA and MUST NOT depend on or embed any `bevy` crate anywhere in
+# the workspace (FR-003/FR-017, SC-007). cargo-deny matches `deny` entries by
+# EXACT crate name (no name globs), so the umbrella `bevy` crate is banned here;
+# the family-wide `bevy*` prefix ban (bevy_reflect/bevy_ecs/bevy_remote/...) is
+# enforced comprehensively by the ronin-app dependency-invariant test (cargo-
+# metadata closure BFS), which also proves ronin-core/ronin-validate build for
+# wasm32. (cargo-tree confirms no `bevy*` crate is present in the tree today.)
+deny = [
+    { name = "reqwest" },
+    { name = "rustls" },
+    { name = "bevy" },
+]
 
 [sources]
 unknown-registry = "deny"

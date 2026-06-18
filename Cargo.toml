@@ -1,15 +1,16 @@
 [workspace]
 resolver = "2"
 members = [
-    "src/ron-core",
-    "src/ron-types",
+    "src/ronin-core",
+    "src/ronin-types",
     "src/ronin-app",
+    "src/ronin-validate",
 ]
 # The cargo-fuzz crate depends on `libfuzzer-sys` (nightly + libFuzzer only) and
 # must NOT be part of the stable workspace build/test. It is built solely via
-# `cargo +nightly fuzz run` from `src/ron-core/fuzz/`.
+# `cargo +nightly fuzz run` from `src/ronin-core/fuzz/`.
 exclude = [
-    "src/ron-core/fuzz",
+    "src/ronin-core/fuzz",
 ]
 
 [workspace.package]

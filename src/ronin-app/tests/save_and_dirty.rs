@@ -163,6 +163,52 @@ fn failed_save_keeps_doc_dirty_and_pushes_error_notice() {
 }
 
 #[test]
+fn failed_save_leaves_existing_target_byte_identical_through_the_atomic_seam() {
+    // E007/OBJ1 TR-003/TR-019a regression at the shell seam: open a real file, edit
+    // it, then attempt a save that fails (the target's parent subdir does not
+    // exist, so the atomic temp cannot be created). The save must fail, the doc must
+    // stay dirty, AND a previously-saved on-disk file must remain byte-identical —
+    // the atomic path never partially writes / truncates the original.
+    let fixture = temp_ron("Config(level: 1)\n", "atomic_intact");
+    let original = std::fs::read(&fixture).expect("seed original");
+
+    let mut app = App::new(AppSettings::default(), None);
+    app.open_file(&fixture);
+    {
+        let doc = app.active_document_mut().expect("active doc");
+        doc.buffer = "Config(level: 2)\n".to_string();
+        doc.on_edit();
+        assert!(doc.dirty());
+    }
+
+    // A target under a non-existent subdir: temp creation fails → SaveError.
+    let bad = fixture
+        .parent()
+        .unwrap()
+        .join("ronin_missing_subdir_atomic")
+        .join("out.ron");
+    let ok = app.save_doc_to(0, &bad);
+    assert!(!ok, "saving under a missing subdir must fail");
+    assert!(
+        app.active_document().unwrap().dirty(),
+        "a failed atomic save must leave the doc dirty (no optimistic re-baseline)"
+    );
+    assert_eq!(
+        app.notices().len(),
+        1,
+        "a failed atomic save pushes exactly one error notice"
+    );
+    // The unrelated, previously-saved file is byte-identical (original intact).
+    assert_eq!(
+        std::fs::read(&fixture).unwrap(),
+        original,
+        "a failed atomic save must not touch any other file"
+    );
+
+    let _ = std::fs::remove_file(&fixture);
+}
+
+#[test]
 fn closing_a_dirty_doc_raises_the_prompt() {
     // FR-010: closing a tab over unsaved edits raises the save/discard/cancel
     // prompt (assert the prompt-pending state is set, not auto-closed).

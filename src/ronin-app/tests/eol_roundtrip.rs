@@ -14,7 +14,7 @@
 //! round-trip byte-for-byte; it normalises to the dominant style (ties → LF).
 
 use ronin_app::document::ByteFidelityProfile;
-use ronin_app::fileio::save_bytes;
+use ronin_app::fileio::{save_atomic, save_bytes};
 
 /// Decode `raw` to the editor buffer the way the shell does: validate UTF-8, drop
 /// a leading BOM (kept on the profile, not in the buffer), and normalise every
@@ -122,4 +122,65 @@ fn mixed_eol_tie_normalises_to_lf() {
     let expected_uniform = b"a\nb\nc\n".to_vec();
     assert_eq!(out, expected_uniform, "mixed-EOL tie must normalise to LF");
     assert_ne!(out, raw, "mixed tie input is not byte-identical after save");
+}
+
+// ---------------------------------------------------------------------------
+// E007/OBJ1 regression: the same EOL fidelity must hold through the ATOMIC path.
+//
+// `save_atomic` routes through `save_bytes`, so the load → save_atomic → re-read
+// bytes must match the same byte-fidelity contract on disk (the atomic path must
+// not regress E003's fidelity — TR-004/SC-002). These mirror the in-memory cases
+// above against a real temp file.
+// ---------------------------------------------------------------------------
+
+/// A unique temp file path for an atomic-path round-trip (the file is created by
+/// the save under test).
+fn atomic_temp_path(tag: &str) -> std::path::PathBuf {
+    let mut path = std::env::temp_dir();
+    path.push(format!(
+        "ronin_eol_atomic_{tag}_{}_{}.ron",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    path
+}
+
+/// Load → `save_atomic` (to a temp file) → re-read must be byte-identical for `raw`.
+fn assert_atomic_byte_identical(raw: &[u8], tag: &str, label: &str) {
+    let profile = ByteFidelityProfile::from_bytes(raw);
+    let buffer = widget_buffer(raw);
+    let path = atomic_temp_path(tag);
+    save_atomic(&buffer, &profile, &path)
+        .unwrap_or_else(|e| panic!("{label}: atomic save must succeed: {e}"));
+    let on_disk = std::fs::read(&path).expect("read back atomic-saved file");
+    assert_eq!(
+        on_disk, raw,
+        "{label}: load→save_atomic must be byte-identical\n  expected: {raw:?}\n  got:      {on_disk:?}"
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn atomic_uniform_crlf_roundtrips_byte_identical() {
+    assert_atomic_byte_identical(b"Config(\r\n    level: 3,\r\n)\r\n", "crlf", "atomic CRLF");
+}
+
+#[test]
+fn atomic_uniform_lf_roundtrips_byte_identical() {
+    assert_atomic_byte_identical(b"Config(\n    level: 3,\n)\n", "lf", "atomic LF");
+}
+
+#[test]
+fn atomic_bom_roundtrips_byte_identical() {
+    let mut raw = vec![0xEF, 0xBB, 0xBF];
+    raw.extend_from_slice(b"List([1, 2, 3])\n");
+    assert_atomic_byte_identical(&raw, "bom", "atomic BOM (LF)");
+}
+
+#[test]
+fn atomic_no_trailing_newline_roundtrips_byte_identical() {
+    assert_atomic_byte_identical(b"Foo(x: 1)", "no_nl", "atomic no trailing newline");
 }

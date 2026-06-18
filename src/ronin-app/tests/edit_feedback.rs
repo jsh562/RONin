@@ -3,7 +3,7 @@
 //! Covers:
 //! * Typing invalid RON keeps the app responsive (no panic) and updates
 //!   diagnostics once an off-thread reparse lands (FR-006).
-//! * Highlighting derives from the `ron-core` CST token stream (FR-019).
+//! * Highlighting derives from the `ronin-core` CST token stream (FR-019).
 //! * An oversize buffer disables highlighting/squiggles while staying editable;
 //!   the threshold crossing is observable via the degrade indicator (FR-017).
 //!
@@ -104,10 +104,11 @@ fn stale_results_are_discarded() {
     assert_eq!(doc.edit_generation(), 2);
 
     let worker = ReparseWorker::new();
-    // Request only the *stale* generation-1 text directly. The doc's current
-    // generation is 2, so whatever the worker delivers for gen 1 must be
-    // discarded by `poll_parse` — it can never install.
-    worker.request(1, "(a: 1)".to_string());
+    // Request only the *stale* generation-1 text directly (tagged with this
+    // document's id so it routes back here). The doc's current generation is 2, so
+    // whatever the worker delivers for gen 1 must be discarded by `poll_parse` — it
+    // can never install.
+    worker.request(doc.id(), 1, "(a: 1)".to_string(), None);
 
     // Poll across a bounded window; a stale result must never install, regardless
     // of when (or whether) the worker has delivered it yet.
@@ -155,7 +156,7 @@ fn highlight_model_derives_classes_from_cst() {
 
 #[test]
 fn highlight_class_maps_known_kinds() {
-    use ron_core::SyntaxKind;
+    use ronin_core::SyntaxKind;
     assert_eq!(
         HighlightClass::from_kind(SyntaxKind::String),
         HighlightClass::StringLit

@@ -1,0 +1,83 @@
+# dist (cargo-dist) configuration — feature 00011-release-distribution.
+#
+# This is the SINGLE source of truth for the cross-platform BINARY release of
+# `ronin-app` (OBJ1 / OR-002 / OR-003). `dist` reads this file to (a) build the
+# four MVP target tarballs + SHA-256 checksums + shell/PowerShell installers +
+# `cargo binstall` metadata for a GitHub Release, and (b) generate the committed
+# `.github/workflows/release.yml`.
+#
+# Split of responsibilities (AD-002 / HINT-005):
+#   - dist  → builds BINARIES ONLY (crates.io publishing OFF).
+#   - release-plz → the SOLE crates.io publisher (OR-005). dist must NEVER push
+#     a crate, or the two tools would double-publish (a yank-only error).
+#
+# The root-excluded `src/ronin-core/fuzz` crate is NOT a workspace member
+# (root Cargo.toml `exclude = ["src/ronin-core/fuzz"]`), so dist never sees it and
+# it can never enter the release matrix or be published (OR-005 / HINT-005).
+#
+# Phasing (OR-013 / DDR-001): Phase-1 only. Phase 2 (Homebrew/winget/AUR) and
+# Phase 3 (signed installers / notarization) are added LATER by extending the
+# `installers` / `targets` blocks below — no Phase-1 rework needed. See the
+# "PHASE 2/3 (deferred)" markers throughout.
+
+[workspace]
+members = ["cargo:."]
+
+[dist]
+# Pin the dist CLI version so `dist generate --check` is reproducible and the
+# committed release.yml cannot silently drift against a newer generator
+# (OR-010 / HINT-001). The CI `release-verify` job installs THIS version via
+# taiki-e/install-action and asserts no drift.
+# TODO(OR-010): confirm this matches the dist version installed in
+# release-verify / used to (re)generate release.yml before the first release.
+cargo-dist-version = "0.30.0"
+
+# Generate CI for GitHub Actions only (Phase-1 GitHub-first — DDR-001).
+ci = "github"
+
+# MVP target matrix (OR-002 — clarified minimal set): x86_64 Windows, Intel +
+# Apple-Silicon macOS, x86_64 gnu Linux. A failure on ANY target fails the whole
+# release (the generated release.yml is fail-fast — OR-002). Linux/Windows ARM +
+# musl are deferred.
+# PHASE 2 (deferred): add aarch64 Linux / musl / Windows ARM triples here.
+targets = [
+    "x86_64-pc-windows-msvc",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+]
+
+# End-user install paths attached to the GitHub Release (OR-003): a POSIX shell
+# installer + a PowerShell installer. These are dist defaults — no separately
+# hosted URL, zero extra infra (OR-003 / OR-012).
+# PHASE 2 (deferred): add "homebrew" / "msi" here without touching Phase 1.
+installers = ["shell", "powershell"]
+
+# All artifacts are .tar.gz tarballs on EVERY OS (so `cargo binstall`'s
+# pkg-fmt = "tar.gz" below holds uniformly, including Windows) — OR-003.
+windows-archive = ".tar.gz"
+unix-archive = ".tar.gz"
+
+# Per-artifact SHA-256 checksums attached to the Release (OR-003).
+checksum = "sha256"
+
+# Build every binary with `cargo-auditable` so the shipped `ronin-app` embeds its
+# dependency graph, readable by `cargo audit` (OR-007 / SC-005). dist enables the
+# auditable wrapper for all cargo build invocations in the generated workflow.
+cargo-auditable = true
+
+# No self-updater binary (zero extra surface / infra — OR-012).
+install-updater = false
+
+# Reproducible, isolated per-target builds against the committed Cargo.lock
+# (OR-010): one target's failure can't be masked by another's, and every cargo
+# invocation dist generates is `--locked`.
+precise-builds = true
+
+# `cargo binstall` metadata (OR-003): the FUNCTIONAL binstall keys live in the
+# package manifest `src/ronin-app/Cargo.toml` under `[package.metadata.binstall]`
+# (that is the only location `cargo binstall` reads — it scans the crate
+# manifest, not this dist file). Those keys point binstall at the GitHub Release
+# tarball assets dist produces here, with `pkg-fmt = "tar.gz"` (matching the
+# windows/unix-archive settings above). No separately hosted install URL — zero
+# extra infra (OR-003 / OR-012).

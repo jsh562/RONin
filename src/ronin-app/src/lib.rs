@@ -12,7 +12,7 @@
 //!
 //! * [`document`] — the editor document model and byte-fidelity profile (FR-007,
 //!   FR-020).
-//! * [`reparse`] — off-thread parsing against `ron-core` with generation-keyed
+//! * [`reparse`] — off-thread parsing against `ronin-core` with generation-keyed
 //!   staleness (FR-006).
 //! * [`diagnostics_map`] — byte→char/line-column diagnostic projection (FR-008).
 //! * [`fileio`] — UTF-8-validated file open (FR-018).
@@ -29,13 +29,23 @@
 //! and sequential multi-dirty close/quit (FR-012/FR-013/FR-022/FR-025/FR-026).
 
 pub mod app;
+pub mod bevy;
+pub mod binding;
+/// Shared byte→char offset resolution used by the highlight + structural surfaces.
+mod byte_to_char;
+pub mod completion;
 pub mod diagnostics_map;
 pub mod document;
 pub mod editor_view;
 pub mod fileio;
+pub mod interop;
 pub mod logging;
 pub mod panels;
 pub mod problems_panel;
+pub mod recovery;
 pub mod reparse;
 pub mod settings;
+pub mod snippets;
+pub mod structural;
+pub mod type_acquire;
 pub mod workspace;
