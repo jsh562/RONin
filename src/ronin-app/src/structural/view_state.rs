@@ -51,6 +51,14 @@ pub enum PathStep {
     /// **name**. The variant selector itself is identified by the field's enclosing
     /// variant; this step addresses one payload entry of that variant.
     VariantField(String),
+    /// A **synthetic** trailing step used ONLY by the Table view's "combined" /
+    /// flattened projection: on a parent collection (map/list of records), it selects
+    /// the union of the named child collection across **every** entry (e.g.
+    /// `hulls ▸ CombinedChild("cells")` = all hulls' `cells` rows in one table). It
+    /// does **not** resolve to a single live node ([`resolve_path`] returns `None`
+    /// for it); the combined table is built by `TableModel::derive_combined` from the
+    /// parent prefix + this field name. Never produced by [`path_of`].
+    CombinedChild(String),
 }
 
 /// A stable, cross-reparse identity for a CST node: the ordered steps from the
@@ -216,6 +224,8 @@ fn descend(node: &SyntaxNode, step: &PathStep) -> Option<SyntaxNode> {
                 .map(|val| val.syntax().clone());
             found
         }
+        // A synthetic combined-table step never names a single live node.
+        PathStep::CombinedChild(_) => None,
     }
 }
 
@@ -266,6 +276,8 @@ fn descend_counting(node: &SyntaxNode, step: &PathStep, visits: &mut usize) -> O
             }
             None
         }
+        // A synthetic combined-table step never names a single live node.
+        PathStep::CombinedChild(_) => None,
     }
 }
 

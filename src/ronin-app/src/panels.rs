@@ -212,17 +212,47 @@ pub fn render_table_sections_seam(
         return;
     }
 
-    // The central area is identical to the outline seam: Back/Forward/Up + breadcrumb,
-    // then the selected node projected as a table via `derive_any`.
+    // On-demand "Combine child" control (E018): when the selected node is a parent
+    // map/list of records with repeated child collections, offer to flatten each into
+    // one table (the parent key becomes a column). Computed read-only before the panel.
+    let combinable = doc
+        .parse
+        .as_ref()
+        .and_then(|p| resolve_path(&p.cst.root(), &selected))
+        .map(|node| crate::structural::table::combinable_child_fields(&node))
+        .unwrap_or_default();
+
+    // The central area: Back/Forward/Up + breadcrumb, the Combine-child control (when
+    // offered), then the selected node projected as a table via `derive_any`.
     let mut breadcrumb_clicked: Option<StructuralPath> = None;
+    let mut combine_clicked: Option<StructuralPath> = None;
     egui::CentralPanel::default().show_inside(ui, |ui| {
         render_table_nav_controls(ui, doc);
         render_breadcrumb(ui, doc, &selected, &mut breadcrumb_clicked);
+        if !combinable.is_empty() {
+            ui.horizontal(|ui| {
+                ui.weak("Combine child:");
+                for child in &combinable {
+                    if ui
+                        .button(child.field.as_str())
+                        .on_hover_text(format!(
+                            "Flatten {} across all entries into one table ({} rows)",
+                            child.field, child.rows
+                        ))
+                        .clicked()
+                    {
+                        combine_clicked =
+                            Some(selected.child(PathStep::CombinedChild(child.field.clone())));
+                    }
+                }
+            });
+        }
         ui.separator();
         render_table_view_any(ui, doc, worker, &selected);
     });
 
-    if let Some(path) = breadcrumb_clicked {
+    // A Combine click takes priority; either routes through `navigate_table_section`.
+    if let Some(path) = combine_clicked.or(breadcrumb_clicked) {
         doc.view_state_mut().navigate_table_section(path);
     }
 }
@@ -234,6 +264,7 @@ fn step_label(step: &PathStep) -> String {
         PathStep::Field(name) | PathStep::VariantField(name) => name.clone(),
         PathStep::Key(text) => format!("({text})"),
         PathStep::Index(i) => format!("[{i}]"),
+        PathStep::CombinedChild(field) => format!("\u{2217} {field}"),
     }
 }
 
@@ -318,6 +349,18 @@ fn selection_is_table_able(doc: &EditorDocument, path: &StructuralPath) -> bool 
         return false;
     };
     let root = parse.cst.root();
+    // A combined selection (trailing `CombinedChild(field)`) does not resolve to a
+    // single node; it is table-able iff its parent prefix resolves to a map/list whose
+    // entries still share that child field (E018).
+    if let Some(PathStep::CombinedChild(field)) = path.steps().last() {
+        let n = path.steps().len();
+        let parent = StructuralPath::from_steps(path.steps()[..n - 1].to_vec());
+        return resolve_path(&root, &parent).is_some_and(|node| {
+            crate::structural::table::combinable_child_fields(&node)
+                .iter()
+                .any(|c| &c.field == field)
+        });
+    }
     matches!(
         resolve_path(&root, path).and_then(ronin_core::ast::Value::cast),
         Some(

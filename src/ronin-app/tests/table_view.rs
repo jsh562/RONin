@@ -800,6 +800,85 @@ fn scan_scalar_only_struct_has_no_sections() {
     assert!(scan(src).is_empty(), "scalar-only doc has no sections");
 }
 
+// =============================================================================
+// E018 — Combined / flattened table: union a repeated child across the parent
+// =============================================================================
+
+const COMBINED_SRC: &str =
+    "(hulls: { (1): (cells: [(x: 0), (x: 1)]), (2): (cells: [(x: 2), (x: 3, y: 9), (x: 4)]) })";
+
+#[test]
+fn scan_finds_combined_child_section() {
+    // The `hulls` map's entries each hold a `cells` record-list → a synthetic combined
+    // section unioning all cells, listed alongside the per-hull `cells` sections.
+    let combined = scan(COMBINED_SRC)
+        .into_iter()
+        .find(|s| s.shape == Shape::Combined)
+        .expect("a combined cells section");
+    assert_eq!(
+        combined.path,
+        StructuralPath::from_steps(vec![
+            PathStep::Field("hulls".to_string()),
+            PathStep::CombinedChild("cells".to_string()),
+        ])
+    );
+    assert_eq!(combined.rows, 5, "2 + 3 cells across both hulls");
+    assert_eq!(combined.cols, 3, "parent-key column + union(x, y)");
+}
+
+#[test]
+fn derive_combined_unions_child_rows_with_parent_key_column() {
+    let cst = ronin_core::parse(COMBINED_SRC);
+    let parent = StructuralPath::from_steps(vec![PathStep::Field("hulls".to_string())]);
+    let model = TableModel::derive_combined(&cst, &parent, "cells", &[])
+        .expect("combined cells derives a model");
+
+    // Columns: leading parent-key column (labeled after the parent field) + union x, y.
+    let names: Vec<_> = model.columns.iter().map(|c| c.field_name.clone()).collect();
+    assert_eq!(names, vec!["hulls", "x", "y"]);
+    assert_eq!(model.rows.len(), 5, "2 + 3 unioned rows");
+
+    // The parent-key column is read-only and carries each row's source hull key.
+    let keys: Vec<_> = (0..5)
+        .map(|r| model.cell(r, 0).unwrap().text.clone().unwrap_or_default())
+        .collect();
+    assert_eq!(keys, vec!["(1)", "(1)", "(2)", "(2)", "(2)"]);
+    assert!((0..5).all(|r| model.cell(r, 0).unwrap().class == CellClass::ReadOnly));
+    assert!((0..5).all(|r| model.cell(r, 0).unwrap().value_ref.is_none()));
+
+    // `y` is Blank except on the one (2) row that has it (row index 3), where it's "9".
+    assert_eq!(model.cell(0, 2).unwrap().class, CellClass::Blank);
+    assert_eq!(model.cell(3, 2).unwrap().class, CellClass::Scalar);
+    assert_eq!(model.cell(3, 2).unwrap().text.as_deref(), Some("9"));
+
+    // A data cell's value_ref is the REAL nested path (hulls ▸ (2) ▸ cells ▸ [1] ▸ x),
+    // resolvable against the live CST so editing works.
+    let x_ref = model.cell(3, 1).unwrap().value_ref.clone().expect("x cell ref");
+    assert_eq!(
+        x_ref,
+        StructuralPath::from_steps(vec![
+            PathStep::Field("hulls".to_string()),
+            PathStep::Key("(2)".to_string()),
+            PathStep::Field("cells".to_string()),
+            PathStep::Index(1),
+            PathStep::Field("x".to_string()),
+        ])
+    );
+    assert!(
+        resolve_path(&cst.root(), &x_ref).is_some(),
+        "the combined cell's value_ref resolves to a live node"
+    );
+
+    // `derive_any` routes a CombinedChild-terminated path to the same combined model.
+    let via_any = TableModel::derive_any(
+        &cst,
+        &parent.child(PathStep::CombinedChild("cells".to_string())),
+        &[],
+    )
+    .expect("derive_any dispatches a combined path");
+    assert_eq!(via_any, model);
+}
+
 #[test]
 fn record_map_model_has_leading_readonly_key_column() {
     let cst = ronin_core::parse("(hulls: { (1): (hp: 1, name: \"a\"), (2): (hp: 2, name: \"b\") })");

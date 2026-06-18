@@ -286,6 +286,9 @@ impl TableModel {
             SectionShape::RecordList => Self::derive(cst, section, diagnostics),
             SectionShape::RecordMap => Self::derive_record_map(cst, section, diagnostics),
             SectionShape::TupleList => Self::derive_tuple_list(cst, section, diagnostics),
+            // A combined section's path ends in `CombinedChild(field)`; `derive_any`
+            // dispatches it to `derive_combined`.
+            SectionShape::Combined => Self::derive_any(cst, section, diagnostics),
         }
     }
 
@@ -327,6 +330,13 @@ impl TableModel {
         path: &StructuralPath,
         diagnostics: &[DiagnosticView],
     ) -> Option<Self> {
+        // A combined/flattened selection: a trailing `CombinedChild(field)` step unions
+        // the named child collection across every entry of the parent prefix (E018).
+        if let Some(PathStep::CombinedChild(field)) = path.steps().last() {
+            let n = path.steps().len();
+            let parent = StructuralPath::from_steps(path.steps()[..n - 1].to_vec());
+            return Self::derive_combined(cst, &parent, field, diagnostics);
+        }
         let root = cst.root();
         let node = resolve_path(&root, path)?;
         match ast::Value::cast(node.clone())? {
@@ -347,6 +357,173 @@ impl TableModel {
             // selects one.
             _ => None,
         }
+    }
+
+    /// Project the **combined / flattened** view of a repeated child collection across
+    /// every entry of the parent collection at `parent_path` (E018): for each parent
+    /// entry that is a record holding `child_field` as a list, union all those lists'
+    /// elements into ONE table with a leading read-only parent-key column carrying the
+    /// source entry's key/index. Columns: the parent-key column (labeled with the
+    /// parent's own field name, else `(key)`), then the union of the child elements'
+    /// fields (records, mixed → blanks) / positional `.0/.1/…` (tuples) / a single
+    /// `value` column (else). Each data cell keeps its REAL nested path
+    /// (`parent ▸ <entry> ▸ Field(child) ▸ Index(i) ▸ …`) so edits resolve against the
+    /// live CST. `None` when the parent is not a map/list or no child elements exist.
+    /// Row add/remove is not offered for this shape.
+    #[must_use]
+    pub fn derive_combined(
+        cst: &CstDocument,
+        parent_path: &StructuralPath,
+        child_field: &str,
+        diagnostics: &[DiagnosticView],
+    ) -> Option<Self> {
+        let root = cst.root();
+        let parent = resolve_path(&root, parent_path)?;
+        let index = build_byte_char_index(&root, diagnostics);
+
+        // Collect (parent_key_text, child element_ref, element value) across all entries.
+        let mut collected: Vec<(String, StructuralPath, ast::Value)> = Vec::new();
+        match ast::Value::cast(parent.clone())? {
+            ast::Value::Map(map) => {
+                for entry in map.entries() {
+                    let Some(value) = entry.value() else { continue };
+                    let key_text = entry.key().map(|k| k.syntax().text()).unwrap_or_default();
+                    collect_combined_child(
+                        parent_path,
+                        PathStep::Key(key_text.clone()),
+                        &key_text,
+                        &value,
+                        child_field,
+                        &mut collected,
+                    );
+                }
+            }
+            ast::Value::List(list) => {
+                for (i, value) in list.items().enumerate() {
+                    collect_combined_child(
+                        parent_path,
+                        PathStep::Index(i),
+                        &format!("[{i}]"),
+                        &value,
+                        child_field,
+                        &mut collected,
+                    );
+                }
+            }
+            _ => return None,
+        }
+        if collected.is_empty() {
+            return None;
+        }
+
+        // The leading parent-key column: labeled with the parent's own field name when
+        // known, else `(key)`.
+        let parent_label = match parent_path.steps().last() {
+            Some(PathStep::Field(name) | PathStep::VariantField(name)) => name.clone(),
+            Some(PathStep::Key(text)) => text.clone(),
+            _ => "(key)".to_string(),
+        };
+        let mut columns = vec![Column {
+            field_name: parent_label,
+            class: ColumnClass::Scalar,
+        }];
+
+        let all_records = collected.iter().all(|(_, _, v)| is_record(v));
+        let all_tuples = collected
+            .iter()
+            .all(|(_, _, v)| matches!(v, ast::Value::Tuple(_)));
+
+        let key_cell = |key: &str| Cell {
+            value_ref: None,
+            class: CellClass::ReadOnly,
+            text: Some(key.to_string()),
+            scalar: None,
+            diagnostics: Vec::new(),
+        };
+
+        let rows: Vec<Row> = if all_records {
+            let records: Vec<Vec<(String, ast::Value)>> =
+                collected.iter().map(|(_, _, v)| record_fields(v)).collect();
+            columns.extend(union_columns(&records));
+            collected
+                .iter()
+                .zip(records.iter())
+                .map(|((key, element_ref, _), fields)| {
+                    let mut cells = vec![key_cell(key)];
+                    for col in columns.iter().skip(1) {
+                        cells.push(build_cell(element_ref, col, fields, diagnostics, &index));
+                    }
+                    Row {
+                        element_ref: element_ref.clone(),
+                        cells,
+                    }
+                })
+                .collect()
+        } else if all_tuples {
+            let arity = collected
+                .iter()
+                .filter_map(|(_, _, v)| match v {
+                    ast::Value::Tuple(t) => Some(t.items().count()),
+                    _ => None,
+                })
+                .max()
+                .unwrap_or(0);
+            columns.extend((0..arity).map(|pos| Column {
+                field_name: format!(".{pos}"),
+                class: ColumnClass::Scalar,
+            }));
+            collected
+                .iter()
+                .map(|(key, element_ref, v)| {
+                    let members: Vec<ast::Value> = match v {
+                        ast::Value::Tuple(t) => t.items().collect(),
+                        _ => Vec::new(),
+                    };
+                    let mut cells = vec![key_cell(key)];
+                    for pos in 0..arity {
+                        match members.get(pos) {
+                            Some(m) => cells.push(tuple_member_cell(
+                                element_ref.child(PathStep::Index(pos)),
+                                m,
+                                diagnostics,
+                                &index,
+                            )),
+                            None => cells.push(Cell {
+                                value_ref: None,
+                                class: CellClass::Blank,
+                                text: None,
+                                scalar: None,
+                                diagnostics: Vec::new(),
+                            }),
+                        }
+                    }
+                    Row {
+                        element_ref: element_ref.clone(),
+                        cells,
+                    }
+                })
+                .collect()
+        } else {
+            columns.push(value_column(
+                &collected.iter().map(|(_, _, v)| v.clone()).collect::<Vec<_>>(),
+            ));
+            collected
+                .iter()
+                .map(|(key, element_ref, v)| Row {
+                    element_ref: element_ref.clone(),
+                    cells: vec![
+                        key_cell(key),
+                        value_cell(element_ref.clone(), v, diagnostics, &index),
+                    ],
+                })
+                .collect()
+        };
+
+        Some(Self {
+            section_ref: parent_path.child(PathStep::CombinedChild(child_field.to_string())),
+            columns,
+            rows,
+        })
     }
 
     /// Project a **single tuple** at `path` into a 1-row positional table (E012): columns
@@ -863,6 +1040,124 @@ pub(crate) fn union_field_count(records: &[Vec<(String, ast::Value)>]) -> usize 
     union_columns(records).len()
 }
 
+/// A repeated child collection of a parent map/list that can be flattened into a
+/// **combined** table (E018): the child field name + the combined row/column counts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CombinableChild {
+    /// The child field name (e.g. `"cells"`).
+    pub field: String,
+    /// Total element count unioned across all parent entries' child lists.
+    pub rows: usize,
+    /// Combined column count: 1 (parent-key) + union field count / arity / 1.
+    pub cols: usize,
+}
+
+/// Push one parent entry's `child_field` list elements into `out` as
+/// `(parent_key_text, element_ref, element_value)` (a helper for [`TableModel::derive_combined`]).
+/// A no-op when `value` is not a record, lacks `child_field`, or its `child_field` is
+/// not a list. Each `element_ref` is the REAL nested path so edits resolve live.
+fn collect_combined_child(
+    parent_path: &StructuralPath,
+    entry_step: PathStep,
+    key_text: &str,
+    value: &ast::Value,
+    child_field: &str,
+    out: &mut Vec<(String, StructuralPath, ast::Value)>,
+) {
+    let Some((_, child)) = record_fields(value)
+        .into_iter()
+        .find(|(n, _)| n == child_field)
+    else {
+        return;
+    };
+    let ast::Value::List(list) = child else {
+        return;
+    };
+    let entry_ref = parent_path
+        .child(entry_step)
+        .child(PathStep::Field(child_field.to_string()));
+    for (i, elem) in list.items().enumerate() {
+        out.push((
+            key_text.to_string(),
+            entry_ref.child(PathStep::Index(i)),
+            elem,
+        ));
+    }
+}
+
+/// Find each child field of a parent map/list (whose entries are records) that is an
+/// `ast::List` in **≥2** entries — a candidate for the combined/flattened table view
+/// (E018). For each, reports total element rows + the combined column count
+/// (`1 + union-fields / max-arity / 1`). First-seen field order. Empty when the node
+/// is not a map/list of records or no field repeats as a list in ≥2 entries.
+pub(crate) fn combinable_child_fields(parent_node: &SyntaxNode) -> Vec<CombinableChild> {
+    let values: Vec<ast::Value> = match ast::Value::cast(parent_node.clone()) {
+        Some(ast::Value::Map(map)) => map.entries().filter_map(|e| e.value()).collect(),
+        Some(ast::Value::List(list)) => list.items().collect(),
+        _ => return Vec::new(),
+    };
+    if values.is_empty() || !values.iter().all(is_record) {
+        return Vec::new();
+    }
+    // Collect, per field name (first-seen order), the lists it holds across entries.
+    let mut order: Vec<String> = Vec::new();
+    let mut lists_by_field: std::collections::HashMap<String, Vec<ast::List>> =
+        std::collections::HashMap::new();
+    for v in &values {
+        for (name, fv) in record_fields(v) {
+            if let ast::Value::List(list) = fv {
+                if !lists_by_field.contains_key(&name) {
+                    order.push(name.clone());
+                }
+                lists_by_field.entry(name).or_default().push(list);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for field in order {
+        let lists = &lists_by_field[&field];
+        if lists.len() < 2 {
+            continue; // worth combining only when the child repeats across ≥2 entries
+        }
+        let mut total_rows = 0usize;
+        let mut records: Vec<Vec<(String, ast::Value)>> = Vec::new();
+        let mut all_records = true;
+        let mut all_tuples = true;
+        let mut max_arity = 0usize;
+        for list in lists {
+            for elem in list.items() {
+                total_rows += 1;
+                if is_record(&elem) {
+                    all_tuples = false;
+                    records.push(record_fields(&elem));
+                } else if let ast::Value::Tuple(t) = &elem {
+                    all_records = false;
+                    max_arity = max_arity.max(t.items().count());
+                } else {
+                    all_records = false;
+                    all_tuples = false;
+                }
+            }
+        }
+        if total_rows == 0 {
+            continue;
+        }
+        let value_cols = if all_records {
+            union_field_count(&records)
+        } else if all_tuples {
+            max_arity
+        } else {
+            1
+        };
+        out.push(CombinableChild {
+            field,
+            rows: total_rows,
+            cols: 1 + value_cols,
+        });
+    }
+    out
+}
+
 /// `true` when `value` is a nested collection (struct / map / list / tuple /
 /// enum-variant payload) — a drill-in cell, not an inline scalar (FR-006/FR-010).
 fn is_nested(value: &ast::Value) -> bool {
@@ -1124,6 +1419,7 @@ fn step_label(step: &PathStep) -> String {
         PathStep::Field(name) | PathStep::VariantField(name) => name.clone(),
         PathStep::Key(text) => text.clone(),
         PathStep::Index(i) => format!("[{i}]"),
+        PathStep::CombinedChild(field) => format!("\u{2217} {field}"),
     }
 }
 
