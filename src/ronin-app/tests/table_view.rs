@@ -502,8 +502,14 @@ fn drill_in_then_back_returns_to_table_with_origin_cell_focused() {
             );
         });
         harness.run();
-        // The nested cell renders a drill-in button labelled with its summary.
-        harness.get_by_label_contains("\"x\"").click();
+        // E019c: a nested cell drills in via its small "open" icon (single click), which
+        // sits just left of the summary text. A click on the cell body only selects.
+        {
+            let r = harness.get_by_label_contains("\"x\"").rect();
+            let p = egui::pos2(r.left() - 11.0, r.center().y);
+            harness.drag_at(p);
+            harness.drop_at(p);
+        }
         harness.run();
     }
 
@@ -1203,4 +1209,417 @@ fn breadcrumb_prefix_chain_marks_list_map_segments_clickable() {
             PathStep::Field("cells".to_string()),
         ])
     );
+}
+
+// =============================================================================
+// E019 — Excel-like bulk editing: rectangular selection, TSV copy, batched
+// paste/fill (the marquee property: a block paste is ONE undo unit).
+// =============================================================================
+
+use ronin_app::structural::table::{copy_range_tsv, grid_fill_writes, grid_paste_writes};
+
+/// A small uniform RecordList fixture: 3 rows × 2 scalar columns (name, hp).
+fn bulk_doc(worker: &ReparseWorker) -> EditorDocument {
+    doc_at(
+        "[\n    (name: \"a\", hp: 1),\n    (name: \"b\", hp: 2),\n    (name: \"c\", hp: 3),\n]",
+        worker,
+    )
+}
+
+#[test]
+fn copy_range_tsv_serializes_selected_block() {
+    // A rectangular selection serializes to TSV — rows by `\n`, columns by `\t`, each
+    // cell its verbatim RON token (string cells keep their quotes).
+    let worker = ReparseWorker::new();
+    let doc = bulk_doc(&worker);
+    let model = model_of(&doc);
+
+    // The full 3×2 block.
+    assert_eq!(
+        copy_range_tsv(&model, 0, 0, 2, 1),
+        "\"a\"\t1\n\"b\"\t2\n\"c\"\t3\n"
+    );
+    // A single-column sub-range (hp, rows 0..=1).
+    assert_eq!(copy_range_tsv(&model, 0, 1, 1, 1), "1\n2\n");
+    // Out-of-range bounds are clamped (no panic) — past the last row/col yields the
+    // same as the clamped full block.
+    assert_eq!(
+        copy_range_tsv(&model, 0, 0, 99, 99),
+        "\"a\"\t1\n\"b\"\t2\n\"c\"\t3\n"
+    );
+}
+
+#[test]
+fn grid_fill_writes_targets_only_writable_cells() {
+    // Filling a rect emits one write per writable scalar cell, each pointed at a real
+    // cell value path; non-existent cells are never written.
+    let worker = ReparseWorker::new();
+    let doc = bulk_doc(&worker);
+    let model = model_of(&doc);
+
+    let writes = grid_fill_writes(&model, 0, 1, 2, 1, "0");
+    assert_eq!(writes.len(), 3, "the hp column has 3 writable scalar cells");
+    for (path, value) in &writes {
+        assert_eq!(value, "0");
+        assert!(
+            model
+                .rows
+                .iter()
+                .any(|r| r.cells.iter().any(|c| c.value_ref.as_ref() == Some(path))),
+            "every fill write points at a real cell value path"
+        );
+    }
+}
+
+#[test]
+fn paste_block_is_one_undo_unit() {
+    // The marquee property: a multi-cell block paste lands as a SINGLE undo unit — one
+    // `undo()` restores every pasted cell at once, and untouched bytes are preserved.
+    let worker = ReparseWorker::new();
+    let mut doc = bulk_doc(&worker);
+    let before = doc.buffer.clone();
+    let model = model_of(&doc);
+
+    // Paste a 2×2 block over the top-left (rows 0..=1, cols name/hp).
+    let writes = grid_paste_writes(&model, 0, 0, "\"x\"\t10\n\"y\"\t20\n");
+    assert_eq!(writes.len(), 4, "a 2×2 block = 4 writable cells");
+    doc.apply_grid_writes(&writes, &worker, Instant::now())
+        .expect("the block paste applies");
+    drive_reparse(&mut doc, &worker);
+
+    assert!(doc.buffer.contains("name: \"x\""), "row 0 name updated: {}", doc.buffer);
+    assert!(doc.buffer.contains("hp: 10"));
+    assert!(doc.buffer.contains("name: \"y\""));
+    assert!(doc.buffer.contains("hp: 20"));
+    // Row 2 is untouched.
+    assert!(doc.buffer.contains("(name: \"c\", hp: 3)"));
+
+    // ONE undo restores the whole block (single undo unit).
+    assert!(doc.undo(Instant::now()), "one undo steps back the whole batch");
+    assert_eq!(
+        doc.buffer, before,
+        "one undo restores exact prior bytes for the entire block"
+    );
+}
+
+#[test]
+fn fill_single_value_over_a_selection_is_one_undo_unit() {
+    // Filling a multi-cell selection with one value writes every cell in the rect and
+    // is a single undo unit.
+    let worker = ReparseWorker::new();
+    let mut doc = bulk_doc(&worker);
+    let before = doc.buffer.clone();
+    let model = model_of(&doc);
+
+    let writes = grid_fill_writes(&model, 0, 1, 2, 1, "9");
+    doc.apply_grid_writes(&writes, &worker, Instant::now())
+        .expect("the fill applies");
+    drive_reparse(&mut doc, &worker);
+
+    assert_eq!(
+        doc.buffer.matches("hp: 9").count(),
+        3,
+        "all three hp cells set to 9: {}",
+        doc.buffer
+    );
+    assert!(doc.undo(Instant::now()));
+    assert_eq!(doc.buffer, before, "one undo restores the whole fill");
+}
+
+#[test]
+fn paste_overhang_skips_out_of_range_cells_and_empty_batch_is_noop() {
+    // A paste that overhangs the table edge silently skips the overflow; an empty
+    // batch reports an error and changes no bytes.
+    let worker = ReparseWorker::new();
+    let mut doc = bulk_doc(&worker);
+    let model = model_of(&doc);
+
+    // A 1×3 paste starting at the last column (hp) overhangs by one column → only the
+    // in-range hp cell is a write.
+    let writes = grid_paste_writes(&model, 0, 1, "5\t6\t7");
+    assert_eq!(writes.len(), 1, "only the in-range hp cell is written");
+
+    let before = doc.buffer.clone();
+    assert!(
+        doc.apply_grid_writes(&[], &worker, Instant::now()).is_err(),
+        "an empty batch reports an error and changes nothing"
+    );
+    assert_eq!(doc.buffer, before);
+}
+
+#[test]
+fn fill_and_paste_skip_the_readonly_key_column() {
+    // A RecordMap's leading `(key)` column is read-only — a fill/paste over it skips
+    // those cells and writes only the editable value cells (Excel leaves locked cells).
+    let cst = ronin_core::parse("(hulls: { (1): (hp: 1), (2): (hp: 2) })");
+    let section = StructuralPath::from_steps(vec![PathStep::Field("hulls".to_string())]);
+    let model = TableModel::derive_section(&cst, &section, Shape::RecordMap, &[])
+        .expect("record map derives a model");
+
+    // The read-only key column (col 0) alone → no writes.
+    assert!(
+        grid_fill_writes(&model, 0, 0, 1, 0, "z").is_empty(),
+        "the read-only key column is never written"
+    );
+    // Both columns → only the two editable hp cells are written.
+    assert_eq!(
+        grid_fill_writes(&model, 0, 0, 1, 1, "z").len(),
+        2,
+        "only the editable value cells are written; the key column is skipped"
+    );
+}
+
+#[test]
+fn grid_selection_rect_normalizes_anchor_and_cursor() {
+    // The selection rect is the normalized (min..=max) span of anchor + cursor, so an
+    // anchor below-right of the cursor still yields a top-left/bottom-right rect.
+    let worker = ReparseWorker::new();
+    let mut doc = bulk_doc(&worker);
+
+    doc.view_state_mut().set_grid_anchor(2, 3);
+    doc.view_state_mut().extend_grid_to(0, 1);
+    assert_eq!(doc.view_state().grid_anchor(), Some((2, 3)));
+    assert_eq!(doc.view_state().grid_cursor(), Some((0, 1)));
+    assert_eq!(
+        doc.view_state().grid_selection_rect(),
+        Some((0, 1, 2, 3)),
+        "rect is min/max-normalized regardless of drag direction"
+    );
+
+    doc.view_state_mut().clear_grid_selection();
+    assert_eq!(doc.view_state().grid_selection_rect(), None);
+
+    // Select-all spans the whole grid (3 rows × 2 cols here).
+    doc.view_state_mut().select_grid_all(3, 2);
+    assert_eq!(doc.view_state().grid_selection_rect(), Some((0, 0, 2, 1)));
+}
+
+#[test]
+fn click_selects_a_cell_and_shift_click_extends_the_range() {
+    // E019b — the Excel interaction model end-to-end through the real harness: a single
+    // pointer click on a cell SELECTS it (no edit), and Shift+click extends the
+    // rectangular selection to a range.
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let worker = Rc::new(ReparseWorker::new());
+    // Distinct values so each cell is found by a unique label.
+    let doc = Rc::new(RefCell::new(doc_at(
+        "[\n    (name: \"aa\", hp: 11),\n    (name: \"bb\", hp: 22),\n    (name: \"cc\", hp: 33),\n]",
+        &worker,
+    )));
+    let doc_ui = Rc::clone(&doc);
+    let worker_ui = Rc::clone(&worker);
+    let mut harness = Harness::new_ui(move |ui| {
+        let mut d = doc_ui.borrow_mut();
+        render_table_view(
+            ui,
+            &mut d,
+            &worker_ui,
+            &StructuralPath::root(),
+            SectionShape::RecordList,
+        );
+    });
+    harness.run();
+
+    // A plain click on row 0 / hp ("11") selects exactly that cell (column index 1).
+    harness.get_by_label_contains("11").click();
+    harness.run();
+    assert_eq!(
+        doc.borrow().view_state().grid_selection_rect(),
+        Some((0, 1, 0, 1)),
+        "a plain click selects exactly the clicked cell (no edit)"
+    );
+    // The click did NOT open an inline editor (selection, not edit).
+    assert!(
+        doc.borrow().view_state().edit_focus().is_none(),
+        "a single click selects without entering edit mode"
+    );
+
+    // Shift+click row 2 / hp ("33") extends the selection down the column.
+    harness
+        .get_by_label_contains("33")
+        .click_modifiers(egui::Modifiers::SHIFT);
+    harness.run();
+    assert_eq!(
+        doc.borrow().view_state().grid_selection_rect(),
+        Some((0, 1, 2, 1)),
+        "shift+click extends the selection to the 3-row hp column range"
+    );
+}
+
+#[test]
+fn double_click_a_scalar_cell_opens_the_inline_editor() {
+    // E019b — editing moved to double-click: two quick clicks on a scalar cell open its
+    // inline editor (focus set on that cell), unlike a single selecting click.
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let worker = Rc::new(ReparseWorker::new());
+    let doc = Rc::new(RefCell::new(doc_at(
+        "[\n    (name: \"aa\", hp: 11),\n    (name: \"bb\", hp: 22),\n]",
+        &worker,
+    )));
+    let doc_ui = Rc::clone(&doc);
+    let worker_ui = Rc::clone(&worker);
+    // A small step_dt so the two queued clicks register as a double-click (see
+    // `click_selects_*` note — the default 0.25s/frame spaces them too far apart).
+    let mut harness = Harness::builder()
+        .with_step_dt(0.05)
+        .build_ui(move |ui| {
+            let mut d = doc_ui.borrow_mut();
+            render_table_view(
+                ui,
+                &mut d,
+                &worker_ui,
+                &StructuralPath::root(),
+                SectionShape::RecordList,
+            );
+        });
+    harness.run();
+
+    // Double-click row 0 / hp ("11") → begins editing that cell.
+    {
+        let cell = harness.get_by_label_contains("11");
+        cell.click();
+        cell.click();
+    }
+    harness.run();
+
+    let d = doc.borrow();
+    let focus = d
+        .view_state()
+        .edit_focus()
+        .expect("double-click opens the inline editor on the cell");
+    assert!(
+        matches!(focus.surface, FocusSurface::TableCell { row: 0, column: 1 }),
+        "the editor opened on the double-clicked (row 0, hp) cell"
+    );
+}
+
+#[test]
+fn drag_select_highlights_a_range() {
+    // E019c — a real click-drag (press → move → release, simulated headlessly) selects a
+    // rectangular range. No screenshots: the harness drives genuine pointer events and we
+    // assert the resulting selection rect.
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let worker = Rc::new(ReparseWorker::new());
+    let doc = Rc::new(RefCell::new(doc_at(
+        "[\n    (name: \"aa\", hp: 11),\n    (name: \"bb\", hp: 22),\n    (name: \"cc\", hp: 33),\n]",
+        &worker,
+    )));
+    let doc_ui = Rc::clone(&doc);
+    let worker_ui = Rc::clone(&worker);
+    let mut harness = Harness::new_ui(move |ui| {
+        let mut d = doc_ui.borrow_mut();
+        render_table_view(
+            ui,
+            &mut d,
+            &worker_ui,
+            &StructuralPath::root(),
+            SectionShape::RecordList,
+        );
+    });
+    harness.run();
+
+    // Drag from row 0 / name ("aa", top-left) to row 2 / hp ("33", bottom-right).
+    let start = harness.get_by_label_contains("aa").rect().center();
+    let end = harness.get_by_label_contains("33").rect().center();
+    harness.hover_at(start);
+    harness.drag_at(start); // press
+    harness.hover_at(end); // move while pressed → drag
+    harness.drop_at(end); // release
+    harness.run();
+
+    assert_eq!(
+        doc.borrow().view_state().grid_selection_rect(),
+        Some((0, 0, 2, 1)),
+        "click-drag from the top-left cell to the bottom-right selects the whole block"
+    );
+}
+
+#[test]
+fn body_click_on_a_nested_cell_selects_and_does_not_navigate() {
+    // E019c — the de-overloading guard: a single click on a nested cell's BODY selects it
+    // (it no longer drills/navigates). Drilling is reserved for the cell's small open
+    // icon, which a body click never hits.
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let worker = Rc::new(ReparseWorker::new());
+    // Row 0 `meta` is a nested STRUCT cell (column index 1); its summary contains "x".
+    let doc = Rc::new(RefCell::new(doc_at(
+        "[\n    (id: 1, meta: (k: \"x\")),\n    (id: 2, meta: (k: \"y\")),\n]",
+        &worker,
+    )));
+    let doc_ui = Rc::clone(&doc);
+    let worker_ui = Rc::clone(&worker);
+    let mut harness = Harness::new_ui(move |ui| {
+        let mut d = doc_ui.borrow_mut();
+        render_table_view(
+            ui,
+            &mut d,
+            &worker_ui,
+            &StructuralPath::root(),
+            SectionShape::RecordList,
+        );
+    });
+    harness.run();
+
+    // Click the summary text (the cell BODY, right of the open icon).
+    harness.get_by_label_contains("\"x\"").click();
+    harness.run();
+
+    let d = doc.borrow();
+    assert_eq!(
+        d.view_state().grid_selection_rect(),
+        Some((0, 1, 0, 1)),
+        "a body click selects the nested cell"
+    );
+    assert!(
+        d.view_state().drill_in_return().is_none(),
+        "a body click on a nested cell does NOT drill in / navigate (de-overloaded)"
+    );
+}
+
+#[test]
+fn auto_column_widths_fit_content_header_and_clamp() {
+    // E020 — columns auto-size to content on load: a column of long values is wider than a
+    // column of short values, a long header widens its column even with short values, and
+    // every width clamps to [GRID_COL_MIN_W, GRID_COL_MAX_W] (48..=360).
+    use ronin_app::structural::table::auto_column_widths;
+
+    let worker = ReparseWorker::new();
+    // `s`: short values; `wide`: a long value; `loooong_header_name`: long header / short value.
+    let doc = doc_at(
+        "[\n    (s: 1, wide: \"aaaaaaaaaaaaaaaaaaaaaaaaaaaa\", loooong_header_name: 2),\n]",
+        &worker,
+    );
+    let model = model_of(&doc);
+    let idx = |name: &str| {
+        model
+            .columns
+            .iter()
+            .position(|c| c.field_name == name)
+            .unwrap_or_else(|| panic!("column {name} present"))
+    };
+
+    let w = auto_column_widths(&model);
+    assert_eq!(w.len(), model.columns.len(), "one width per column");
+    assert!(
+        w[idx("wide")] > w[idx("s")],
+        "a column with long values fits wider than a short one"
+    );
+    assert!(
+        w[idx("loooong_header_name")] > w[idx("s")],
+        "a long header widens its column even with short values"
+    );
+    for width in &w {
+        assert!(
+            (48.0..=360.0).contains(width),
+            "column width {width} stays within the clamp range"
+        );
+    }
 }

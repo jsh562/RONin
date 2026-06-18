@@ -542,6 +542,12 @@ pub struct ViewSelectionAndFocus {
     /// section it left here so [`table_go_forward`](Self::table_go_forward) can
     /// re-advance; a NEW navigation clears it (the standard back/forward semantics).
     table_forward: Vec<StructuralPath>,
+    /// The Table grid's **rectangular cell selection** for bulk copy/paste/fill
+    /// (E019): `(anchor, cursor)` grid cells `(row, col)`. The highlighted range is
+    /// the normalized rectangle between them. Byte-free / transient — by `(row,col)`
+    /// coordinates (not paths), cleared on Esc or when it falls outside the model.
+    /// `None` when no range is selected.
+    grid_selection: Option<((usize, usize), (usize, usize))>,
 }
 
 /// The originating table cell a tree/form drill-in returns to (FR-006).
@@ -757,6 +763,62 @@ impl ViewSelectionAndFocus {
         self.selected_table_section
             .as_ref()
             .is_some_and(|p| !p.is_root())
+    }
+
+    // --- E019: Table grid rectangular selection (bulk copy/paste/fill) ----------
+
+    /// Start a single-cell grid selection at `(row, col)` — sets both the anchor and
+    /// cursor (a 1×1 selection). Byte-free (FR-020).
+    pub fn set_grid_anchor(&mut self, row: usize, col: usize) {
+        self.grid_selection = Some(((row, col), (row, col)));
+    }
+
+    /// Extend the grid selection's cursor to `(row, col)`, keeping the anchor (the
+    /// shift-click / shift-arrow gesture). Starts a fresh selection at `(row, col)` if
+    /// none is active. Byte-free (FR-020).
+    pub fn extend_grid_to(&mut self, row: usize, col: usize) {
+        match &mut self.grid_selection {
+            Some((_, cursor)) => *cursor = (row, col),
+            None => self.grid_selection = Some(((row, col), (row, col))),
+        }
+    }
+
+    /// Select the whole grid `rows × cols` (Ctrl+A): anchor top-left, cursor
+    /// bottom-right. A no-op for an empty grid. Byte-free (FR-020).
+    pub fn select_grid_all(&mut self, rows: usize, cols: usize) {
+        if rows == 0 || cols == 0 {
+            self.grid_selection = None;
+            return;
+        }
+        self.grid_selection = Some(((0, 0), (rows - 1, cols - 1)));
+    }
+
+    /// Clear the grid selection (Esc / a structural edit invalidated it).
+    pub fn clear_grid_selection(&mut self) {
+        self.grid_selection = None;
+    }
+
+    /// The grid selection's **cursor** cell `(row, col)`, the moving end shift-arrows
+    /// extend from. `None` when nothing is selected.
+    #[must_use]
+    pub fn grid_cursor(&self) -> Option<(usize, usize)> {
+        self.grid_selection.map(|(_, cursor)| cursor)
+    }
+
+    /// The grid selection's **anchor** cell `(row, col)`. `None` when nothing is
+    /// selected.
+    #[must_use]
+    pub fn grid_anchor(&self) -> Option<(usize, usize)> {
+        self.grid_selection.map(|(anchor, _)| anchor)
+    }
+
+    /// The normalized selection rectangle `(min_row, min_col, max_row, max_col)`
+    /// (inclusive), or `None` when nothing is selected.
+    #[must_use]
+    pub fn grid_selection_rect(&self) -> Option<(usize, usize, usize, usize)> {
+        self.grid_selection.map(|((ar, ac), (cr, cc))| {
+            (ar.min(cr), ac.min(cc), ar.max(cr), ac.max(cc))
+        })
     }
 
     /// `true` when the projection is stale (a reparse is in flight) (FR-015).

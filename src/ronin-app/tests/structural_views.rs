@@ -1372,9 +1372,14 @@ fn clicking_nested_table_cell_switches_grid_to_nested_path_byte_free() {
                 ronin_app::panels::render_table_seam(ui, &mut d, &worker_ui);
             });
         harness.run();
-        // The open-as-table button label contains the cell summary (the list preview).
-        // Click the first one (row 0's `tags`).
-        harness.get_by_label_contains("\"a\"").click();
+        // E019c: a NestedTable cell opens as a table via its small "open" icon (single
+        // click), just left of the list-preview summary. A body click only selects.
+        {
+            let r = harness.get_by_label_contains("\"a\"").rect();
+            let p = egui::pos2(r.left() - 11.0, r.center().y);
+            harness.drag_at(p);
+            harness.drop_at(p);
+        }
         harness.run();
     }
 
@@ -1497,13 +1502,20 @@ fn table_view_back_forward_up_navigation_is_byte_free() {
     // it as a table (records the level change in history — E016).
     {
         let mut harness = render_frame(&doc, &worker);
-        harness.get_by_label_contains("\"a\"").click();
+        // E019c: open-as-table via the NestedTable cell's small "open" icon (single
+        // click), just left of the summary text.
+        {
+            let r = harness.get_by_label_contains("\"a\"").rect();
+            let p = egui::pos2(r.left() - 11.0, r.center().y);
+            harness.drag_at(p);
+            harness.drop_at(p);
+        }
         harness.run();
     }
     assert_eq!(
         doc.borrow().view_state().selected_table_section(),
         Some(&tags_path),
-        "clicking the NestedTable cell navigates the grid to the nested `tags` path"
+        "double-clicking the NestedTable cell navigates the grid to the nested `tags` path"
     );
     assert!(
         doc.borrow().view_state().can_go_back(),

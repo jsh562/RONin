@@ -304,14 +304,30 @@ impl TypeIndicator {
     /// Returns the slot's [`egui::Response`] (its `rect` is always [`SLOT_WIDTH`] wide
     /// regardless of the glyph) so a caller can attach a hover/tooltip to the icon.
     pub fn show(self, ui: &mut Ui) -> egui::Response {
-        ui.allocate_ui_with_layout(
+        // Allocate a fixed-width, hover-sensing slot and PAINT the glyph into it (rather
+        // than nesting a `Label`). A nested label registers ABOVE the slot's own hover
+        // sense, so it — not the slot — becomes the hovered widget, and a caller's
+        // `show(ui).on_hover_text(..)` on the slot response never fires. Painting leaves
+        // the slot response itself as the hovered widget, so tooltips work (E020). The
+        // glyph/size/color match [`rich`](Self::rich) (its `.strong()` is a no-op once an
+        // explicit color is set), and the response rect stays exactly `SLOT_WIDTH` wide.
+        let enabled = ui.is_enabled();
+        let glyph = self.glyph();
+        let (rect, response) = ui.allocate_exact_size(
             egui::vec2(SLOT_WIDTH, ui.spacing().interact_size.y),
-            egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
-            |ui| {
-                ui.label(self.rich(ui));
-            },
-        )
-        .response
+            egui::Sense::hover(),
+        );
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            glyph,
+            egui::FontId::proportional(INDICATOR_SIZE),
+            self.color(ui),
+        );
+        // Expose the glyph to accessibility so it stays queryable (the cross-view glyph
+        // tests look it up by label) even though it is painted, not a `Label` widget.
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, enabled, glyph));
+        response
     }
 }
 

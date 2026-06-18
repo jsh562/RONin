@@ -62,11 +62,11 @@ use std::cell::Cell as StdCell;
 use std::rc::Rc;
 use std::time::Instant;
 
-use egui::{Key, RichText, Ui};
+use egui::{Key, Ui};
 use egui_extras::{Column as TableColumn, TableBuilder};
 
 use ronin_core::ast;
-use ronin_core::transform::{ParentRef, StructuralOp};
+use ronin_core::transform::{apply_structural, ParentRef, StructuralOp, TransformOutcome};
 use ronin_core::{BlockedReason, CstDocument, SyntaxNode};
 
 use crate::byte_to_char::ByteCharIndex;
@@ -1554,6 +1554,51 @@ impl EditorDocument {
         )
     }
 
+    /// Apply many scalar-cell writes (`value_ref` path → new RON text) as **one** undo
+    /// unit (E019 — bulk paste / fill). Each write is a [`StructuralOp::SetValue`]
+    /// re-resolved against the **accumulating** CST (paths stay valid because
+    /// `SetValue` preserves node positions), then the whole batch is committed once via
+    /// [`commit_transformed_cst`](Self::commit_transformed_cst) — so an Excel-style
+    /// paste of a block is a single undo. Writes whose path no longer resolves, or
+    /// whose target is not an editable value-position child, are skipped. Returns
+    /// [`BlockedReason::TargetNotFound`] when nothing applied (no byte change).
+    pub fn apply_grid_writes(
+        &mut self,
+        writes: &[(StructuralPath, String)],
+        worker: &ReparseWorker,
+        now: Instant,
+    ) -> Result<(), BlockedReason> {
+        if writes.is_empty() {
+            return Err(BlockedReason::TargetNotFound);
+        }
+        let mut acc = ronin_core::parse(&self.buffer);
+        let mut applied = 0usize;
+        for (path, value) in writes {
+            let Some(node) = resolve_path(&acc.root(), path) else {
+                continue;
+            };
+            let Some((parent, index)) = Self::parent_and_index_of(&node) else {
+                continue;
+            };
+            if let TransformOutcome::Applied(next) = apply_structural(
+                &acc,
+                StructuralOp::SetValue {
+                    parent,
+                    index,
+                    value: value.clone(),
+                },
+            ) {
+                acc = next;
+                applied += 1;
+            }
+        }
+        if applied == 0 {
+            return Err(BlockedReason::TargetNotFound);
+        }
+        self.commit_transformed_cst(&acc, worker, now);
+        Ok(())
+    }
+
     /// Derive the enclosing collection [`ParentRef`] + the 0-based child index of the
     /// value node `node` within it (the address [`StructuralOp::SetValue`] needs), or
     /// `None` when `node` is not a value-position child of an editable collection.
@@ -1765,6 +1810,44 @@ pub fn render_table_view_counting(
     render_table_grid(ui, doc, worker, &section, &model, row_ops, realized_rows);
 }
 
+/// Minimum/maximum and per-character estimates used to fit table columns to their content
+/// on initial load (E020). Widths are heuristic (no text layout); the user can drag to
+/// resize afterwards, and egui_extras persists the adjusted widths.
+const GRID_COL_MIN_W: f32 = 48.0;
+const GRID_COL_MAX_W: f32 = 360.0;
+/// Approximate advance width (px) of one Body-font character — enough for a sensible fit.
+const GRID_COL_CHAR_W: f32 = 7.0;
+/// Per-cell horizontal padding allowance (cell margins + a little slack).
+const GRID_COL_PAD: f32 = 14.0;
+/// How many leading rows to sample when fitting a column — bounded so per-frame work stays
+/// independent of the total row count (the SC-010 virtualization invariant).
+const GRID_COL_SAMPLE: usize = 64;
+
+/// Compute a content-fitted initial width per column (E020): the widest of the column
+/// header and the first [`GRID_COL_SAMPLE`] cells' text, converted to pixels via a simple
+/// per-character estimate plus the type-icon slot and padding, clamped to
+/// `[GRID_COL_MIN_W, GRID_COL_MAX_W]`. Pure + cheap (`str` length is O(1)); used as each
+/// column's `initial` width so columns auto-size on first view, then stay user-resizable.
+pub fn auto_column_widths(model: &TableModel) -> Vec<f32> {
+    model
+        .columns
+        .iter()
+        .enumerate()
+        .map(|(c, col)| {
+            let mut chars = col.field_name.chars().count();
+            for row in model.rows.iter().take(GRID_COL_SAMPLE) {
+                if let Some(cell) = row.cells.get(c) {
+                    if let Some(text) = &cell.text {
+                        chars = chars.max(text.chars().count());
+                    }
+                }
+            }
+            let w = indicators::SLOT_WIDTH + chars as f32 * GRID_COL_CHAR_W + GRID_COL_PAD;
+            w.clamp(GRID_COL_MIN_W, GRID_COL_MAX_W)
+        })
+        .collect()
+}
+
 /// Render `model`'s virtualized grid for the section at `section`, driving cell edits,
 /// keyboard navigation, drill-in / open-as-table, and (when `row_ops`) row add/remove
 /// through the one-undo-unit pipeline. The shared rendering core both the shape-based
@@ -1798,6 +1881,16 @@ fn render_table_grid(
     let mut clear_focus = false;
     // A keyboard cell-navigation intent captured this frame (FR-009).
     let mut nav: Option<CellNav> = None;
+    // E019 — the current rectangular grid selection (for the highlight) and a one-shot
+    // selection intent captured from a cell click this frame.
+    let sel_rect = doc.view_state().grid_selection_rect();
+    let grid_cursor = doc.view_state().grid_cursor();
+    // Selection intents captured from cell interaction this frame (E019c): an `anchor`
+    // (plain click / drag origin) and an `extend` (shift-click / drag-over). Two slots,
+    // not one, so a drag whose origin + moved-over cell land in the SAME frame keeps both
+    // — anchor is applied first, then extend grows from it (robust to fast drags).
+    let mut grid_anchor: Option<(usize, usize)> = None;
+    let mut grid_extend: Option<(usize, usize)> = None;
 
     // Discoverable add-row affordance (FR-009): a visible control above the grid —
     // RecordList only (the other shapes have no well-defined uniform append yet).
@@ -1812,6 +1905,10 @@ fn render_table_grid(
     let columns = &model.columns;
     let rows = &model.rows;
     let realized = Rc::clone(realized_rows);
+    // E020: per-column widths fitted to content (header + sampled cells) so columns auto-
+    // size on initial load. `initial(..)` is only consulted on the first frame; egui_extras
+    // then persists per-column widths, so this is "fit on load, then stable + resizable".
+    let col_widths = auto_column_widths(model);
 
     // HORIZONTAL SCROLL (E013): a wide table (e.g. the `hulls` RecordMap = key column
     // + 12 fields ≈ 13 columns) exceeds the viewport width. egui_extras 0.34's
@@ -1827,6 +1924,13 @@ fn render_table_grid(
     egui::ScrollArea::horizontal()
         .id_salt(("ronin_table_hscroll", section.depth()))
         .auto_shrink([false, false])
+        // E019b: a click-drag must SELECT a cell range (Excel-style), not pan the view.
+        // Keep the scrollbar + mouse-wheel as scroll sources but drop drag-to-scroll, so
+        // a drag is free to be a range-select; this also stops panning over empty regions.
+        .scroll_source(egui::scroll_area::ScrollSource {
+            drag: false,
+            ..Default::default()
+        })
         .show(ui, |ui| {
             let mut builder = TableBuilder::new(ui)
                 .id_salt(("ronin_table", section.depth()))
@@ -1834,12 +1938,13 @@ fn render_table_grid(
                 .resizable(true)
                 .auto_shrink([false, false])
                 .cell_layout(egui::Layout::left_to_right(egui::Align::Center));
-            for _ in columns {
-                // An intrinsic (absolute, resizable) width per column: it keeps this
-                // width regardless of available width, so wide tables overflow the
-                // viewport and the outer horizontal scrollbar appears. NOT clipped — a
-                // clipped/auto column would shrink to fit and never overflow.
-                builder = builder.column(TableColumn::initial(140.0).at_least(80.0));
+            for (col_idx, _) in columns.iter().enumerate() {
+                // An intrinsic (absolute, resizable) width per column, fitted to content on
+                // load (E020): it keeps this width regardless of available width, so wide
+                // tables overflow the viewport and the outer horizontal scrollbar appears.
+                // NOT clipped — a clipped/auto column would shrink to fit and never overflow.
+                let w = col_widths.get(col_idx).copied().unwrap_or(GRID_COL_MIN_W);
+                builder = builder.column(TableColumn::initial(w).at_least(GRID_COL_MIN_W));
             }
             // A trailing column for per-row controls (delete) — only when row-ops apply.
             if row_ops {
@@ -1884,6 +1989,10 @@ fn render_table_grid(
                                     &mut new_focus,
                                     &mut clear_focus,
                                     &mut nav,
+                                    sel_rect,
+                                    grid_cursor,
+                                    &mut grid_anchor,
+                                    &mut grid_extend,
                                 );
                             });
                         }
@@ -1932,6 +2041,135 @@ fn render_table_grid(
                         },
                         target.1,
                     );
+                }
+            }
+        }
+    }
+
+    // E019 — Excel-like range selection + clipboard on the Table grid.
+    //
+    // Apply the selection intent from a cell click this frame (byte-free): a plain
+    // click anchors a fresh single-cell selection; a shift-click extends the current
+    // selection's cursor (range select).
+    // Apply this frame's selection intents — anchor BEFORE extend, so a drag whose origin
+    // and moved-over cell arrive together still anchors correctly then grows (E019c).
+    if let Some((r, c)) = grid_anchor {
+        doc.view_state_mut().set_grid_anchor(r, c);
+    }
+    if let Some((r, c)) = grid_extend {
+        doc.view_state_mut().extend_grid_to(r, c);
+    }
+
+    // E019b: end a drag-select once the primary button is released, so the per-cell
+    // pointer-geometry extend (in `render_cell`) only runs during an active grid drag.
+    if !ui.input(|i| i.pointer.primary_down()) {
+        ui.memory_mut(|m| m.data.insert_temp(grid_drag_id(), false));
+    }
+
+    // Keyboard selection + clipboard — only when no inline editor is active, so an
+    // in-cell text field keeps its own Ctrl+A / arrows / Esc. All byte-free except a
+    // paste, which lands as a single batched undo via `apply_grid_writes`.
+    if draft.is_none() {
+        let rows = model.row_count();
+        let cols = model.columns.len();
+        let (select_all, escape, shift, up, down, left, right, enter, f2) = ui.input(|i| {
+            (
+                i.modifiers.command && i.key_pressed(Key::A),
+                i.key_pressed(Key::Escape),
+                i.modifiers.shift,
+                i.key_pressed(Key::ArrowUp),
+                i.key_pressed(Key::ArrowDown),
+                i.key_pressed(Key::ArrowLeft),
+                i.key_pressed(Key::ArrowRight),
+                i.key_pressed(Key::Enter),
+                i.key_pressed(Key::F2),
+            )
+        });
+        let arrow = up || down || left || right;
+        // Step the active cell one cell in the pressed arrow direction, clamped.
+        let step = |cr: usize, cc: usize| -> (usize, usize) {
+            let nr = if up {
+                cr.saturating_sub(1)
+            } else if down {
+                (cr + 1).min(rows.saturating_sub(1))
+            } else {
+                cr
+            };
+            let nc = if left {
+                cc.saturating_sub(1)
+            } else if right {
+                (cc + 1).min(cols.saturating_sub(1))
+            } else {
+                cc
+            };
+            (nr, nc)
+        };
+        if select_all && rows > 0 && cols > 0 {
+            doc.view_state_mut().select_grid_all(rows, cols);
+        } else if escape {
+            doc.view_state_mut().clear_grid_selection();
+        } else if arrow {
+            // Arrow moves the active cell (Excel); Shift+Arrow extends the selection.
+            // With no selection yet, an arrow lands on the top-left cell.
+            match doc.view_state().grid_cursor() {
+                Some((cr, cc)) => {
+                    let (nr, nc) = step(cr, cc);
+                    if shift {
+                        doc.view_state_mut().extend_grid_to(nr, nc);
+                    } else {
+                        doc.view_state_mut().set_grid_anchor(nr, nc);
+                    }
+                }
+                None if rows > 0 && cols > 0 => doc.view_state_mut().set_grid_anchor(0, 0),
+                None => {}
+            }
+        } else if (enter || f2) && !shift {
+            // Enter / F2 begins editing the active cell (if it is editable).
+            if let Some((cr, cc)) = grid_cursor {
+                if let Some((path, seed)) = focus_target_for(model, cr, cc) {
+                    doc.view_state_mut().set_focus(
+                        path,
+                        FocusSurface::TableCell {
+                            row: cr,
+                            column: cc,
+                        },
+                        seed,
+                    );
+                }
+            }
+        }
+
+        // Clipboard events (egui emits Copy/Cut on Ctrl+C/X and Paste on Ctrl+V).
+        let events = ui.input(|i| i.events.clone());
+        if let Some((r0, c0, r1, c1)) = doc.view_state().grid_selection_rect() {
+            for event in &events {
+                match event {
+                    egui::Event::Copy | egui::Event::Cut => {
+                        // Copy the selected range as TSV (Cut is treated as copy for
+                        // now — clearing cells is a deferred follow-up).
+                        ui.ctx().copy_text(copy_range_tsv(model, r0, c0, r1, c1));
+                    }
+                    egui::Event::Paste(text) => {
+                        // A single value over a multi-cell selection FILLS the
+                        // selection; otherwise it's a block paste from the top-left.
+                        let single =
+                            !text.contains('\t') && !text.trim_end().contains('\n');
+                        let multi_cell = r0 != r1 || c0 != c1;
+                        let writes = if single && multi_cell {
+                            let value = text.trim_end_matches(['\n', '\r']);
+                            grid_fill_writes(model, r0, c0, r1, c1, value)
+                        } else {
+                            grid_paste_writes(model, r0, c0, text)
+                        };
+                        if !writes.is_empty() {
+                            let now = Instant::now();
+                            // A blocked batch changes no bytes; the next reparse keeps
+                            // the grid as-is (the single-cell path surfaces errors the
+                            // same way).
+                            let _ = doc.apply_grid_writes(&writes, worker, now);
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -2297,6 +2535,96 @@ fn advance_focus(
     }
 }
 
+
+/// Serialize a rectangular cell range to **TSV** for the clipboard (E019 — Excel-style
+/// copy): rows joined by `\n`, columns by `\t`, each cell its verbatim `text` (empty for
+/// a blank/absent cell). The rect is inclusive `(r0,c0)..=(r1,c1)` and is clamped to the
+/// model's bounds, so an out-of-range selection can't panic.
+pub fn copy_range_tsv(model: &TableModel, r0: usize, c0: usize, r1: usize, c1: usize) -> String {
+    let max_row = model.row_count().saturating_sub(1);
+    let max_col = model.columns.len().saturating_sub(1);
+    let (r0, r1) = (r0.min(max_row), r1.min(max_row));
+    let (c0, c1) = (c0.min(max_col), c1.min(max_col));
+    let mut out = String::new();
+    for r in r0..=r1 {
+        for c in c0..=c1 {
+            if c > c0 {
+                out.push('\t');
+            }
+            if let Some(cell) = model.cell(r, c) {
+                if let Some(text) = &cell.text {
+                    out.push_str(text);
+                }
+            }
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// Build the writes that **fill** a rectangular range with one `value` (E019 — paste a
+/// single value over a multi-cell selection, or an explicit fill). One write per
+/// *writable* cell in the rect (a [`CellClass::Scalar`] with a `value_ref` path);
+/// read-only / nested / blank cells are skipped (Excel leaves non-editable cells be).
+pub fn grid_fill_writes(
+    model: &TableModel,
+    r0: usize,
+    c0: usize,
+    r1: usize,
+    c1: usize,
+    value: &str,
+) -> Vec<(StructuralPath, String)> {
+    let max_row = model.row_count().saturating_sub(1);
+    let max_col = model.columns.len().saturating_sub(1);
+    let (r0, r1) = (r0.min(max_row), r1.min(max_row));
+    let (c0, c1) = (c0.min(max_col), c1.min(max_col));
+    let mut writes = Vec::new();
+    for r in r0..=r1 {
+        for c in c0..=c1 {
+            if let Some(cell) = model.cell(r, c) {
+                if matches!(cell.class, CellClass::Scalar) {
+                    if let Some(path) = &cell.value_ref {
+                        writes.push((path.clone(), value.to_string()));
+                    }
+                }
+            }
+        }
+    }
+    writes
+}
+
+/// Build the writes for a **block paste** of TSV starting at the top-left anchor cell
+/// (E019). The clipboard text is split into a grid (rows by `\n`, columns by `\t`) and
+/// each value maps to `(anchor_row + i, anchor_col + j)`; a write is emitted only for an
+/// in-range *writable* scalar cell, so a paste that overhangs the table edge or lands on
+/// read-only/nested cells silently skips those entries (Excel-style).
+pub fn grid_paste_writes(
+    model: &TableModel,
+    anchor_row: usize,
+    anchor_col: usize,
+    tsv: &str,
+) -> Vec<(StructuralPath, String)> {
+    if tsv.is_empty() {
+        return Vec::new();
+    }
+    let mut writes = Vec::new();
+    let body = tsv.trim_end_matches(['\n', '\r']);
+    for (i, line) in body.split('\n').enumerate() {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        for (j, val) in line.split('\t').enumerate() {
+            let (r, c) = (anchor_row + i, anchor_col + j);
+            if let Some(cell) = model.cell(r, c) {
+                if matches!(cell.class, CellClass::Scalar) {
+                    if let Some(path) = &cell.value_ref {
+                        writes.push((path.clone(), val.to_string()));
+                    }
+                }
+            }
+        }
+    }
+    writes
+}
+
 /// The grid position of a cell being rendered.
 #[derive(Debug, Clone, Copy)]
 struct CellPos {
@@ -2326,118 +2654,149 @@ fn render_cell(
     new_focus: &mut Option<(StructuralPath, FocusSurface, String)>,
     clear_focus: &mut bool,
     nav: &mut Option<CellNav>,
+    sel_rect: Option<(usize, usize, usize, usize)>,
+    cursor: Option<(usize, usize)>,
+    grid_anchor: &mut Option<(usize, usize)>,
+    grid_extend: &mut Option<(usize, usize)>,
 ) {
-    match cell.class {
-        CellClass::ReadOnly => {
-            // A read-only value (e.g. a RecordMap key) — plain non-editable text,
-            // no inline editor, no drill-in (E012).
-            ui.label(cell.text.clone().unwrap_or_default());
+    let cell_rect = ui.max_rect();
+
+    // E019b — selection highlight (byte-free), painted behind the cell content: a
+    // clearly-visible tint for any cell in the selection rect, plus a 2px border on the
+    // active (cursor) cell so even a single-cell selection is obvious.
+    if let Some((r0, c0, r1, c1)) = sel_rect {
+        if pos.row >= r0 && pos.row <= r1 && pos.column >= c0 && pos.column <= c1 {
+            ui.painter()
+                .rect_filled(cell_rect, 0.0, ui.visuals().selection.bg_fill);
         }
-        CellClass::Nested => {
-            // A nested struct / tuple / enum cell is NOT edited inline — it drills
-            // into the tree/form surface (FR-006). Show the value's KIND icon via the
-            // shared [`TypeIndicator`] (▢ struct / ◇ tuple / ◈ enum — E014, the same
-            // glyph the tree paints) + the summary + a drill-in button.
-            ui.horizontal(|ui| {
-                let indicator = indicators::from_tree_kind(nested_cell_kind(cell));
-                indicator.show(ui);
-                if let Some(path) = &cell.value_ref {
-                    if ui
-                        .button(cell.text.clone().unwrap_or_default())
-                        .on_hover_text("Open in tree/form")
-                        .clicked()
-                    {
-                        *pending = Some(PendingAction::DrillIn {
-                            path: path.clone(),
-                            row: pos.row,
-                            column: pos.column,
-                        });
-                    }
-                }
-                render_cell_diagnostics(ui, cell);
-            });
-        }
-        CellClass::NestedTable => {
-            // A nested List/Map cell opens AS A TABLE in place (E013): the list/map
-            // icon itself (▤ / ▦ via the shared [`TypeIndicator`] — E014) prefixes the
-            // clickable "open as table" button; there is no separate drill marker.
-            // Clicking re-keys the navigator's selected section to this cell's path and
-            // STAYS in the Table view (no switch to tree/form).
-            ui.horizontal(|ui| {
-                let indicator = indicators::from_tree_kind(nested_cell_kind(cell));
-                // The list/map icon goes through the shared fixed-width slot (E014),
-                // BEFORE the button; the button text is the summary only (no embedded
-                // glyph), so the open-as-table cells align with the other cell icons.
-                indicator.show(ui).on_hover_text(indicator.word());
-                if let Some(path) = &cell.value_ref {
-                    let summary = cell.text.clone().unwrap_or_default();
-                    if ui
-                        .button(summary)
-                        .on_hover_text("Open as table")
-                        .clicked()
-                    {
-                        *pending = Some(PendingAction::OpenAsTable { path: path.clone() });
-                    }
-                }
-                render_cell_diagnostics(ui, cell);
-            });
-        }
-        CellClass::Blank => {
-            // A blank (absent-field) cell is visually distinct (an empty/dim
-            // affordance) from a present-but-empty scalar (FR-010). Clicking it
-            // begins editing, which ADDS the previously-absent field. This add-field
-            // affordance is RecordList-only; for other shapes a blank cell renders
-            // as inert text (no well-defined add yet).
-            let value_path = section
+    }
+
+    // Is this cell the one currently being edited? The inline text editor takes over the
+    // whole cell; everything else renders as flat, non-interactive content.
+    let edit_path: Option<StructuralPath> = match cell.class {
+        CellClass::Scalar => cell.value_ref.clone(),
+        CellClass::Blank if row_ops => Some(
+            section
                 .child(PathStep::Index(pos.row))
-                .child(PathStep::Field(col.field_name.clone()));
-            if !row_ops {
-                ui.weak("\u{2014}");
-                return;
+                .child(PathStep::Field(col.field_name.clone())),
+        ),
+        _ => None,
+    };
+    let editing = edit_path
+        .as_ref()
+        .is_some_and(|p| draft.as_ref().is_some_and(|(d, _)| d == p));
+
+    if editing {
+        let path = edit_path.expect("editing implies an edit path");
+        // Scalar commits in place by its value path; a RecordList blank cell has no
+        // value_ref, so its commit ADDS the absent field.
+        let value_ref = match cell.class {
+            CellClass::Scalar => cell.value_ref.clone(),
+            _ => None,
+        };
+        ui.horizontal(|ui| {
+            if matches!(cell.class, CellClass::Scalar) {
+                render_scalar_type_indicator(ui, cell);
             }
-            let editing = draft.as_ref().is_some_and(|(p, _)| p == &value_path);
-            if editing {
-                // A blank cell has no existing value_ref — commit adds the field.
-                edit_inline(ui, &value_path, None, pos, col, draft, pending, clear_focus, nav);
-            } else if ui
-                .add(egui::Button::new(RichText::new("\u{2014}").weak()))
-                .on_hover_text("Add this field")
-                .clicked()
-            {
-                *new_focus = Some((
-                    value_path,
-                    FocusSurface::TableCell {
-                        row: pos.row,
-                        column: pos.column,
-                    },
-                    String::new(),
-                ));
+            edit_inline(ui, &path, value_ref, pos, col, draft, pending, clear_focus, nav);
+        });
+        return;
+    }
+
+    // Flat cell content — type icon + value text + diagnostics, drawn first (all
+    // non-interactive). For a NESTED cell the type glyph doubles as an "open" affordance:
+    // we record the glyph's rect (`icon_rect`) and route a click landing there to
+    // drill/open, while a click anywhere else on the cell selects. Distinguishing by
+    // sub-rect — not by a second gesture, and with no overlapping interactive widgets —
+    // keeps one input = one action (E019c).
+    let mut icon_rect: Option<egui::Rect> = None;
+    ui.horizontal(|ui| {
+        match cell.class {
+            CellClass::ReadOnly => {
+                ui.label(cell.text.clone().unwrap_or_default());
+            }
+            CellClass::Nested => {
+                // ▢ struct / ◇ tuple / ◈ enum (E014): the glyph is the "open" affordance
+                // (click it to drill into tree/form); the rest of the cell selects.
+                let r = indicators::from_tree_kind(nested_cell_kind(cell)).show(ui).rect;
+                if cell.value_ref.is_some() {
+                    icon_rect = Some(r);
+                }
+                ui.label(cell.text.clone().unwrap_or_default());
+            }
+            CellClass::NestedTable => {
+                // ▤ list / ▦ map (E014): the glyph opens the nested collection as a table.
+                let indicator = indicators::from_tree_kind(nested_cell_kind(cell));
+                let r = indicator.show(ui).on_hover_text(indicator.word()).rect;
+                if cell.value_ref.is_some() {
+                    icon_rect = Some(r);
+                }
+                ui.label(cell.text.clone().unwrap_or_default());
+            }
+            CellClass::Blank => {
+                // An absent-field cell (RecordList: double-click adds the field).
+                ui.weak("\u{2014}");
+            }
+            CellClass::Scalar => {
+                render_scalar_type_indicator(ui, cell);
+                ui.label(cell.text.clone().unwrap_or_default());
             }
         }
-        CellClass::Scalar => {
-            let Some(path) = &cell.value_ref else {
-                ui.weak(cell.text.clone().unwrap_or_default());
-                return;
-            };
-            let editing = draft.as_ref().is_some_and(|(p, _)| p == path);
-            ui.horizontal(|ui| {
-                // A small, weak, theme-aware type glyph immediately left of the value
-                // (E013) — a prefix label inside the cell's existing horizontal layout,
-                // so it never breaks the inline editor / focus / keyboard navigation.
-                render_scalar_type_indicator(ui, cell);
-                if editing {
-                    edit_inline(
-                        ui,
-                        path,
-                        Some(path.clone()),
-                        pos,
-                        col,
-                        draft,
-                        pending,
-                        clear_focus,
-                        nav,
-                    );
-                } else if ui.button(cell.text.clone().unwrap_or_default()).clicked() {
+        render_cell_diagnostics(ui, cell);
+    });
+
+    // The active-cell border (selection cursor), drawn on top of the content. Four line
+    // segments (a version-stable way to stroke a rect outline) inset by 1px.
+    if cursor == Some((pos.row, pos.column)) {
+        let r = cell_rect.shrink(1.0);
+        let stroke = egui::Stroke::new(2.0, ui.visuals().selection.stroke.color);
+        let p = ui.painter();
+        p.line_segment([r.left_top(), r.right_top()], stroke);
+        p.line_segment([r.right_top(), r.right_bottom()], stroke);
+        p.line_segment([r.right_bottom(), r.left_bottom()], stroke);
+        p.line_segment([r.left_bottom(), r.left_top()], stroke);
+    }
+
+    // ONE interaction for the whole cell, registered AFTER the content so it reliably
+    // receives clicks/drags over the (non-interactive) labels. A click is routed by WHERE
+    // it landed — one gesture = one action (E019c):
+    //  • on a nested cell's open-icon → drill / open-as-table;
+    //  • anywhere else → select (Shift+click extends);
+    //  • drag → range select; double-click on a scalar/blank → edit.
+    let id = ui.id().with(("grid_cell", pos.row, pos.column));
+    let cell_resp = ui.interact(cell_rect, id, egui::Sense::click_and_drag());
+    let on_icon = matches!(
+        (icon_rect, cell_resp.interact_pointer_pos()),
+        (Some(r), Some(p)) if r.contains(p)
+    );
+
+    // A pointing-hand cursor over the open-icon hints that it is clickable.
+    if let (Some(r), true) = (icon_rect, cell_resp.hovered()) {
+        if ui.input(|i| i.pointer.interact_pos()).is_some_and(|p| r.contains(p)) {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+    }
+
+    let shift = ui.input(|i| i.modifiers.shift);
+    if cell_resp.clicked() && on_icon {
+        // Open-icon click → drill (Nested) / open-as-table (NestedTable).
+        match (cell.class, &cell.value_ref) {
+            (CellClass::Nested, Some(path)) => {
+                *pending = Some(PendingAction::DrillIn {
+                    path: path.clone(),
+                    row: pos.row,
+                    column: pos.column,
+                });
+            }
+            (CellClass::NestedTable, Some(path)) => {
+                *pending = Some(PendingAction::OpenAsTable { path: path.clone() });
+            }
+            _ => {}
+        }
+    } else if cell_resp.double_clicked() {
+        match cell.class {
+            CellClass::Scalar => {
+                if let Some(path) = &cell.value_ref {
                     *new_focus = Some((
                         path.clone(),
                         FocusSurface::TableCell {
@@ -2447,10 +2806,59 @@ fn render_cell(
                         cell.text.clone().unwrap_or_default(),
                     ));
                 }
-                render_cell_diagnostics(ui, cell);
-            });
+            }
+            CellClass::Blank if row_ops => {
+                let value_path = section
+                    .child(PathStep::Index(pos.row))
+                    .child(PathStep::Field(col.field_name.clone()));
+                *new_focus = Some((
+                    value_path,
+                    FocusSurface::TableCell {
+                        row: pos.row,
+                        column: pos.column,
+                    },
+                    String::new(),
+                ));
+            }
+            // Nested / NestedTable have no inline edit; they open via the glyph icon.
+            _ => {}
+        }
+    } else if cell_resp.drag_started() {
+        // Begin a drag-select from this cell; mark the grid drag active so the
+        // pointer-geometry extend below runs on the cells the pointer moves over.
+        ui.memory_mut(|m| m.data.insert_temp(grid_drag_id(), true));
+        if shift {
+            *grid_extend = Some((pos.row, pos.column));
+        } else {
+            *grid_anchor = Some((pos.row, pos.column));
+        }
+    } else if cell_resp.clicked() {
+        if shift {
+            *grid_extend = Some((pos.row, pos.column));
+        } else {
+            *grid_anchor = Some((pos.row, pos.column));
         }
     }
+
+    // Drag-extend: while a grid drag is active and the pointer is over this cell, extend
+    // the selection cursor to it. egui delivers `dragged()` only to the origin widget, so
+    // we use pointer geometry gated by the drag flag (cleared on release in the caller).
+    if ui.memory(|m| m.data.get_temp::<bool>(grid_drag_id()).unwrap_or(false))
+        && ui.input(|i| i.pointer.primary_down())
+    {
+        if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
+            if cell_rect.contains(p) {
+                *grid_extend = Some((pos.row, pos.column));
+            }
+        }
+    }
+}
+
+/// The egui memory key for "a Table grid drag-select is in progress" (E019b). Set when a
+/// cell's drag starts, cleared when the primary button is released; gates the per-cell
+/// pointer-geometry range-extend so it never fires for scrollbar or other drags.
+fn grid_drag_id() -> egui::Id {
+    egui::Id::new("ronin_grid_drag_active")
 }
 
 /// Render the inline text editor for a scalar/blank cell (FR-006/FR-009): commit on
