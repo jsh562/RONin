@@ -20,9 +20,9 @@ The Cargo workspace:
 
 ![RONin — table view with the type legend, tab strip, and Problems panel](screenshots/overview.png)
 
-| Tree/form | Table | Text |
-|-----------|-------|------|
-| ![Tree/form view](screenshots/tree-form-view.png) | ![Table view](screenshots/table-view.png) | ![Text view](screenshots/text-view.png) |
+| Tree/form | Table (outline) | Table (grouped) | Text |
+|-----------|-----------------|-----------------|------|
+| ![Tree/form view](screenshots/tree-form-view.png) | ![Table outline view](screenshots/table-view.png) | ![Table grouped view](screenshots/table-grouped-view.png) | ![Text view](screenshots/text-view.png) |
 
 RONin projects one lossless document through **five views** — Tree/form, three
 spreadsheet variants (outline / sections / grouped), and raw Text — with

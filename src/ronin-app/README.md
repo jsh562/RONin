@@ -29,9 +29,9 @@ RONin projects the active document through five views, selectable from the **Vie
 | **Table (grouped)** | Pivot-style variant: rows grouped by one or two chosen fields into collapsible groups. |
 | **Text** | The raw RON source, backed by the same lossless CST. |
 
-| Tree/form | Table | Text |
-|-----------|-------|------|
-| ![Tree/form view](https://raw.githubusercontent.com/jsh562/RONin/main/screenshots/tree-form-view.png) | ![Table view](https://raw.githubusercontent.com/jsh562/RONin/main/screenshots/table-view.png) | ![Text view](https://raw.githubusercontent.com/jsh562/RONin/main/screenshots/text-view.png) |
+| Tree/form | Table (outline) | Table (grouped) | Text |
+|-----------|-----------------|-----------------|------|
+| ![Tree/form view](https://raw.githubusercontent.com/jsh562/RONin/main/screenshots/tree-form-view.png) | ![Table outline view](https://raw.githubusercontent.com/jsh562/RONin/main/screenshots/table-view.png) | ![Table grouped view](https://raw.githubusercontent.com/jsh562/RONin/main/screenshots/table-grouped-view.png) | ![Text view](https://raw.githubusercontent.com/jsh562/RONin/main/screenshots/text-view.png) |
 
 ## Excel-like table editing
 

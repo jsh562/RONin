@@ -24,6 +24,12 @@ pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }.tar.gz"
 pkg-fmt = "tar.gz"
 bin-dir = "{ bin }{ binary-ext }"
 
+# Opt-in headless screenshot generator (docs assets). Enables egui_kittest's
+# wgpu renderer so `tests/gen_screenshots.rs` can render the real app to PNG with
+# NO live GUI. Off by default so normal `cargo test`/CI never builds wgpu.
+[features]
+screenshots = ["egui_kittest/wgpu", "egui_kittest/eframe", "egui_kittest/snapshot"]
+
 [dependencies]
 # Cross-platform atomic file replace for the never-corrupt save seam (E007,
 # TR-002, AD-001). `atomicwrites` replaces-over-existing atomically — on Windows
@@ -73,6 +79,8 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
 [dev-dependencies]
 egui_kittest = "0.34.3"
+# PNG encode for the opt-in screenshot generator (used only with --features screenshots).
+image = { version = "0.25", default-features = false, features = ["png"] }
 # Property tests for the defaults-elision core (E009 US3, T030/T031): the
 # bit-for-bit float-equality rule and the shrink->expand->shrink byte-identical
 # stability invariant. Already in the workspace lock via `ronin-core`.
