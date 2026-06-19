@@ -33,7 +33,10 @@ const STRUCTURAL_GLYPHS: &[(char, &str)] = &[
     ('\u{0022}', "\" Str indicator"),
     ('\u{0027}', "' Char indicator"),
     ('\u{2611}', "☑ Bool indicator"),
-    ('\u{2022}', "• Scalar indicator (generic / unclassified leaf)"),
+    (
+        '\u{2022}',
+        "• Scalar indicator (generic / unclassified leaf)",
+    ),
     ('\u{2716}', "✖ Error indicator / delete control"),
     ('\u{26A0}', "⚠ Warning indicator"),
     // Remaining control / navigation / summary glyphs (not type indicators).
@@ -112,8 +115,7 @@ fn noto_faces_are_appended_to_both_family_fallback_chains() {
         // entries are exactly the three Noto faces in order.
         let tail = &chain[chain.len() - NOTO_KEYS.len()..];
         assert_eq!(
-            tail,
-            NOTO_KEYS,
+            tail, NOTO_KEYS,
             "the three Noto faces must be the LAST (fallback) entries of {fam:?}, in order"
         );
 

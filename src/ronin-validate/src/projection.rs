@@ -1196,7 +1196,9 @@ fn has_brace(node: &SyntaxNode) -> bool {
 /// variant `V { field: v }` the key `field` is parsed as a bare-ident value node
 /// (an `EnumVariant`), so we read it as a [`Value`] and take its name/span rather
 /// than a direct token.
-fn entry_key_name_and_span(entry: &ronin_core::syntax::ast::MapEntry) -> Option<(String, TextRange)> {
+fn entry_key_name_and_span(
+    entry: &ronin_core::syntax::ast::MapEntry,
+) -> Option<(String, TextRange)> {
     let key = entry.key()?;
     // The key text is the bare identifier; its span is the key node's range.
     let name = match &key {

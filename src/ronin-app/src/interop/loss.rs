@@ -444,7 +444,8 @@ pub fn build_loss_report(
 ) -> LossReport {
     let mut report = LossReport::new();
     let root = doc.root();
-    if let Some(value) = ronin_core::syntax::ast::Document::cast(root.clone()).and_then(|d| d.value())
+    if let Some(value) =
+        ronin_core::syntax::ast::Document::cast(root.clone()).and_then(|d| d.value())
     {
         let mut walker = LossWalker {
             index: projection_index,

@@ -197,11 +197,7 @@ fn render_section_boundary(
         // The badge glyph goes through the shared fixed-width slot (E014) so the badge
         // icon aligns with the icons the inner views paint.
         indicator.show(ui).on_hover_text(indicator.word());
-        ui.label(
-            RichText::new(label)
-                .color(indicator.color(ui))
-                .strong(),
-        );
+        ui.label(RichText::new(label).color(indicator.color(ui)).strong());
 
         // The auto-vs-forced state marker (FR-012): the user can tell whether the
         // section is showing its automatic rendering or a manual override.

@@ -198,7 +198,10 @@ fn structural_models_are_cached_per_parse_generation() {
         .cached_table_model(&section, SectionShape::RecordList)
         .expect("table model derives");
     let first_ms = t_first.elapsed().as_secs_f64() * 1000.0;
-    assert!(doc.has_cached_tree_model(), "tree model cached after access");
+    assert!(
+        doc.has_cached_tree_model(),
+        "tree model cached after access"
+    );
     assert!(
         doc.has_cached_table_model(&section, SectionShape::RecordList),
         "table model cached after access"

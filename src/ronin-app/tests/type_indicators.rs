@@ -172,7 +172,10 @@ fn list_renders_as_list_glyph_in_both_tree_and_table() {
         });
         harness.run();
         assert!(
-            harness.query_all_by_label_contains(list_glyph).next().is_some(),
+            harness
+                .query_all_by_label_contains(list_glyph)
+                .next()
+                .is_some(),
             "the tree must paint the list glyph `{list_glyph}` for a list node"
         );
     }
@@ -196,7 +199,10 @@ fn list_renders_as_list_glyph_in_both_tree_and_table() {
         });
         harness.run();
         assert!(
-            harness.query_all_by_label_contains(list_glyph).next().is_some(),
+            harness
+                .query_all_by_label_contains(list_glyph)
+                .next()
+                .is_some(),
             "the table must paint the SAME list glyph `{list_glyph}` for a list column/cell"
         );
     }
@@ -271,7 +277,10 @@ fn show_slot_senses_hover_so_tooltips_fire() {
         hovered_ui.set(resp.hovered());
     });
     harness.run();
-    assert!(!hovered.get(), "the slot is not hovered before the pointer is over it");
+    assert!(
+        !hovered.get(),
+        "the slot is not hovered before the pointer is over it"
+    );
 
     harness.hover_at(rect.get().center());
     harness.run();

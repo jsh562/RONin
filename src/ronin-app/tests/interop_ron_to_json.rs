@@ -7,10 +7,10 @@
 //! human-readable `detail` wording (plan "Snapshot vs assertion scope").
 
 use proptest::prelude::*;
-use ronin_core::parse;
 use ronin_app::interop::{
     render_json, ron_to_json, CommentMode, JsoncStyle, LossKind, LossRecovery, RonToJson,
 };
+use ronin_core::parse;
 
 /// Convert `src` RON→JSON with JSONC comments, unbound (the deterministic
 /// best-effort path). Unbound is the US1 default — the binding path is US2.

@@ -17,13 +17,13 @@
 //! Snapshots key on the JSONC text + the loss kinds, NOT on detail wording (plan
 //! "Snapshot vs assertion scope").
 
-use ronin_core::parse;
-use ronin_types::model::{
-    Discriminator, Field, NodeKind, Primitive, TypeModel, TypeNode, TypeRef, Variant, VariantShape,
-};
 use ronin_app::interop::{
     json_to_ron, render_json, ron_to_json, CommentMode, JsonToRonBinding, JsoncStyle, LossKind,
     RonToJson,
+};
+use ronin_core::parse;
+use ronin_types::model::{
+    Discriminator, Field, NodeKind, Primitive, TypeModel, TypeNode, TypeRef, Variant, VariantShape,
 };
 
 /// Convert `src` RON→JSON (unbound) and render the JSONC output text.

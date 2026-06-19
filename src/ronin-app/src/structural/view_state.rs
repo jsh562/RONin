@@ -871,9 +871,8 @@ impl ViewSelectionAndFocus {
     /// (inclusive), or `None` when nothing is selected.
     #[must_use]
     pub fn grid_selection_rect(&self) -> Option<(usize, usize, usize, usize)> {
-        self.grid_selection.map(|((ar, ac), (cr, cc))| {
-            (ar.min(cr), ac.min(cc), ar.max(cr), ac.max(cc))
-        })
+        self.grid_selection
+            .map(|((ar, ac), (cr, cc))| (ar.min(cr), ac.min(cc), ar.max(cr), ac.max(cc)))
     }
 
     /// `true` when the projection is stale (a reparse is in flight) (FR-015).
@@ -1166,7 +1165,10 @@ mod tests {
         // Second navigation: the outgoing selection (`a`) is pushed onto back.
         vsf.navigate_table_section(field("b"));
         assert_eq!(vsf.selected_table_section(), Some(&field("b")));
-        assert!(vsf.can_go_back(), "navigating away pushes the prior onto back");
+        assert!(
+            vsf.can_go_back(),
+            "navigating away pushes the prior onto back"
+        );
 
         // Going back populates forward; a NEW navigation must clear forward.
         vsf.table_go_back();
@@ -1310,6 +1312,9 @@ mod tests {
             back_before,
             "the raw setter must not change the back stack"
         );
-        assert!(!vsf.can_go_forward(), "the raw setter must not touch forward");
+        assert!(
+            !vsf.can_go_forward(),
+            "the raw setter must not touch forward"
+        );
     }
 }

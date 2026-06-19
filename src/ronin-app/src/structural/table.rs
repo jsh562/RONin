@@ -170,8 +170,7 @@ impl Cell {
     /// assert a cell's type indicator without naming the `pub(crate)` `ScalarClass`.
     #[must_use]
     pub fn scalar_type_name(&self) -> Option<&'static str> {
-        self.scalar
-            .map(|c| indicators::from_scalar_class(c).word())
+        self.scalar.map(|c| indicators::from_scalar_class(c).word())
     }
 }
 
@@ -343,9 +342,7 @@ impl TableModel {
             ast::Value::Map(map) => Some(Self::project_map(path, &map, diagnostics, &root)),
             ast::Value::List(list) => Some(Self::project_list(path, &list, diagnostics, &root)),
             // A single tuple → a positional 1-row table.
-            ast::Value::Tuple(tuple) => {
-                Some(Self::project_tuple(path, &tuple, diagnostics, &root))
-            }
+            ast::Value::Tuple(tuple) => Some(Self::project_tuple(path, &tuple, diagnostics, &root)),
             // A single struct / struct-like enum variant → a field/value table.
             ast::Value::Struct(_) | ast::Value::EnumVariant(_) => Some(Self::project_struct(
                 path,
@@ -505,7 +502,10 @@ impl TableModel {
                 .collect()
         } else {
             columns.push(value_column(
-                &collected.iter().map(|(_, _, v)| v.clone()).collect::<Vec<_>>(),
+                &collected
+                    .iter()
+                    .map(|(_, _, v)| v.clone())
+                    .collect::<Vec<_>>(),
             ));
             collected
                 .iter()
@@ -608,8 +608,7 @@ impl TableModel {
                 };
                 // The value cell IS the field value itself (element_ref): a nested value
                 // becomes a drill-in / open-as-table cell, a scalar an editable cell.
-                let value_cell =
-                    value_cell(element_ref.clone(), field_value, diagnostics, &index);
+                let value_cell = value_cell(element_ref.clone(), field_value, diagnostics, &index);
                 Row {
                     element_ref,
                     cells: vec![field_cell, value_cell],
@@ -648,8 +647,7 @@ impl TableModel {
         // Value projection: union of record fields when EVERY value is a record;
         // otherwise a single `value` column showing each value's summary.
         let all_records = !values.is_empty() && values.iter().all(is_record);
-        let records: Vec<Vec<(String, ast::Value)>> =
-            values.iter().map(record_fields).collect();
+        let records: Vec<Vec<(String, ast::Value)>> = values.iter().map(record_fields).collect();
 
         // The leading read-only key column.
         let mut columns = vec![Column {
@@ -681,12 +679,7 @@ impl TableModel {
                     }
                 } else {
                     // The single `value` cell IS the entry value itself (element_ref).
-                    cells.push(value_cell(
-                        element_ref.clone(),
-                        value,
-                        diagnostics,
-                        &index,
-                    ));
+                    cells.push(value_cell(element_ref.clone(), value, diagnostics, &index));
                 }
                 Row { element_ref, cells }
             })
@@ -712,10 +705,8 @@ impl TableModel {
         let elements: Vec<ast::Value> = list.items().collect();
 
         let all_records = !elements.is_empty() && elements.iter().all(is_record);
-        let all_tuples = !elements.is_empty()
-            && elements
-                .iter()
-                .all(|e| matches!(e, ast::Value::Tuple(_)));
+        let all_tuples =
+            !elements.is_empty() && elements.iter().all(|e| matches!(e, ast::Value::Tuple(_)));
 
         if all_records {
             // Union of fields, first-seen — permissive (mixed record names allowed).
@@ -750,11 +741,7 @@ impl TableModel {
                     _ => None,
                 })
                 .collect();
-            let arity = tuples
-                .iter()
-                .map(|t| t.items().count())
-                .max()
-                .unwrap_or(0);
+            let arity = tuples.iter().map(|t| t.items().count()).max().unwrap_or(0);
             let columns: Vec<Column> = (0..arity)
                 .map(|pos| Column {
                     field_name: format!(".{pos}"),
@@ -835,10 +822,7 @@ impl TableModel {
         let mut records: Vec<Vec<(String, ast::Value)>> = Vec::new();
         for entry in map.entries() {
             let Some(value) = entry.value() else { continue };
-            let key_text = entry
-                .key()
-                .map(|k| k.syntax().text())
-                .unwrap_or_default();
+            let key_text = entry.key().map(|k| k.syntax().text()).unwrap_or_default();
             keys.push(key_text);
             records.push(record_fields(&value));
         }
@@ -905,11 +889,7 @@ impl TableModel {
 
         // Column count = the max arity across tuples (uniform by construction, but
         // computed defensively so a degraded shape still projects safely — FR-019).
-        let arity = tuples
-            .iter()
-            .map(|t| t.items().count())
-            .max()
-            .unwrap_or(0);
+        let arity = tuples.iter().map(|t| t.items().count()).max().unwrap_or(0);
         let columns: Vec<Column> = (0..arity)
             .map(|pos| Column {
                 field_name: format!(".{pos}"),
@@ -1383,10 +1363,7 @@ pub struct BreadcrumbSegment {
 /// A segment is **clickable** iff its prefix resolves to a List or Map (the only
 /// openable kinds) — so the breadcrumb only offers navigation to table-able ancestors.
 #[must_use]
-pub fn breadcrumb_segments(
-    cst: &CstDocument,
-    path: &StructuralPath,
-) -> Vec<BreadcrumbSegment> {
+pub fn breadcrumb_segments(cst: &CstDocument, path: &StructuralPath) -> Vec<BreadcrumbSegment> {
     let root = cst.root();
     let steps = path.steps();
     let mut out = Vec::with_capacity(steps.len() + 1);
@@ -1542,7 +1519,8 @@ impl EditorDocument {
     ) -> Result<(), BlockedReason> {
         let cst = ronin_core::parse(&self.buffer);
         let node = resolve_path(&cst.root(), value_ref).ok_or(BlockedReason::TargetNotFound)?;
-        let (parent, index) = Self::parent_and_index_of(&node).ok_or(BlockedReason::InvalidPayload)?;
+        let (parent, index) =
+            Self::parent_and_index_of(&node).ok_or(BlockedReason::InvalidPayload)?;
         self.apply_structural_edit(
             StructuralOp::SetValue {
                 parent,
@@ -1611,9 +1589,7 @@ impl EditorDocument {
                 let collection = immediate.parent()?;
                 let index = collection
                     .children()
-                    .filter(|c| {
-                        matches!(c.kind(), SyntaxKind::StructField | SyntaxKind::MapEntry)
-                    })
+                    .filter(|c| matches!(c.kind(), SyntaxKind::StructField | SyntaxKind::MapEntry))
                     .position(|c| c == immediate)?;
                 let parent = match collection.kind() {
                     SyntaxKind::Struct => ParentRef::Struct(collection),
@@ -1861,7 +1837,8 @@ pub fn auto_column_widths(model: &TableModel, measure: impl Fn(&str) -> f32) -> 
 /// "—"). With no group columns every row lands in one `""` group. Pure + cheap — the core
 /// of the grouped view, unit-tested without any UI.
 pub fn group_rows_by(model: &TableModel, group_cols: &[usize]) -> Vec<(String, Vec<usize>)> {
-    let mut groups: std::collections::BTreeMap<String, Vec<usize>> = std::collections::BTreeMap::new();
+    let mut groups: std::collections::BTreeMap<String, Vec<usize>> =
+        std::collections::BTreeMap::new();
     for (ri, row) in model.rows.iter().enumerate() {
         let key = if group_cols.is_empty() {
             String::new()
@@ -1892,7 +1869,11 @@ pub fn group_rows_by(model: &TableModel, group_cols: &[usize]) -> Vec<(String, V
 /// Each kept [`Cell`] is cloned verbatim, so its `value_ref` is preserved — the resulting
 /// model edits **by path** through [`render_table_grid`] with `row_ops=false`, regardless of
 /// the row reorder / column filter. Pure + cheap; unit-tested.
-pub fn grouped_view_model(base: &TableModel, group_cols: &[usize], show_cols: &[usize]) -> TableModel {
+pub fn grouped_view_model(
+    base: &TableModel,
+    group_cols: &[usize],
+    show_cols: &[usize],
+) -> TableModel {
     let ncols = base.columns.len();
     // Column order: valid group cols first (de-duped), then the display cols (or all).
     let mut col_order: Vec<usize> = Vec::new();
@@ -2299,8 +2280,7 @@ fn render_table_grid(
                     egui::Event::Paste(text) => {
                         // A single value over a multi-cell selection FILLS the
                         // selection; otherwise it's a block paste from the top-left.
-                        let single =
-                            !text.contains('\t') && !text.trim_end().contains('\n');
+                        let single = !text.contains('\t') && !text.trim_end().contains('\n');
                         let multi_cell = r0 != r1 || c0 != c1;
                         let writes = if single && multi_cell {
                             let value = text.trim_end_matches(['\n', '\r']);
@@ -2357,9 +2337,7 @@ fn render_table_grid(
                 // blank cell); RecordMap / TupleList commit the existing cell value in
                 // place by its structural path (FR-006).
                 let res = match (row_ops, &value_ref) {
-                    (false, Some(path)) => {
-                        doc.apply_table_set_cell_at(path, value, worker, now)
-                    }
+                    (false, Some(path)) => doc.apply_table_set_cell_at(path, value, worker, now),
                     _ => doc.apply_table_set_cell(&section, row, &field, value, worker, now),
                 };
                 // On a successful commit, move focus per the keyboard model (FR-009):
@@ -2681,7 +2659,6 @@ fn advance_focus(
     }
 }
 
-
 /// Serialize a rectangular cell range to **TSV** for the clipboard (E019 — Excel-style
 /// copy): rows joined by `\n`, columns by `\t`, each cell its verbatim `text` (empty for
 /// a blank/absent cell). The rect is inclusive `(r0,c0)..=(r1,c1)` and is clamped to the
@@ -2789,7 +2766,13 @@ fn clear_value_for(scalar: Option<ScalarClass>) -> Option<&'static str> {
 /// type's empty value (E024 — Excel-style Delete). One write per `Scalar` cell with a
 /// `value_ref` and a known [`ScalarClass`]; read-only / nested / blank / unknown cells are
 /// skipped. Applied via the one-undo [`apply_grid_writes`].
-pub fn clear_writes(model: &TableModel, r0: usize, c0: usize, r1: usize, c1: usize) -> Vec<(StructuralPath, String)> {
+pub fn clear_writes(
+    model: &TableModel,
+    r0: usize,
+    c0: usize,
+    r1: usize,
+    c1: usize,
+) -> Vec<(StructuralPath, String)> {
     let max_row = model.row_count().saturating_sub(1);
     let max_col = model.columns.len().saturating_sub(1);
     let (r0, r1) = (r0.min(max_row), r1.min(max_row));
@@ -2799,7 +2782,8 @@ pub fn clear_writes(model: &TableModel, r0: usize, c0: usize, r1: usize, c1: usi
         for c in c0..=c1 {
             if let Some(cell) = model.cell(r, c) {
                 if matches!(cell.class, CellClass::Scalar) {
-                    if let (Some(path), Some(val)) = (&cell.value_ref, clear_value_for(cell.scalar)) {
+                    if let (Some(path), Some(val)) = (&cell.value_ref, clear_value_for(cell.scalar))
+                    {
                         writes.push((path.clone(), val.to_string()));
                     }
                 }
@@ -2914,7 +2898,9 @@ fn render_cell(
             CellClass::Nested => {
                 // ▢ struct / ◇ tuple / ◈ enum (E014): the glyph is the "open" affordance
                 // (click it to drill into tree/form); the rest of the cell selects.
-                let r = indicators::from_tree_kind(nested_cell_kind(cell)).show(ui).rect;
+                let r = indicators::from_tree_kind(nested_cell_kind(cell))
+                    .show(ui)
+                    .rect;
                 if cell.value_ref.is_some() {
                     icon_rect = Some(r);
                 }
@@ -2968,7 +2954,10 @@ fn render_cell(
 
     // A pointing-hand cursor over the open-icon hints that it is clickable.
     if let (Some(r), true) = (icon_rect, cell_resp.hovered()) {
-        if ui.input(|i| i.pointer.interact_pos()).is_some_and(|p| r.contains(p)) {
+        if ui
+            .input(|i| i.pointer.interact_pos())
+            .is_some_and(|p| r.contains(p))
+        {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
     }
@@ -3260,14 +3249,14 @@ fn column_nested_kind(rows: &[Row], col_idx: usize) -> TreeNodeKind {
 /// for a struct/tuple/enum drill-in column). `None` when no representative type is
 /// derivable (an all-blank scalar column).
 #[must_use]
-fn column_type_indicator(
-    column: &Column,
-    rows: &[Row],
-    col_idx: usize,
-) -> Option<TypeIndicator> {
+fn column_type_indicator(column: &Column, rows: &[Row], col_idx: usize) -> Option<TypeIndicator> {
     match column.class {
-        ColumnClass::Scalar => column_scalar_class(rows, col_idx).map(indicators::from_scalar_class),
-        ColumnClass::Nested => Some(indicators::from_tree_kind(column_nested_kind(rows, col_idx))),
+        ColumnClass::Scalar => {
+            column_scalar_class(rows, col_idx).map(indicators::from_scalar_class)
+        }
+        ColumnClass::Nested => Some(indicators::from_tree_kind(column_nested_kind(
+            rows, col_idx,
+        ))),
     }
 }
 
@@ -3385,8 +3374,14 @@ mod tests {
         let m = model_of("[(i: 1, f: 1.5, s: \"x\", c: 'q', b: true, n: [1])]");
         let col = |name: &str| m.columns.iter().position(|c| c.field_name == name).unwrap();
 
-        assert_eq!(m.cell(0, col("i")).unwrap().scalar, Some(ScalarClass::Integer));
-        assert_eq!(m.cell(0, col("f")).unwrap().scalar, Some(ScalarClass::Float));
+        assert_eq!(
+            m.cell(0, col("i")).unwrap().scalar,
+            Some(ScalarClass::Integer)
+        );
+        assert_eq!(
+            m.cell(0, col("f")).unwrap().scalar,
+            Some(ScalarClass::Float)
+        );
         assert_eq!(m.cell(0, col("s")).unwrap().scalar, Some(ScalarClass::Str));
         assert_eq!(m.cell(0, col("c")).unwrap().scalar, Some(ScalarClass::Char));
         assert_eq!(m.cell(0, col("b")).unwrap().scalar, Some(ScalarClass::Bool));
@@ -3429,7 +3424,11 @@ mod tests {
             .collect();
         glyphs.sort_unstable();
         glyphs.dedup();
-        assert_eq!(glyphs.len(), classes.len(), "every typed scalar glyph is distinct");
+        assert_eq!(
+            glyphs.len(),
+            classes.len(),
+            "every typed scalar glyph is distinct"
+        );
     }
 
     #[test]
@@ -3448,8 +3447,16 @@ mod tests {
         // carries the Struct indicator (▢ tree/form drill-in) — the SAME glyphs the
         // tree paints (E014).
         let m = model_of("[(items: [1], meta: Meta(k: 1)), (items: [2], meta: Meta(k: 2)), (items: [3], meta: Meta(k: 3))]");
-        let items = m.columns.iter().position(|c| c.field_name == "items").unwrap();
-        let meta = m.columns.iter().position(|c| c.field_name == "meta").unwrap();
+        let items = m
+            .columns
+            .iter()
+            .position(|c| c.field_name == "items")
+            .unwrap();
+        let meta = m
+            .columns
+            .iter()
+            .position(|c| c.field_name == "meta")
+            .unwrap();
         assert_eq!(column_nested_kind(&m.rows, items), TreeNodeKind::List);
         assert_eq!(
             column_type_indicator(&m.columns[items], &m.rows, items),

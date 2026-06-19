@@ -22,9 +22,9 @@
 //!    semantic-token stream is a contiguous subsequence of the spliced one — the
 //!    splice only *adds* tokens, never drops or reorders the existing content).
 
-use ronin_core::{completion_context, parse, SyntaxKind};
 use ronin_app::completion::accept_item;
 use ronin_app::snippets::insert_snippet;
+use ronin_core::{completion_context, parse, SyntaxKind};
 
 // ---- semantic token oracle --------------------------------------------------
 

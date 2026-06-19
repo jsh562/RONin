@@ -1318,12 +1318,7 @@ pub fn set_subtree_open(ctx: &egui::Context, doc_id: u64, node: &TreeNode, open:
 /// `None` for the root. Per-level indent guides are egui's native left vline
 /// (`Visuals::indent_has_left_vline`, on by default), drawn by each `CollapsingState`
 /// body's indented region — no custom guide painting (which previously doubled up).
-fn render_node(
-    ui: &mut Ui,
-    node: &TreeNode,
-    sibling: Option<&SiblingCtx>,
-    ctx: &mut RenderCtx,
-) {
+fn render_node(ui: &mut Ui, node: &TreeNode, sibling: Option<&SiblingCtx>, ctx: &mut RenderCtx) {
     let indicator = node_indicator(node);
     let header = node_header(node, ui);
     let summary = node_summary_text(node);

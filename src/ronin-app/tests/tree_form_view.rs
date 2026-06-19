@@ -770,7 +770,11 @@ fn collapse_id_is_stable_across_a_reparse_of_the_same_source() {
     // Force a fresh reparse of the identical buffer (a no-op edit re-deriving the CST).
     doc.on_edit();
     drive_reparse(&mut doc, &worker);
-    assert_eq!(doc.id(), doc_id, "document identity is stable across reparse");
+    assert_eq!(
+        doc.id(),
+        doc_id,
+        "document identity is stable across reparse"
+    );
 
     let after = model_of(&doc);
     let after_cells = find_node_with_child(&after.roots[0], "(1)", "cells")
@@ -933,7 +937,11 @@ fn kind_icon_is_total_and_distinct_per_collection_kind() {
     }
     // The five collection kinds (struct/map/list/tuple/enum) are mutually distinct.
     let distinct: std::collections::HashSet<_> = icons[..5].iter().collect();
-    assert_eq!(distinct.len(), 5, "struct/map/list/tuple/enum icons are distinct");
+    assert_eq!(
+        distinct.len(),
+        5,
+        "struct/map/list/tuple/enum icons are distinct"
+    );
 
     // The direct indicator variants and the kind→indicator conversion agree (the
     // SAME glyph regardless of entry point — cross-view consistency, E014).
@@ -959,7 +967,11 @@ fn large_fixture_tree_renders_within_responsiveness_guard() {
         env!("CARGO_MANIFEST_DIR")
     );
     let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
-    assert!(src.len() > 35_000, "fixture too small to guard ({} bytes)", src.len());
+    assert!(
+        src.len() > 35_000,
+        "fixture too small to guard ({} bytes)",
+        src.len()
+    );
 
     let mut doc = doc_at(&src, &worker);
 

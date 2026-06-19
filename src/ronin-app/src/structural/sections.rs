@@ -108,7 +108,13 @@ pub fn scan_table_sections(cst: &CstDocument) -> Vec<TableSection> {
     };
 
     let mut out = Vec::new();
-    visit(&top, StructuralPath::root(), &["(root)".to_string()], 0, &mut out);
+    visit(
+        &top,
+        StructuralPath::root(),
+        &["(root)".to_string()],
+        0,
+        &mut out,
+    );
     out
 }
 
@@ -134,9 +140,7 @@ fn visit(
     // still found.
     match &value {
         ast::Value::List(list) => {
-            if let Some(section) =
-                detect_list_section(node, list, &path, label_steps)
-            {
+            if let Some(section) = detect_list_section(node, list, &path, label_steps) {
                 out.push(section);
             }
             // A list of records may have repeated child collections to combine (E018).
@@ -407,7 +411,10 @@ mod tests {
             .iter()
             .find(|x| x.shape == SectionShape::RecordMap)
             .expect("hulls record map");
-        assert_eq!(hulls.path, StructuralPath::from_steps(vec![PathStep::Field("hulls".to_string())]));
+        assert_eq!(
+            hulls.path,
+            StructuralPath::from_steps(vec![PathStep::Field("hulls".to_string())])
+        );
         assert_eq!(hulls.rows, 2);
 
         // Each hull's `cells` is a RecordList (two of them).

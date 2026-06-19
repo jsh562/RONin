@@ -1591,9 +1591,7 @@ impl EditorDocument {
             .any(|(p, _)| p == path)
         {
             let model = TableModel::derive_any(&parse.cst, path, &self.diagnostics);
-            self.structural_cache
-                .tables_any
-                .push((path.clone(), model));
+            self.structural_cache.tables_any.push((path.clone(), model));
         }
         self.structural_cache
             .tables_any
@@ -1620,10 +1618,7 @@ impl EditorDocument {
             let sections = scan_table_sections(&parse.cst);
             self.structural_cache.sections = Some(sections);
         }
-        self.structural_cache
-            .sections
-            .as_deref()
-            .unwrap_or(&[])
+        self.structural_cache.sections.as_deref().unwrap_or(&[])
     }
 
     /// `true` when the structural model cache currently holds a derived tree model for
