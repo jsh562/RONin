@@ -656,11 +656,25 @@ pub fn render_tab_strip(ui: &mut egui::Ui, workspace: &EditorWorkspace) -> TabBa
 /// the containers group on the **left** and the status group on the **right** (the
 /// natural reading order of [`TypeIndicator::ALL`](crate::structural::TypeIndicator::ALL)).
 /// A small [`Ui::add_space`] separates the three groups.
+/// The small gap inserted between the legend's three indicator groups (E015).
+const LEGEND_GROUP_GAP: f32 = 10.0;
+
+/// The approximate width the [`legend_strip`] needs: one fixed slot per glyph plus the
+/// two inter-group gaps (and a little slack). Used by the view-switcher to decide whether
+/// the legend fits on the tab row or must wrap to its own row (E021 — avoids the legend
+/// overlapping the tabs).
+fn legend_min_width() -> f32 {
+    use crate::structural::TypeIndicator;
+    TypeIndicator::ALL.len() as f32 * crate::structural::indicators::SLOT_WIDTH
+        + 2.0 * LEGEND_GROUP_GAP
+        + 8.0
+}
+
 fn legend_strip(ui: &mut egui::Ui) {
     use crate::structural::TypeIndicator;
 
     /// The small gap inserted between the three indicator groups.
-    const GROUP_GAP: f32 = 10.0;
+    const GROUP_GAP: f32 = LEGEND_GROUP_GAP;
 
     let containers = TypeIndicator::CONTAINER_COUNT;
     let scalars = TypeIndicator::SCALAR_COUNT;
@@ -4137,6 +4151,15 @@ impl App {
                             crate::panels::render_table_sections_seam(ui, doc, worker);
                         }
                     }
+                    ActiveView::TableGrouped => {
+                        // Pivot-style comparison variant (E021): same section navigator +
+                        // breadcrumb, but the selected collection's rows are grouped by 1–2
+                        // chosen fields into collapsible groups. Split borrow is sound.
+                        let worker = &self.worker;
+                        if let Some(doc) = self.workspace.get_mut(idx) {
+                            crate::panels::render_table_grouped_seam(ui, doc, worker);
+                        }
+                    }
                 }
             }
             _ => {
@@ -4164,6 +4187,10 @@ impl App {
             return;
         };
         let mut view = doc.view_state().active_view();
+        // E021: the legend goes on the SAME row as the tabs when there's room, else it
+        // wraps to its own row below — egui reserves no space between a left-aligned run
+        // and a right-aligned one, so a too-narrow row would overlap the tabs.
+        let mut legend_wrapped = false;
         ui.horizontal(|ui| {
             ui.label("View:");
             // Switching only changes the active-view selection; the buffer is never
@@ -4171,18 +4198,27 @@ impl App {
             ui.selectable_value(&mut view, ActiveView::TreeForm, "Tree/form");
             ui.selectable_value(&mut view, ActiveView::Table, "Table (outline)");
             ui.selectable_value(&mut view, ActiveView::TableSections, "Table (sections)");
+            ui.selectable_value(&mut view, ActiveView::TableGrouped, "Table (grouped)");
             ui.selectable_value(&mut view, ActiveView::Text, "Text");
             if doc.view_state().is_stale() {
                 // FR-015: a user-perceivable stale marker while a reparse is pending.
                 ui.weak("(updating\u{2026})");
             }
-            // The always-visible type-indicator legend (E015): right-aligned on this
-            // SAME row so it costs zero extra vertical space and sits directly above
-            // the views, using the SAME glyphs/colors the tree + table paint.
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                legend_strip(ui);
-            });
+            // The always-visible type-indicator legend (E015): right-aligned on this SAME
+            // row when it fits (zero extra vertical space), using the SAME glyphs/colors
+            // the tree + table paint. If the remaining width is too small it would overlap
+            // the tabs, so defer it to its own row below (E021).
+            if ui.available_width() >= legend_min_width() {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    legend_strip(ui);
+                });
+            } else {
+                legend_wrapped = true;
+            }
         });
+        if legend_wrapped {
+            ui.horizontal(legend_strip);
+        }
         if view != doc.view_state().active_view() {
             // Keep any in-progress draft/focus across the switch (FR-017) — we only
             // change the active view; focus is preserved and re-resolved on reparse.

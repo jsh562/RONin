@@ -1667,3 +1667,48 @@ fn outline_lists_container_nodes_not_scalar_leaves_and_selecting_switches_grid()
         );
     }
 }
+
+// =============================================================================
+// E022 — Table (grouped) superset: outline nav + group-by + show-columns, editable
+// =============================================================================
+
+#[test]
+fn grouped_seam_renders_an_editable_grid_grouped_by_the_selected_field() {
+    use egui_kittest::kittest::Queryable;
+    use std::cell::RefCell;
+
+    let worker = Rc::new(ReparseWorker::new());
+    let mut doc = EditorDocument::new_untitled(1);
+    // A RecordList whose `kind` field has values x, y, x → grouping by `kind` clusters the
+    // two "x" rows together; the grid renders the `kind` column first plus the values.
+    doc.buffer =
+        "[\n    (kind: \"x\", n: 1),\n    (kind: \"y\", n: 2),\n    (kind: \"x\", n: 3),\n]".to_string();
+    doc.on_edit();
+    drive_reparse(&mut doc, &worker);
+    // View the root list, grouped by column 0 (`kind`, first-seen).
+    doc.view_state_mut()
+        .set_selected_table_section(Some(StructuralPath::root()));
+    doc.view_state_mut().set_group_by(vec![0]);
+    let doc = Rc::new(RefCell::new(doc));
+
+    let doc_ui = Rc::clone(&doc);
+    let worker_ui = Rc::clone(&worker);
+    let mut harness = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(900.0, 460.0))
+        .build_ui(move |ui| {
+            let mut d = doc_ui.borrow_mut();
+            ronin_app::panels::render_table_grouped_seam(ui, &mut d, &worker_ui);
+        });
+    harness.run();
+
+    // The grouped editable grid renders: the `kind` column (group field, shown first) and
+    // its clustered values are both present.
+    assert!(
+        harness.query_all_by_label_contains("kind").next().is_some(),
+        "the group field `kind` is present (column header / picker)"
+    );
+    assert!(
+        harness.query_all_by_label_contains("\"x\"").next().is_some(),
+        "a grouped data cell value renders"
+    );
+}

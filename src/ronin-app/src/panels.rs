@@ -32,7 +32,10 @@ use crate::document::EditorDocument;
 use crate::editor_view::render_binding_indicator;
 use crate::reparse::ReparseWorker;
 use crate::structural::indicators;
-use crate::structural::table::{breadcrumb_segments, render_table_view_any};
+use crate::structural::table::{
+    breadcrumb_segments, combinable_child_fields, grouped_view_model, render_table_grid_for,
+    render_table_view_any, TableModel,
+};
 use crate::structural::tree::{TreeNode, TreeNodeKind};
 use crate::structural::view_state::{resolve_path, PathStep, StructuralPath};
 
@@ -253,6 +256,187 @@ pub fn render_table_sections_seam(
 
     // A Combine click takes priority; either routes through `navigate_table_section`.
     if let Some(path) = combine_clicked.or(breadcrumb_clicked) {
+        doc.view_state_mut().navigate_table_section(path);
+    }
+}
+
+/// One group-by field picker (E021): a `(none)` + column-name combo bound to `sel`.
+fn group_field_combo(ui: &mut egui::Ui, id: &str, sel: &mut Option<usize>, col_names: &[String]) {
+    let current = sel
+        .and_then(|i| col_names.get(i))
+        .map(String::as_str)
+        .unwrap_or("(none)");
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(current)
+        .show_ui(ui, |ui| {
+            ui.selectable_value(sel, None, "(none)");
+            for (i, name) in col_names.iter().enumerate() {
+                ui.selectable_value(sel, Some(i), name);
+            }
+        });
+}
+
+/// Host the **Table (grouped)** view (E022) — the *superset* table surface. Same tree
+/// navigator as Table (outline) (reach any node) + a **Combine child** union dropdown
+/// (reach any combined view, like Table (sections)), plus **Group by** and **Show columns**
+/// selections that reorganize the chosen collection. The grid is the normal editable one
+/// (a transformed model rendered with `row_ops=false`, so edits/selection/virtualization
+/// all work). Three composable operations: Combine (union, +rows) → Group by (partition
+/// rows) → Show columns (project) — see [`grouped_view_model`](crate::structural::table::grouped_view_model).
+pub fn render_table_grouped_seam(
+    ui: &mut egui::Ui,
+    doc: &mut EditorDocument,
+    worker: &ReparseWorker,
+) {
+    render_binding_indicator(ui, doc);
+
+    // Tree-outline navigator (reaches any node), exactly like Table (outline).
+    let Some(tree) = doc.cached_tree_model().cloned() else {
+        ui.weak("Parsing\u{2026}");
+        return;
+    };
+    if tree.roots.is_empty() {
+        ui.weak("(empty document)");
+        return;
+    }
+    let stored = doc.view_state().selected_table_section().cloned();
+    let selected = stored
+        .filter(|p| selection_is_table_able(doc, p))
+        .unwrap_or_else(StructuralPath::root);
+
+    let mut clicked: Option<StructuralPath> = None;
+    egui::Panel::left("ronin_table_grouped_nav")
+        .resizable(true)
+        .default_size(240.0)
+        .show_inside(ui, |ui| {
+            ui.strong("Outline");
+            ui.separator();
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                for (i, root) in tree.roots.iter().enumerate() {
+                    render_outline_node(ui, root, &selected, 0, i, &mut clicked);
+                }
+            });
+        });
+    if let Some(path) = clicked {
+        doc.view_state_mut().navigate_table_section(path);
+        return;
+    }
+
+    // Combine state: split `selected` into its (combine parent, current child) so the
+    // Combine dropdown can build/undo a union. The combinable children come from the parent.
+    let (combine_parent, current_combined): (StructuralPath, Option<String>) =
+        match selected.steps().last() {
+            Some(PathStep::CombinedChild(field)) => {
+                let steps = selected.steps();
+                (
+                    StructuralPath::from_steps(steps[..steps.len() - 1].to_vec()),
+                    Some(field.clone()),
+                )
+            }
+            _ => (selected.clone(), None),
+        };
+    let combinable: Vec<String> = doc
+        .parse
+        .as_ref()
+        .and_then(|p| resolve_path(&p.cst.root(), &combine_parent))
+        .map(|node| {
+            combinable_child_fields(&node)
+                .into_iter()
+                .map(|c| c.field)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Base model (owned, so the doc borrow is released) for the column pickers + transform.
+    let base: Option<TableModel> = doc.cached_table_model_any(&selected).cloned();
+    let col_names: Vec<String> = base
+        .as_ref()
+        .map(|m| m.columns.iter().map(|c| c.field_name.clone()).collect())
+        .unwrap_or_default();
+
+    let mut breadcrumb_clicked: Option<StructuralPath> = None;
+    let mut combine_nav: Option<StructuralPath> = None;
+    egui::CentralPanel::default().show_inside(ui, |ui| {
+        render_table_nav_controls(ui, doc);
+        render_breadcrumb(ui, doc, &selected, &mut breadcrumb_clicked);
+        ui.separator();
+
+        // 1) Combine child (union) — only when there's something to combine / un-combine.
+        if !combinable.is_empty() || current_combined.is_some() {
+            ui.horizontal(|ui| {
+                ui.label("Combine child:")
+                    .on_hover_text("Union a repeated child collection across all entries (adds rows + a key column)");
+                let mut combine_sel = current_combined.clone();
+                egui::ComboBox::from_id_salt("ronin_grp_combine")
+                    .selected_text(combine_sel.clone().unwrap_or_else(|| "(none)".to_string()))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut combine_sel, None, "(none)");
+                        for f in &combinable {
+                            ui.selectable_value(&mut combine_sel, Some(f.clone()), f);
+                        }
+                    });
+                if combine_sel != current_combined {
+                    combine_nav = Some(match combine_sel {
+                        Some(f) => combine_parent.child(PathStep::CombinedChild(f)),
+                        None => combine_parent.clone(),
+                    });
+                }
+            });
+        }
+
+        if col_names.is_empty() {
+            ui.weak("This selection has no columns.");
+            return;
+        }
+
+        // 2) Group by (partition rows) — up to two levels, bound to view-state `group_by`.
+        let mut sel0 = doc.view_state().group_by().first().copied();
+        let mut sel1 = doc.view_state().group_by().get(1).copied();
+        ui.horizontal(|ui| {
+            ui.label("Group by:");
+            group_field_combo(ui, "ronin_grp_field_0", &mut sel0, &col_names);
+            ui.label("then");
+            group_field_combo(ui, "ronin_grp_field_1", &mut sel1, &col_names);
+        });
+        if sel1 == sel0 {
+            sel1 = None; // grouping by the same field twice is redundant
+        }
+        let group_by: Vec<usize> = [sel0, sel1].into_iter().flatten().collect();
+        doc.view_state_mut().set_group_by(group_by.clone());
+
+        // 3) Show columns (project) — toggles; empty = all. Group-by fields always show.
+        let mut show: Vec<usize> = doc.view_state().group_show_cols().to_vec();
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Show:");
+            for (c, name) in col_names.iter().enumerate() {
+                let is_shown = show.is_empty() || show.contains(&c);
+                if ui.selectable_label(is_shown, name).clicked() {
+                    if show.is_empty() {
+                        show = (0..col_names.len()).collect();
+                    }
+                    if let Some(pos) = show.iter().position(|&x| x == c) {
+                        show.remove(pos);
+                    } else {
+                        show.push(c);
+                    }
+                }
+            }
+        });
+        doc.view_state_mut().set_group_show_cols(show.clone());
+
+        ui.separator();
+
+        // The editable grid: a grouped + column-projected transform of the base model,
+        // rendered through the normal grid (row_ops=false → edits commit by path).
+        if let Some(base) = base.as_ref() {
+            let transformed = grouped_view_model(base, &group_by, &show);
+            render_table_grid_for(ui, doc, worker, &selected, &transformed, false);
+        } else {
+            ui.weak("This selection does not project a table.");
+        }
+    });
+
+    if let Some(path) = combine_nav.or(breadcrumb_clicked) {
         doc.view_state_mut().navigate_table_section(path);
     }
 }

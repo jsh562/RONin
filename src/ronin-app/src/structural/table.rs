@@ -1848,6 +1848,115 @@ pub fn auto_column_widths(model: &TableModel) -> Vec<f32> {
         .collect()
 }
 
+/// Partition a table model's rows by the value(s) of the given group columns (E021 — the
+/// **Table (grouped)** pivot view). Returns `(group key, row indices)` pairs in **sorted**
+/// key order; the key joins the group columns' cell text (a blank/absent cell shows as
+/// "—"). With no group columns every row lands in one `""` group. Pure + cheap — the core
+/// of the grouped view, unit-tested without any UI.
+pub fn group_rows_by(model: &TableModel, group_cols: &[usize]) -> Vec<(String, Vec<usize>)> {
+    let mut groups: std::collections::BTreeMap<String, Vec<usize>> = std::collections::BTreeMap::new();
+    for (ri, row) in model.rows.iter().enumerate() {
+        let key = if group_cols.is_empty() {
+            String::new()
+        } else {
+            group_cols
+                .iter()
+                .map(|&c| {
+                    row.cells
+                        .get(c)
+                        .and_then(|cell| cell.text.as_deref())
+                        .unwrap_or("\u{2014}")
+                })
+                .collect::<Vec<_>>()
+                .join("  /  ")
+        };
+        groups.entry(key).or_default().push(ri);
+    }
+    groups.into_iter().collect()
+}
+
+/// Build a **grouped + column-projected** view of a base table model (E022 — the Table
+/// (grouped) superset). Returns a new [`TableModel`] whose:
+/// * **columns** are the valid `group_cols` (clamped, de-duped) **first**, then the chosen
+///   `show_cols` (or *all* columns when `show_cols` is empty), excluding the group cols;
+/// * **rows** are the base rows **clustered** by the group columns' values (via
+///   [`group_rows_by`], sorted key order), or original order when no group column is given.
+///
+/// Each kept [`Cell`] is cloned verbatim, so its `value_ref` is preserved — the resulting
+/// model edits **by path** through [`render_table_grid`] with `row_ops=false`, regardless of
+/// the row reorder / column filter. Pure + cheap; unit-tested.
+pub fn grouped_view_model(base: &TableModel, group_cols: &[usize], show_cols: &[usize]) -> TableModel {
+    let ncols = base.columns.len();
+    // Column order: valid group cols first (de-duped), then the display cols (or all).
+    let mut col_order: Vec<usize> = Vec::new();
+    for &g in group_cols {
+        if g < ncols && !col_order.contains(&g) {
+            col_order.push(g);
+        }
+    }
+    if show_cols.is_empty() {
+        for c in 0..ncols {
+            if !col_order.contains(&c) {
+                col_order.push(c);
+            }
+        }
+    } else {
+        for &s in show_cols {
+            if s < ncols && !col_order.contains(&s) {
+                col_order.push(s);
+            }
+        }
+    }
+    // Fallback: if the picks were all out of range (e.g. stale after a section switch),
+    // show every column rather than an empty grid.
+    if col_order.is_empty() {
+        col_order = (0..ncols).collect();
+    }
+    // Row order: clustered by the in-range group columns, else original order.
+    let valid_group: Vec<usize> = group_cols.iter().copied().filter(|&g| g < ncols).collect();
+    let row_order: Vec<usize> = if valid_group.is_empty() {
+        (0..base.rows.len()).collect()
+    } else {
+        group_rows_by(base, &valid_group)
+            .into_iter()
+            .flat_map(|(_, idx)| idx)
+            .collect()
+    };
+    let columns: Vec<Column> = col_order.iter().map(|&c| base.columns[c].clone()).collect();
+    let rows: Vec<Row> = row_order
+        .iter()
+        .map(|&ri| {
+            let src = &base.rows[ri];
+            Row {
+                element_ref: src.element_ref.clone(),
+                cells: col_order.iter().map(|&c| src.cells[c].clone()).collect(),
+            }
+        })
+        .collect();
+    TableModel {
+        section_ref: base.section_ref.clone(),
+        columns,
+        rows,
+    }
+}
+
+/// Render an **already-derived** `model` as the editable virtualized grid (E022) — the entry
+/// point the Table (grouped) seam uses to render its transformed [`grouped_view_model`].
+/// Mirrors [`render_table_view_counting`] but takes the model + `row_ops` directly (the
+/// grouped view passes `row_ops=false`: a reordered/filtered model commits cell edits by
+/// path, but index-based row add/delete would be unsafe).
+pub fn render_table_grid_for(
+    ui: &mut Ui,
+    doc: &mut EditorDocument,
+    worker: &ReparseWorker,
+    section: &StructuralPath,
+    model: &TableModel,
+    row_ops: bool,
+) {
+    let counter = Rc::new(StdCell::new(0usize));
+    render_table_grid(ui, doc, worker, section, model, row_ops, &counter);
+}
+
 /// Render `model`'s virtualized grid for the section at `section`, driving cell edits,
 /// keyboard navigation, drill-in / open-as-table, and (when `row_ops`) row add/remove
 /// through the one-undo-unit pipeline. The shared rendering core both the shape-based
@@ -1891,6 +2000,9 @@ fn render_table_grid(
     // — anchor is applied first, then extend grows from it (robust to fast drags).
     let mut grid_anchor: Option<(usize, usize)> = None;
     let mut grid_extend: Option<(usize, usize)> = None;
+    // E021 — a one-shot "the editor that just opened should grab keyboard focus" request,
+    // so a freshly-opened cell editor is immediately ready to type into (Excel).
+    let should_focus = doc.view_state_mut().take_editor_focus_pending();
 
     // Discoverable add-row affordance (FR-009): a visible control above the grid —
     // RecordList only (the other shapes have no well-defined uniform append yet).
@@ -1993,6 +2105,7 @@ fn render_table_grid(
                                     grid_cursor,
                                     &mut grid_anchor,
                                     &mut grid_extend,
+                                    should_focus,
                                 );
                             });
                         }
@@ -2167,6 +2280,22 @@ fn render_table_grid(
                             // the grid as-is (the single-cell path surfaces errors the
                             // same way).
                             let _ = doc.apply_grid_writes(&writes, worker, now);
+                        }
+                    }
+                    egui::Event::Text(t) if r0 == r1 && c0 == c1 && !t.is_empty() => {
+                        // Excel "just start typing" (E021): a printable char on a single
+                        // selected cell opens its editor seeded with the typed text
+                        // (overwrite). `focus_target_for` returns `None` for read-only /
+                        // nested cells, so those are left alone.
+                        if let Some((path, _)) = focus_target_for(model, r0, c0) {
+                            doc.view_state_mut().set_focus(
+                                path,
+                                FocusSurface::TableCell {
+                                    row: r0,
+                                    column: c0,
+                                },
+                                t.clone(),
+                            );
                         }
                     }
                     _ => {}
@@ -2658,6 +2787,7 @@ fn render_cell(
     cursor: Option<(usize, usize)>,
     grid_anchor: &mut Option<(usize, usize)>,
     grid_extend: &mut Option<(usize, usize)>,
+    should_focus: bool,
 ) {
     let cell_rect = ui.max_rect();
 
@@ -2698,7 +2828,18 @@ fn render_cell(
             if matches!(cell.class, CellClass::Scalar) {
                 render_scalar_type_indicator(ui, cell);
             }
-            edit_inline(ui, &path, value_ref, pos, col, draft, pending, clear_focus, nav);
+            edit_inline(
+                ui,
+                &path,
+                value_ref,
+                pos,
+                col,
+                draft,
+                pending,
+                clear_focus,
+                nav,
+                should_focus,
+            );
         });
         return;
     }
@@ -2880,9 +3021,16 @@ fn edit_inline(
     pending: &mut Option<PendingAction>,
     clear_focus: &mut bool,
     nav: &mut Option<CellNav>,
+    should_focus: bool,
 ) {
+    let _ = nav; // arrow-nav is committed inline below (no longer a focus-only move).
     let mut text = draft.as_ref().map(|(_, t)| t.clone()).unwrap_or_default();
     let resp = ui.text_edit_singleline(&mut text);
+    // E021: when this editor just opened, grab keyboard focus so it's immediately ready to
+    // type into (Excel) — one-shot, so a later click elsewhere can still blur + commit.
+    if should_focus {
+        resp.request_focus();
+    }
     *draft = Some((path.clone(), text.clone()));
 
     let (enter, tab, shift, esc, up, down) = ui.input(|i| {
@@ -2899,22 +3047,35 @@ fn edit_inline(
     if esc {
         // Cancel the edit (FR-009): discard the draft, no byte change.
         *clear_focus = true;
-    } else if (resp.lost_focus() && enter) || tab {
-        // Commit + advance (FR-009): commit the cell value, then move focus forward
-        // (Enter / Tab) — next cell; last column → next row; last cell of the last
-        // row → append a new row and land focus in its first cell. Shift-Tab commits
-        // and moves backward instead.
+        return;
+    }
+
+    // Commit rules — Excel-like (E021). The outer `Some` means "commit this frame"; the
+    // inner `Option<CellNav>` is where to move focus after committing.
+    let advance: Option<Option<CellNav>> = if resp.lost_focus() && enter {
+        Some(Some(CellNav::Down)) // Enter → commit, move DOWN
+    } else if tab {
+        Some(Some(if shift { CellNav::Prev } else { CellNav::Next })) // Tab → right / Shift-Tab → left
+    } else if up {
+        Some(Some(CellNav::Up)) // Arrow → commit, move
+    } else if down {
+        Some(Some(CellNav::Down))
+    } else if resp.lost_focus() {
+        // Clicked away / blurred without Enter/Tab → commit in place; whatever stole
+        // focus (e.g. a click on another cell) performs the new selection. No advance.
+        Some(None)
+    } else {
+        None
+    };
+
+    if let Some(advance) = advance {
         *pending = Some(PendingAction::SetCell {
             row: pos.row,
             field: col.field_name.clone(),
             value: text,
             value_ref,
-            advance: Some(if shift { CellNav::Prev } else { CellNav::Next }),
+            advance,
         });
-    } else if up {
-        *nav = Some(CellNav::Up);
-    } else if down {
-        *nav = Some(CellNav::Down);
     }
 }
 

@@ -1623,3 +1623,215 @@ fn auto_column_widths_fit_content_header_and_clamp() {
         );
     }
 }
+
+#[test]
+fn group_rows_by_partitions_rows_by_field_value() {
+    // E021 — the pure core of the Table (grouped) view: rows partition by a field's value
+    // into sorted groups; no group columns → one group with every row.
+    use ronin_app::structural::table::group_rows_by;
+
+    let worker = ReparseWorker::new();
+    let doc = doc_at(
+        "[\n    (k: \"a\", v: 1),\n    (k: \"b\", v: 2),\n    (k: \"a\", v: 3),\n]",
+        &worker,
+    );
+    let model = model_of(&doc);
+    let k = model.columns.iter().position(|c| c.field_name == "k").unwrap();
+
+    let groups = group_rows_by(&model, &[k]);
+    let keys: Vec<_> = groups.iter().map(|(key, _)| key.clone()).collect();
+    assert_eq!(
+        keys,
+        vec!["\"a\"".to_string(), "\"b\"".to_string()],
+        "groups are keyed by the field's verbatim value, in sorted order"
+    );
+    assert_eq!(groups[0].1, vec![0, 2], "both \"a\" rows land in one group");
+    assert_eq!(groups[1].1, vec![1], "the \"b\" row is its own group");
+
+    let all = group_rows_by(&model, &[]);
+    assert_eq!(all.len(), 1, "no group columns → a single group");
+    assert_eq!(all[0].1, vec![0, 1, 2], "...containing every row");
+}
+
+#[test]
+fn grouped_view_model_clusters_rows_and_projects_columns() {
+    // E022 — the Table (grouped) transform: group columns come first, `show_cols` projects
+    // the rest, rows cluster by the group value, and each kept cell keeps its `value_ref`
+    // so the result still edits by path.
+    use ronin_app::structural::table::grouped_view_model;
+
+    let worker = ReparseWorker::new();
+    let doc = doc_at(
+        "[\n    (k: \"b\", a: 1, z: 9),\n    (k: \"a\", a: 2, z: 8),\n    (k: \"b\", a: 3, z: 7),\n]",
+        &worker,
+    );
+    let model = model_of(&doc); // columns: k, a, z
+    let col = |n: &str| model.columns.iter().position(|c| c.field_name == n).unwrap();
+    let (k, a) = (col("k"), col("a"));
+
+    // Group by k, show only [a] — k is forced first, z excluded.
+    let g = grouped_view_model(&model, &[k], &[a]);
+    let names: Vec<_> = g.columns.iter().map(|c| c.field_name.clone()).collect();
+    assert_eq!(names, vec!["k".to_string(), "a".to_string()], "group col first, then shown cols");
+
+    // Rows cluster by k's sorted value: "a" (orig row 1) then "b" (orig rows 0, 2).
+    let kt: Vec<_> = g.rows.iter().map(|r| r.cells[0].text.clone().unwrap_or_default()).collect();
+    assert_eq!(kt, vec!["\"a\"".to_string(), "\"b\"".to_string(), "\"b\"".to_string()]);
+    let at: Vec<_> = g.rows.iter().map(|r| r.cells[1].text.clone().unwrap_or_default()).collect();
+    assert_eq!(at, vec!["2".to_string(), "1".to_string(), "3".to_string()], "rows follow the clustered order");
+
+    // Kept cells preserve value_ref → still editable by path.
+    assert!(
+        g.rows[0].cells[1].value_ref.is_some(),
+        "a projected scalar cell keeps its value path"
+    );
+
+    // No group + no show → all columns, original row order.
+    let id = grouped_view_model(&model, &[], &[]);
+    let names2: Vec<_> = id.columns.iter().map(|c| c.field_name.clone()).collect();
+    assert_eq!(names2, vec!["k".to_string(), "a".to_string(), "z".to_string()]);
+    let kt2: Vec<_> = id.rows.iter().map(|r| r.cells[0].text.clone().unwrap_or_default()).collect();
+    assert_eq!(kt2, vec!["\"b\"".to_string(), "\"a\"".to_string(), "\"b\"".to_string()], "original order");
+
+    // Out-of-range picks are ignored and fall back to all columns / original order.
+    let oob = grouped_view_model(&model, &[99], &[99]);
+    assert_eq!(oob.columns.len(), 3, "stale indices fall back to all columns");
+    assert_eq!(oob.rows.len(), 3);
+}
+
+/// A 2-row RecordList doc for the Excel-editing tests, wrapped for the harness closure.
+fn excel_doc() -> (std::rc::Rc<ReparseWorker>, std::rc::Rc<std::cell::RefCell<EditorDocument>>) {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    let worker = Rc::new(ReparseWorker::new());
+    let doc = Rc::new(RefCell::new(doc_at(
+        "[\n    (name: \"aa\", hp: 11),\n    (name: \"bb\", hp: 22),\n]",
+        &worker,
+    )));
+    (worker, doc)
+}
+
+#[test]
+fn clicking_another_cell_commits_the_edit_and_selects_it() {
+    // E021 — Excel feel: editing a cell and then clicking ANOTHER cell commits the edit
+    // (no Enter needed) and selects the clicked cell.
+    use std::rc::Rc;
+
+    let (worker, doc) = excel_doc();
+    // Seed an open edit on row 0 / hp (column 1) with a new draft value "99".
+    {
+        let mut d = doc.borrow_mut();
+        let hp0 = StructuralPath::root()
+            .child(PathStep::Index(0))
+            .child(PathStep::Field("hp".to_string()));
+        d.view_state_mut()
+            .set_focus(hp0, FocusSurface::TableCell { row: 0, column: 1 }, "99".to_string());
+    }
+    let doc_ui = Rc::clone(&doc);
+    let worker_ui = Rc::clone(&worker);
+    let mut harness = Harness::new_ui(move |ui| {
+        let mut d = doc_ui.borrow_mut();
+        render_table_view(
+            ui,
+            &mut d,
+            &worker_ui,
+            &StructuralPath::root(),
+            SectionShape::RecordList,
+        );
+    });
+    harness.run(); // editor renders + auto-focuses
+
+    // Click row 1 / hp ("22") → blur-commits "99" to row 0 and selects row 1 / hp.
+    harness.get_by_label_contains("22").click();
+    harness.run();
+
+    let d = doc.borrow();
+    assert!(
+        d.buffer.contains("hp: 99"),
+        "clicking away committed the edit: {}",
+        d.buffer
+    );
+    assert_eq!(
+        d.view_state().grid_selection_rect(),
+        Some((1, 1, 1, 1)),
+        "the clicked cell (row 1 / hp) is now selected"
+    );
+}
+
+#[test]
+fn enter_commits_the_edit_and_moves_down() {
+    // E021 — Excel feel: Enter commits and moves the active cell DOWN.
+    use std::rc::Rc;
+
+    let (worker, doc) = excel_doc();
+    {
+        let mut d = doc.borrow_mut();
+        let hp0 = StructuralPath::root()
+            .child(PathStep::Index(0))
+            .child(PathStep::Field("hp".to_string()));
+        d.view_state_mut()
+            .set_focus(hp0, FocusSurface::TableCell { row: 0, column: 1 }, "99".to_string());
+    }
+    let doc_ui = Rc::clone(&doc);
+    let worker_ui = Rc::clone(&worker);
+    let mut harness = Harness::new_ui(move |ui| {
+        let mut d = doc_ui.borrow_mut();
+        render_table_view(
+            ui,
+            &mut d,
+            &worker_ui,
+            &StructuralPath::root(),
+            SectionShape::RecordList,
+        );
+    });
+    harness.run();
+    harness.key_press(egui::Key::Enter);
+    harness.run();
+
+    let d = doc.borrow();
+    assert!(d.buffer.contains("hp: 99"), "Enter committed the edit: {}", d.buffer);
+    let focus = d.view_state().edit_focus().expect("Enter advanced focus, not dropped");
+    assert!(
+        matches!(focus.surface, FocusSurface::TableCell { row: 1, column: 1 }),
+        "Enter moved the active cell DOWN to row 1 / hp"
+    );
+}
+
+#[test]
+fn typing_on_a_selected_cell_opens_the_editor_overwriting() {
+    // E021 — Excel "just start typing": a printable char on a selected cell opens its
+    // editor seeded with that char (overwrite).
+    use std::rc::Rc;
+
+    let (worker, doc) = excel_doc();
+    {
+        // Select row 0 / hp (column 1) without editing.
+        doc.borrow_mut().view_state_mut().set_grid_anchor(0, 1);
+    }
+    let doc_ui = Rc::clone(&doc);
+    let worker_ui = Rc::clone(&worker);
+    let mut harness = Harness::new_ui(move |ui| {
+        let mut d = doc_ui.borrow_mut();
+        render_table_view(
+            ui,
+            &mut d,
+            &worker_ui,
+            &StructuralPath::root(),
+            SectionShape::RecordList,
+        );
+    });
+    harness.run();
+    harness.event(egui::Event::Text("9".to_string()));
+    harness.run();
+
+    let d = doc.borrow();
+    let focus = d
+        .view_state()
+        .edit_focus()
+        .expect("typing on a selected cell opens its editor");
+    assert!(
+        matches!(focus.surface, FocusSurface::TableCell { row: 0, column: 1 }),
+        "the editor opened on the selected (row 0 / hp) cell"
+    );
+    assert_eq!(focus.draft, "9", "the editor is seeded with the typed character (overwrite)");
+}
