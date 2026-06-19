@@ -101,6 +101,19 @@ fn gen_table_view() {
     save(h.render().expect("wgpu render"), "table-view.png");
 }
 
+/// The Table (sections) variant: same combined-cells grid, but the left navigator is
+/// the scanner-driven grouped-sections list (vs. the outline tree).
+#[test]
+#[ignore = "screenshot generator; run with --features screenshots -- --ignored"]
+fn gen_table_sections_view() {
+    let mut h = new_harness(1080.0, 760.0);
+    h.state_mut().open_sample("ships.ron", SHIPS);
+    set_view(h.state_mut(), ActiveView::TableSections);
+    drill_combined_cells(h.state_mut());
+    settle(&mut h);
+    save(h.render().expect("wgpu render"), "table-sections-view.png");
+}
+
 #[test]
 #[ignore = "screenshot generator; run with --features screenshots -- --ignored"]
 fn gen_table_grouped_view() {
