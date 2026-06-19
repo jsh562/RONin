@@ -2,7 +2,7 @@
 
 **RONin** — a local-first desktop editor for **RON** (Rusty Object Notation), built on [egui/eframe](https://crates.io/crates/eframe).
 
-![RONin — table view with the type legend, tab strip, and Problems panel](https://raw.githubusercontent.com/jsh562/RONin/main/screenshots/overview.png)
+![RONin — the Tree/form structural view (fully expanded) with the type legend and Problems panel](https://raw.githubusercontent.com/jsh562/RONin/main/screenshots/tree-form-view.png)
 
 `ronin-app` is the application shell that wires the RONin workspace into an interactive editor over a single lossless document model. Open a `.ron` file and edit it as a tree/form, as a spreadsheet, or as raw text — every projection edits the same CST, so nothing is ever reflowed or lost.
 
@@ -29,9 +29,9 @@ RONin projects the active document through five views, selectable from the **Vie
 | **Table (grouped)** | Pivot-style variant: rows grouped by one or two chosen fields into collapsible groups. |
 | **Text** | The raw RON source, backed by the same lossless CST. |
 
-| Tree/form | Table (outline) | Table (grouped) | Text |
-|-----------|-----------------|-----------------|------|
-| ![Tree/form view](https://raw.githubusercontent.com/jsh562/RONin/main/screenshots/tree-form-view.png) | ![Table outline view](https://raw.githubusercontent.com/jsh562/RONin/main/screenshots/table-view.png) | ![Table grouped view](https://raw.githubusercontent.com/jsh562/RONin/main/screenshots/table-grouped-view.png) | ![Text view](https://raw.githubusercontent.com/jsh562/RONin/main/screenshots/text-view.png) |
+| Table (outline) | Table (sections) | Table (grouped) | Text |
+|-----------------|------------------|-----------------|------|
+| ![Table outline view](https://raw.githubusercontent.com/jsh562/RONin/main/screenshots/table-view.png) | ![Table sections view](https://raw.githubusercontent.com/jsh562/RONin/main/screenshots/table-sections-view.png) | ![Table grouped view](https://raw.githubusercontent.com/jsh562/RONin/main/screenshots/table-grouped-view.png) | ![Text view](https://raw.githubusercontent.com/jsh562/RONin/main/screenshots/text-view.png) |
 
 ## Excel-like table editing
 
