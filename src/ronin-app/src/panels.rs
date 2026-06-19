@@ -32,9 +32,12 @@ use crate::document::EditorDocument;
 use crate::editor_view::render_binding_indicator;
 use crate::reparse::ReparseWorker;
 use crate::structural::indicators;
-use crate::structural::table::{breadcrumb_segments, render_table_view_any};
+use crate::structural::table::{
+    breadcrumb_segments, combinable_child_fields, grouped_view_model, render_table_grid_for,
+    render_table_view_any, text_px_width, TableModel,
+};
 use crate::structural::tree::{TreeNode, TreeNodeKind};
-use crate::structural::view_state::{resolve_path, StructuralPath};
+use crate::structural::view_state::{resolve_path, PathStep, StructuralPath};
 
 /// Host the structural **table-view tree-outline navigator** for `doc` (E008 / E012 /
 /// E013 — T035, [COMPLETES FR-005]).
@@ -60,6 +63,44 @@ use crate::structural::view_state::{resolve_path, StructuralPath};
 /// This is the [COMPLETES FR-005] host point wired into the per-document view
 /// switcher's Table arm (FR-017). The `worker` is the document's off-frame reparse
 /// worker, used to re-derive the projection after an edit lands.
+/// The fitted width for a navigator side-panel (E023): the widest item label + the icon
+/// slot + scrollbar/padding, clamped. `default_size` only applies on first load; the panel
+/// stays user-resizable after.
+pub fn nav_panel_width(max_label_px: f32) -> f32 {
+    (max_label_px + indicators::SLOT_WIDTH + 28.0).clamp(200.0, 460.0)
+}
+
+/// The widest rendered outline-row label width (E023): for each container node, its indent
+/// (`depth * spacing.indent`) plus the measured label (+ child-count suffix). Depth-capped
+/// so a pathologically deep document can't make this costly (the width is only a first-load
+/// default).
+fn outline_max_label_px(ui: &egui::Ui, nodes: &[TreeNode], depth: usize) -> f32 {
+    if depth > 8 {
+        return 0.0;
+    }
+    let indent = ui.spacing().indent;
+    let mut max = 0.0_f32;
+    for node in nodes {
+        if !is_outline_container(node) {
+            continue;
+        }
+        let count = node
+            .children
+            .iter()
+            .filter(|c| is_outline_container(c))
+            .count();
+        let label = if count > 0 {
+            format!("{}  ({count})", node.label)
+        } else {
+            node.label.clone()
+        };
+        let w = depth as f32 * indent + text_px_width(ui, &label, egui::TextStyle::Body);
+        max = max.max(w);
+        max = max.max(outline_max_label_px(ui, &node.children, depth + 1));
+    }
+    max
+}
+
 pub fn render_table_seam(ui: &mut egui::Ui, doc: &mut EditorDocument, worker: &ReparseWorker) {
     render_binding_indicator(ui, doc);
 
@@ -84,10 +125,11 @@ pub fn render_table_seam(ui: &mut egui::Ui, doc: &mut EditorDocument, worker: &R
         .unwrap_or_else(StructuralPath::root);
 
     // The collapsible tree-outline navigator side list (Part A1).
+    let nav_w = nav_panel_width(outline_max_label_px(ui, &model.roots, 0));
     let mut clicked: Option<StructuralPath> = None;
     egui::Panel::left("ronin_table_navigator")
         .resizable(true)
-        .default_size(240.0)
+        .default_size(nav_w)
         .show_inside(ui, |ui| {
             ui.strong("Outline");
             ui.separator();
@@ -118,6 +160,348 @@ pub fn render_table_seam(ui: &mut egui::Ui, doc: &mut EditorDocument, worker: &R
 
     if let Some(path) = breadcrumb_clicked {
         doc.view_state_mut().navigate_table_section(path);
+    }
+}
+
+/// Host the **grouped-sections** Table navigator — the comparison variant of the
+/// tree-outline [`render_table_seam`] (selectable as `ActiveView::TableSections`).
+///
+/// Same central grid + breadcrumb + Back/Forward/Up as the outline view; the left
+/// panel instead lists the scanner-detected table sections
+/// ([`EditorDocument::cached_table_sections`]) — only the genuinely table-able shapes
+/// (uniform record lists, record maps, equal-arity tuple lists) — **grouped by their
+/// top-level ancestor** (the first [`PathStep`] of each section's path), each group a
+/// collapsible header whose sections are sorted by row count (largest first) and
+/// labeled `name (rows×cols)`. Clicking a section selects it (shared
+/// `selected_table_section`, so switching between the two Table tabs keeps the same
+/// viewed level). Byte-free (FR-020).
+pub fn render_table_sections_seam(
+    ui: &mut egui::Ui,
+    doc: &mut EditorDocument,
+    worker: &ReparseWorker,
+) {
+    render_binding_indicator(ui, doc);
+
+    // Clone the scanned sections out so the borrow on `doc` is released before the
+    // mutable view-state writes below (the scan is cached per parse generation).
+    let sections = doc.cached_table_sections().to_vec();
+    if sections.is_empty() {
+        ui.weak(
+            "No table-able sections in this document \u{2014} it has no uniform record lists, \
+             record maps, or tuple lists. Switch to Tree/form.",
+        );
+        return;
+    }
+
+    // The grid renders the stored selection when it still resolves to a table-able node,
+    // else the document root (shared with the outline seam — never empty).
+    let stored = doc.view_state().selected_table_section().cloned();
+    let selected = stored
+        .filter(|p| selection_is_table_able(doc, p))
+        .unwrap_or_else(StructuralPath::root);
+
+    // Group sections by top-level ancestor (first path step), preserving first-seen
+    // group order; within a group, largest (most rows) first.
+    let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
+    for (idx, section) in sections.iter().enumerate() {
+        let key = section
+            .path
+            .steps()
+            .first()
+            .map(step_label)
+            .unwrap_or_else(|| "(root)".to_string());
+        match groups.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, members)) => members.push(idx),
+            None => groups.push((key, vec![idx])),
+        }
+    }
+    for (_, members) in &mut groups {
+        members.sort_by(|&a, &b| sections[b].rows.cmp(&sections[a].rows));
+    }
+
+    let nav_w = nav_panel_width(
+        sections
+            .iter()
+            .map(|s| {
+                text_px_width(
+                    ui,
+                    &format!("{}  ({}\u{00D7}{})", s.label, s.rows, s.cols),
+                    egui::TextStyle::Body,
+                )
+            })
+            .fold(0.0_f32, f32::max)
+            + ui.spacing().indent, // section rows sit one level inside the ancestor header
+    );
+    let mut clicked: Option<StructuralPath> = None;
+    egui::Panel::left("ronin_table_sections_nav")
+        .resizable(true)
+        .default_size(nav_w)
+        .show_inside(ui, |ui| {
+            ui.strong("Tables");
+            ui.separator();
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                for (group_index, (group_label, members)) in groups.iter().enumerate() {
+                    egui::CollapsingHeader::new(group_label)
+                        .id_salt(("ronin_tbl_sections_group", group_index, group_label))
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            for &idx in members {
+                                let section = &sections[idx];
+                                let is_selected = section.path == selected;
+                                let label = format!(
+                                    "{}  ({}\u{00D7}{})",
+                                    section.label, section.rows, section.cols
+                                );
+                                if ui.selectable_label(is_selected, label).clicked() {
+                                    clicked = Some(section.path.clone());
+                                }
+                            }
+                        });
+                }
+            });
+        });
+
+    // Persist a click through `navigate_table_section` so back/forward records it.
+    if let Some(path) = clicked {
+        doc.view_state_mut().navigate_table_section(path);
+        return;
+    }
+
+    // On-demand "Combine child" control (E018): when the selected node is a parent
+    // map/list of records with repeated child collections, offer to flatten each into
+    // one table (the parent key becomes a column). Computed read-only before the panel.
+    let combinable = doc
+        .parse
+        .as_ref()
+        .and_then(|p| resolve_path(&p.cst.root(), &selected))
+        .map(|node| crate::structural::table::combinable_child_fields(&node))
+        .unwrap_or_default();
+
+    // The central area: Back/Forward/Up + breadcrumb, the Combine-child control (when
+    // offered), then the selected node projected as a table via `derive_any`.
+    let mut breadcrumb_clicked: Option<StructuralPath> = None;
+    let mut combine_clicked: Option<StructuralPath> = None;
+    egui::CentralPanel::default().show_inside(ui, |ui| {
+        render_table_nav_controls(ui, doc);
+        render_breadcrumb(ui, doc, &selected, &mut breadcrumb_clicked);
+        if !combinable.is_empty() {
+            ui.horizontal(|ui| {
+                ui.weak("Combine child:");
+                for child in &combinable {
+                    if ui
+                        .button(child.field.as_str())
+                        .on_hover_text(format!(
+                            "Flatten {} across all entries into one table ({} rows)",
+                            child.field, child.rows
+                        ))
+                        .clicked()
+                    {
+                        combine_clicked =
+                            Some(selected.child(PathStep::CombinedChild(child.field.clone())));
+                    }
+                }
+            });
+        }
+        ui.separator();
+        render_table_view_any(ui, doc, worker, &selected);
+    });
+
+    // A Combine click takes priority; either routes through `navigate_table_section`.
+    if let Some(path) = combine_clicked.or(breadcrumb_clicked) {
+        doc.view_state_mut().navigate_table_section(path);
+    }
+}
+
+/// One group-by field picker (E021): a `(none)` + column-name combo bound to `sel`.
+fn group_field_combo(ui: &mut egui::Ui, id: &str, sel: &mut Option<usize>, col_names: &[String]) {
+    let current = sel
+        .and_then(|i| col_names.get(i))
+        .map(String::as_str)
+        .unwrap_or("(none)");
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(current)
+        .show_ui(ui, |ui| {
+            ui.selectable_value(sel, None, "(none)");
+            for (i, name) in col_names.iter().enumerate() {
+                ui.selectable_value(sel, Some(i), name);
+            }
+        });
+}
+
+/// Host the **Table (grouped)** view (E022) — the *superset* table surface. Same tree
+/// navigator as Table (outline) (reach any node) + a **Combine child** union dropdown
+/// (reach any combined view, like Table (sections)), plus **Group by** and **Show columns**
+/// selections that reorganize the chosen collection. The grid is the normal editable one
+/// (a transformed model rendered with `row_ops=false`, so edits/selection/virtualization
+/// all work). Three composable operations: Combine (union, +rows) → Group by (partition
+/// rows) → Show columns (project) — see [`grouped_view_model`](crate::structural::table::grouped_view_model).
+pub fn render_table_grouped_seam(
+    ui: &mut egui::Ui,
+    doc: &mut EditorDocument,
+    worker: &ReparseWorker,
+) {
+    render_binding_indicator(ui, doc);
+
+    // Tree-outline navigator (reaches any node), exactly like Table (outline).
+    let Some(tree) = doc.cached_tree_model().cloned() else {
+        ui.weak("Parsing\u{2026}");
+        return;
+    };
+    if tree.roots.is_empty() {
+        ui.weak("(empty document)");
+        return;
+    }
+    let stored = doc.view_state().selected_table_section().cloned();
+    let selected = stored
+        .filter(|p| selection_is_table_able(doc, p))
+        .unwrap_or_else(StructuralPath::root);
+
+    let nav_w = nav_panel_width(outline_max_label_px(ui, &tree.roots, 0));
+    let mut clicked: Option<StructuralPath> = None;
+    egui::Panel::left("ronin_table_grouped_nav")
+        .resizable(true)
+        .default_size(nav_w)
+        .show_inside(ui, |ui| {
+            ui.strong("Outline");
+            ui.separator();
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                for (i, root) in tree.roots.iter().enumerate() {
+                    render_outline_node(ui, root, &selected, 0, i, &mut clicked);
+                }
+            });
+        });
+    if let Some(path) = clicked {
+        doc.view_state_mut().navigate_table_section(path);
+        return;
+    }
+
+    // Combine state: split `selected` into its (combine parent, current child) so the
+    // Combine dropdown can build/undo a union. The combinable children come from the parent.
+    let (combine_parent, current_combined): (StructuralPath, Option<String>) =
+        match selected.steps().last() {
+            Some(PathStep::CombinedChild(field)) => {
+                let steps = selected.steps();
+                (
+                    StructuralPath::from_steps(steps[..steps.len() - 1].to_vec()),
+                    Some(field.clone()),
+                )
+            }
+            _ => (selected.clone(), None),
+        };
+    let combinable: Vec<String> = doc
+        .parse
+        .as_ref()
+        .and_then(|p| resolve_path(&p.cst.root(), &combine_parent))
+        .map(|node| {
+            combinable_child_fields(&node)
+                .into_iter()
+                .map(|c| c.field)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Base model (owned, so the doc borrow is released) for the column pickers + transform.
+    let base: Option<TableModel> = doc.cached_table_model_any(&selected).cloned();
+    let col_names: Vec<String> = base
+        .as_ref()
+        .map(|m| m.columns.iter().map(|c| c.field_name.clone()).collect())
+        .unwrap_or_default();
+
+    let mut breadcrumb_clicked: Option<StructuralPath> = None;
+    let mut combine_nav: Option<StructuralPath> = None;
+    egui::CentralPanel::default().show_inside(ui, |ui| {
+        render_table_nav_controls(ui, doc);
+        render_breadcrumb(ui, doc, &selected, &mut breadcrumb_clicked);
+        ui.separator();
+
+        // 1) Combine child (union) — only when there's something to combine / un-combine.
+        if !combinable.is_empty() || current_combined.is_some() {
+            ui.horizontal(|ui| {
+                ui.label("Combine child:")
+                    .on_hover_text("Union a repeated child collection across all entries (adds rows + a key column)");
+                let mut combine_sel = current_combined.clone();
+                egui::ComboBox::from_id_salt("ronin_grp_combine")
+                    .selected_text(combine_sel.clone().unwrap_or_else(|| "(none)".to_string()))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut combine_sel, None, "(none)");
+                        for f in &combinable {
+                            ui.selectable_value(&mut combine_sel, Some(f.clone()), f);
+                        }
+                    });
+                if combine_sel != current_combined {
+                    combine_nav = Some(match combine_sel {
+                        Some(f) => combine_parent.child(PathStep::CombinedChild(f)),
+                        None => combine_parent.clone(),
+                    });
+                }
+            });
+        }
+
+        if col_names.is_empty() {
+            ui.weak("This selection has no columns.");
+            return;
+        }
+
+        // 2) Group by (partition rows) — up to two levels, bound to view-state `group_by`.
+        let mut sel0 = doc.view_state().group_by().first().copied();
+        let mut sel1 = doc.view_state().group_by().get(1).copied();
+        ui.horizontal(|ui| {
+            ui.label("Group by:");
+            group_field_combo(ui, "ronin_grp_field_0", &mut sel0, &col_names);
+            ui.label("then");
+            group_field_combo(ui, "ronin_grp_field_1", &mut sel1, &col_names);
+        });
+        if sel1 == sel0 {
+            sel1 = None; // grouping by the same field twice is redundant
+        }
+        let group_by: Vec<usize> = [sel0, sel1].into_iter().flatten().collect();
+        doc.view_state_mut().set_group_by(group_by.clone());
+
+        // 3) Show columns (project) — toggles; empty = all. Group-by fields always show.
+        let mut show: Vec<usize> = doc.view_state().group_show_cols().to_vec();
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Show:");
+            for (c, name) in col_names.iter().enumerate() {
+                let is_shown = show.is_empty() || show.contains(&c);
+                if ui.selectable_label(is_shown, name).clicked() {
+                    if show.is_empty() {
+                        show = (0..col_names.len()).collect();
+                    }
+                    if let Some(pos) = show.iter().position(|&x| x == c) {
+                        show.remove(pos);
+                    } else {
+                        show.push(c);
+                    }
+                }
+            }
+        });
+        doc.view_state_mut().set_group_show_cols(show.clone());
+
+        ui.separator();
+
+        // The editable grid: a grouped + column-projected transform of the base model,
+        // rendered through the normal grid (row_ops=false → edits commit by path).
+        if let Some(base) = base.as_ref() {
+            let transformed = grouped_view_model(base, &group_by, &show);
+            render_table_grid_for(ui, doc, worker, &selected, &transformed, false);
+        } else {
+            ui.weak("This selection does not project a table.");
+        }
+    });
+
+    if let Some(path) = combine_nav.or(breadcrumb_clicked) {
+        doc.view_state_mut().navigate_table_section(path);
+    }
+}
+
+/// A readable label for one [`PathStep`] (the grouped-sections navigator's group key):
+/// a field / variant-field name verbatim, a map key as `(key)`, an index as `[i]`.
+fn step_label(step: &PathStep) -> String {
+    match step {
+        PathStep::Field(name) | PathStep::VariantField(name) => name.clone(),
+        PathStep::Key(text) => format!("({text})"),
+        PathStep::Index(i) => format!("[{i}]"),
+        PathStep::CombinedChild(field) => format!("\u{2217} {field}"),
     }
 }
 
@@ -202,6 +586,18 @@ fn selection_is_table_able(doc: &EditorDocument, path: &StructuralPath) -> bool 
         return false;
     };
     let root = parse.cst.root();
+    // A combined selection (trailing `CombinedChild(field)`) does not resolve to a
+    // single node; it is table-able iff its parent prefix resolves to a map/list whose
+    // entries still share that child field (E018).
+    if let Some(PathStep::CombinedChild(field)) = path.steps().last() {
+        let n = path.steps().len();
+        let parent = StructuralPath::from_steps(path.steps()[..n - 1].to_vec());
+        return resolve_path(&root, &parent).is_some_and(|node| {
+            crate::structural::table::combinable_child_fields(&node)
+                .iter()
+                .any(|c| &c.field == field)
+        });
+    }
     matches!(
         resolve_path(&root, path).and_then(ronin_core::ast::Value::cast),
         Some(

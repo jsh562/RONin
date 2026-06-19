@@ -1185,6 +1185,98 @@ fn navigator_lists_sections_and_selection_switches_grid() {
     );
 }
 
+/// The alternate "Table (sections)" tab (`render_table_sections_seam`): a scanner-driven
+/// navigator that groups detected sections by top-level ancestor and labels each with
+/// its `(rows×cols)` dimensions, sharing the central grid + selection with the outline tab.
+#[test]
+fn table_sections_navigator_groups_lists_dims_and_shares_grid() {
+    use egui_kittest::kittest::Queryable;
+    use std::cell::RefCell;
+
+    let worker = Rc::new(ReparseWorker::new());
+    let mut doc = EditorDocument::new_untitled(1);
+    doc.buffer = MULTI_SECTION_SRC.to_string();
+    doc.on_edit();
+    drive_reparse(&mut doc, &worker);
+    let before = doc.buffer.clone();
+    let doc = Rc::new(RefCell::new(doc));
+
+    // Frame 1: the grouped-sections navigator shows its `Tables` header, a group for the
+    // `rows` ancestor, and section leaves carrying their `(rows×cols)` dimensions (the `×`
+    // separator is unique to this navigator — the outline shows plain child counts).
+    {
+        let doc_ui = Rc::clone(&doc);
+        let worker_ui = Rc::clone(&worker);
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(700.0, 360.0))
+            .build_ui(move |ui| {
+                let mut d = doc_ui.borrow_mut();
+                ronin_app::panels::render_table_sections_seam(ui, &mut d, &worker_ui);
+            });
+        harness.run();
+        assert!(
+            harness.query_all_by_label_contains("Tables").next().is_some(),
+            "the grouped-sections navigator shows its `Tables` header"
+        );
+        assert!(
+            harness.query_all_by_label_contains("rows").next().is_some(),
+            "the `rows` section/group is listed"
+        );
+        assert!(
+            harness
+                .query_all_by_label_contains("\u{00D7}")
+                .next()
+                .is_some(),
+            "section leaves carry their (rows×cols) dimensions"
+        );
+    }
+
+    // Select the `coords` TupleList section; the grouped-sections grid renders its
+    // positional `.0` column.
+    let coords_path = StructuralPath::from_steps(vec![PathStep::Field("coords".to_string())]);
+    doc.borrow_mut()
+        .view_state_mut()
+        .set_selected_table_section(Some(coords_path));
+    {
+        let doc_ui = Rc::clone(&doc);
+        let worker_ui = Rc::clone(&worker);
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(700.0, 360.0))
+            .build_ui(move |ui| {
+                let mut d = doc_ui.borrow_mut();
+                ronin_app::panels::render_table_sections_seam(ui, &mut d, &worker_ui);
+            });
+        harness.run();
+        assert!(
+            harness.query_all_by_label_contains(".0").next().is_some(),
+            "selecting coords renders the TupleList positional .0 column"
+        );
+    }
+
+    // Shared selection: switching to the OUTLINE tab shows the SAME selected grid.
+    {
+        let doc_ui = Rc::clone(&doc);
+        let worker_ui = Rc::clone(&worker);
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(700.0, 360.0))
+            .build_ui(move |ui| {
+                let mut d = doc_ui.borrow_mut();
+                ronin_app::panels::render_table_seam(ui, &mut d, &worker_ui);
+            });
+        harness.run();
+        assert!(
+            harness.query_all_by_label_contains(".0").next().is_some(),
+            "both Table tabs share `selected_table_section` (outline shows coords too)"
+        );
+    }
+
+    assert_eq!(
+        doc.borrow().buffer,
+        before,
+        "the grouped-sections navigator is byte-free"
+    );
+}
+
 #[test]
 fn scalar_only_document_renders_root_as_field_value_grid_never_empty() {
     use egui_kittest::kittest::Queryable;
@@ -1280,9 +1372,14 @@ fn clicking_nested_table_cell_switches_grid_to_nested_path_byte_free() {
                 ronin_app::panels::render_table_seam(ui, &mut d, &worker_ui);
             });
         harness.run();
-        // The open-as-table button label contains the cell summary (the list preview).
-        // Click the first one (row 0's `tags`).
-        harness.get_by_label_contains("\"a\"").click();
+        // E019c: a NestedTable cell opens as a table via its small "open" icon (single
+        // click), just left of the list-preview summary. A body click only selects.
+        {
+            let r = harness.get_by_label_contains("\"a\"").rect();
+            let p = egui::pos2(r.left() - 11.0, r.center().y);
+            harness.drag_at(p);
+            harness.drop_at(p);
+        }
         harness.run();
     }
 
@@ -1405,13 +1502,20 @@ fn table_view_back_forward_up_navigation_is_byte_free() {
     // it as a table (records the level change in history — E016).
     {
         let mut harness = render_frame(&doc, &worker);
-        harness.get_by_label_contains("\"a\"").click();
+        // E019c: open-as-table via the NestedTable cell's small "open" icon (single
+        // click), just left of the summary text.
+        {
+            let r = harness.get_by_label_contains("\"a\"").rect();
+            let p = egui::pos2(r.left() - 11.0, r.center().y);
+            harness.drag_at(p);
+            harness.drop_at(p);
+        }
         harness.run();
     }
     assert_eq!(
         doc.borrow().view_state().selected_table_section(),
         Some(&tags_path),
-        "clicking the NestedTable cell navigates the grid to the nested `tags` path"
+        "double-clicking the NestedTable cell navigates the grid to the nested `tags` path"
     );
     assert!(
         doc.borrow().view_state().can_go_back(),
@@ -1562,4 +1666,49 @@ fn outline_lists_container_nodes_not_scalar_leaves_and_selecting_switches_grid()
             "a non-table-able stored selection falls back to the root field/value grid"
         );
     }
+}
+
+// =============================================================================
+// E022 — Table (grouped) superset: outline nav + group-by + show-columns, editable
+// =============================================================================
+
+#[test]
+fn grouped_seam_renders_an_editable_grid_grouped_by_the_selected_field() {
+    use egui_kittest::kittest::Queryable;
+    use std::cell::RefCell;
+
+    let worker = Rc::new(ReparseWorker::new());
+    let mut doc = EditorDocument::new_untitled(1);
+    // A RecordList whose `kind` field has values x, y, x → grouping by `kind` clusters the
+    // two "x" rows together; the grid renders the `kind` column first plus the values.
+    doc.buffer =
+        "[\n    (kind: \"x\", n: 1),\n    (kind: \"y\", n: 2),\n    (kind: \"x\", n: 3),\n]".to_string();
+    doc.on_edit();
+    drive_reparse(&mut doc, &worker);
+    // View the root list, grouped by column 0 (`kind`, first-seen).
+    doc.view_state_mut()
+        .set_selected_table_section(Some(StructuralPath::root()));
+    doc.view_state_mut().set_group_by(vec![0]);
+    let doc = Rc::new(RefCell::new(doc));
+
+    let doc_ui = Rc::clone(&doc);
+    let worker_ui = Rc::clone(&worker);
+    let mut harness = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(900.0, 460.0))
+        .build_ui(move |ui| {
+            let mut d = doc_ui.borrow_mut();
+            ronin_app::panels::render_table_grouped_seam(ui, &mut d, &worker_ui);
+        });
+    harness.run();
+
+    // The grouped editable grid renders: the `kind` column (group field, shown first) and
+    // its clustered values are both present.
+    assert!(
+        harness.query_all_by_label_contains("kind").next().is_some(),
+        "the group field `kind` is present (column header / picker)"
+    );
+    assert!(
+        harness.query_all_by_label_contains("\"x\"").next().is_some(),
+        "a grouped data cell value renders"
+    );
 }

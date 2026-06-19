@@ -251,3 +251,32 @@ fn tuple_renders_as_tuple_glyph_in_both_tree_and_a_nested_table_cell() {
         );
     }
 }
+
+#[test]
+fn show_slot_senses_hover_so_tooltips_fire() {
+    // E020 — the legend/tree/header tooltips silently broke because `show()` nested a
+    // `Label` that occluded the slot's own hover sense, so `show(..).on_hover_text(..)`
+    // never fired. The slot must itself be the hovered widget. Capture the slot rect and
+    // its `hovered()` across frames; hovering the slot center must turn `hovered()` true.
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    let rect = Rc::new(Cell::new(egui::Rect::NOTHING));
+    let hovered = Rc::new(Cell::new(false));
+    let rect_ui = Rc::clone(&rect);
+    let hovered_ui = Rc::clone(&hovered);
+    let mut harness = Harness::new_ui(move |ui| {
+        let resp = TypeIndicator::Tuple.show(ui);
+        rect_ui.set(resp.rect);
+        hovered_ui.set(resp.hovered());
+    });
+    harness.run();
+    assert!(!hovered.get(), "the slot is not hovered before the pointer is over it");
+
+    harness.hover_at(rect.get().center());
+    harness.run();
+    assert!(
+        hovered.get(),
+        "the indicator slot must sense hover so `on_hover_text` tooltips fire (E020)"
+    );
+}

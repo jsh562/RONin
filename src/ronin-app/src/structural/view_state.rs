@@ -51,6 +51,14 @@ pub enum PathStep {
     /// **name**. The variant selector itself is identified by the field's enclosing
     /// variant; this step addresses one payload entry of that variant.
     VariantField(String),
+    /// A **synthetic** trailing step used ONLY by the Table view's "combined" /
+    /// flattened projection: on a parent collection (map/list of records), it selects
+    /// the union of the named child collection across **every** entry (e.g.
+    /// `hulls ▸ CombinedChild("cells")` = all hulls' `cells` rows in one table). It
+    /// does **not** resolve to a single live node ([`resolve_path`] returns `None`
+    /// for it); the combined table is built by `TableModel::derive_combined` from the
+    /// parent prefix + this field name. Never produced by [`path_of`].
+    CombinedChild(String),
 }
 
 /// A stable, cross-reparse identity for a CST node: the ordered steps from the
@@ -216,6 +224,8 @@ fn descend(node: &SyntaxNode, step: &PathStep) -> Option<SyntaxNode> {
                 .map(|val| val.syntax().clone());
             found
         }
+        // A synthetic combined-table step never names a single live node.
+        PathStep::CombinedChild(_) => None,
     }
 }
 
@@ -266,6 +276,8 @@ fn descend_counting(node: &SyntaxNode, step: &PathStep, visits: &mut usize) -> O
             }
             None
         }
+        // A synthetic combined-table step never names a single live node.
+        PathStep::CombinedChild(_) => None,
     }
 }
 
@@ -380,8 +392,19 @@ pub enum ActiveView {
     /// The structural tree/form view — the **default on open** (FR-017).
     #[default]
     TreeForm,
-    /// The virtualized spreadsheet/table view of a uniform section.
+    /// The virtualized spreadsheet/table view — the tree-traversal **outline**
+    /// navigator (the default Table surface).
     Table,
+    /// An alternate Table surface using the scanner-driven **grouped-sections**
+    /// navigator (a comparison variant alongside [`Table`]). Same central grid +
+    /// breadcrumb + back/forward; only the left navigator differs. Treated as a
+    /// structural view exactly like [`Table`].
+    TableSections,
+    /// A **pivot-style** Table surface (E021): the same section navigator, but the
+    /// selected collection's rows are grouped by the value(s) of 1–2 chosen fields
+    /// ([`group_by`](ViewSelectionAndFocus::group_by)) and shown as collapsible groups.
+    /// A comparison variant alongside [`TableSections`]; treated as a structural view.
+    TableGrouped,
 }
 
 /// Which structural surface an [`EditFocus`] lives on (FR-004/FR-009).
@@ -524,6 +547,22 @@ pub struct ViewSelectionAndFocus {
     /// section it left here so [`table_go_forward`](Self::table_go_forward) can
     /// re-advance; a NEW navigation clears it (the standard back/forward semantics).
     table_forward: Vec<StructuralPath>,
+    /// The Table grid's **rectangular cell selection** for bulk copy/paste/fill
+    /// (E019): `(anchor, cursor)` grid cells `(row, col)`. The highlighted range is
+    /// the normalized rectangle between them. Byte-free / transient — by `(row,col)`
+    /// coordinates (not paths), cleared on Esc or when it falls outside the model.
+    /// `None` when no range is selected.
+    grid_selection: Option<((usize, usize), (usize, usize))>,
+    /// The column indices the **Table (grouped)** view groups rows by (E021): 0, 1, or 2
+    /// entries, each an index into the selected section's columns. Byte-free / transient.
+    group_by: Vec<usize>,
+    /// The column indices the **Table (grouped)** view displays (E022); empty = all. Each is
+    /// an index into the selected section's columns. Byte-free / transient.
+    group_show_cols: Vec<usize>,
+    /// One-shot: a table-cell editor just began and should grab keyboard focus on its next
+    /// render (E021 — Excel "the cell I'm editing is ready to type into"). Set by
+    /// [`set_focus`](Self::set_focus) for a `TableCell`, consumed by the grid renderer.
+    editor_focus_pending: bool,
 }
 
 /// The originating table cell a tree/form drill-in returns to (FR-006).
@@ -580,11 +619,22 @@ impl ViewSelectionAndFocus {
 
     /// Begin (or replace) edit focus on the node identified by `path`.
     pub fn set_focus(&mut self, path: StructuralPath, surface: FocusSurface, draft: String) {
+        // A table-cell editor should auto-focus when it next renders so it's ready to type
+        // into (Excel — E021); the grid renderer consumes this one-shot request.
+        if matches!(surface, FocusSurface::TableCell { .. }) {
+            self.editor_focus_pending = true;
+        }
         self.edit_focus = Some(EditFocus {
             path,
             surface,
             draft,
         });
+    }
+
+    /// Take (read + clear) the one-shot "the table-cell editor should grab focus" request
+    /// (E021). The grid renderer calls this each frame after laying out the cells.
+    pub fn take_editor_focus_pending(&mut self) -> bool {
+        std::mem::take(&mut self.editor_focus_pending)
     }
 
     /// Clear edit focus (commit/cancel done, or graceful drop on vanish — FR-016).
@@ -739,6 +789,91 @@ impl ViewSelectionAndFocus {
         self.selected_table_section
             .as_ref()
             .is_some_and(|p| !p.is_root())
+    }
+
+    // --- E021: Table (grouped) view — group-by field selection ------------------
+
+    /// The column indices the Table (grouped) view groups rows by (0–2 entries). Byte-free.
+    #[must_use]
+    pub fn group_by(&self) -> &[usize] {
+        &self.group_by
+    }
+
+    /// Set the group-by column indices (capped at 2; the grouped view supports up to two
+    /// levels). Byte-free (FR-020).
+    pub fn set_group_by(&mut self, cols: Vec<usize>) {
+        let mut cols = cols;
+        cols.truncate(2);
+        self.group_by = cols;
+    }
+
+    /// The column indices the Table (grouped) view **displays** (E022). Empty = show all
+    /// columns. Out-of-range indices are ignored by the renderer, so a section switch can
+    /// never corrupt the view.
+    #[must_use]
+    pub fn group_show_cols(&self) -> &[usize] {
+        &self.group_show_cols
+    }
+
+    /// Set the displayed-column indices for the Table (grouped) view (E022). Byte-free.
+    pub fn set_group_show_cols(&mut self, cols: Vec<usize>) {
+        self.group_show_cols = cols;
+    }
+
+    // --- E019: Table grid rectangular selection (bulk copy/paste/fill) ----------
+
+    /// Start a single-cell grid selection at `(row, col)` — sets both the anchor and
+    /// cursor (a 1×1 selection). Byte-free (FR-020).
+    pub fn set_grid_anchor(&mut self, row: usize, col: usize) {
+        self.grid_selection = Some(((row, col), (row, col)));
+    }
+
+    /// Extend the grid selection's cursor to `(row, col)`, keeping the anchor (the
+    /// shift-click / shift-arrow gesture). Starts a fresh selection at `(row, col)` if
+    /// none is active. Byte-free (FR-020).
+    pub fn extend_grid_to(&mut self, row: usize, col: usize) {
+        match &mut self.grid_selection {
+            Some((_, cursor)) => *cursor = (row, col),
+            None => self.grid_selection = Some(((row, col), (row, col))),
+        }
+    }
+
+    /// Select the whole grid `rows × cols` (Ctrl+A): anchor top-left, cursor
+    /// bottom-right. A no-op for an empty grid. Byte-free (FR-020).
+    pub fn select_grid_all(&mut self, rows: usize, cols: usize) {
+        if rows == 0 || cols == 0 {
+            self.grid_selection = None;
+            return;
+        }
+        self.grid_selection = Some(((0, 0), (rows - 1, cols - 1)));
+    }
+
+    /// Clear the grid selection (Esc / a structural edit invalidated it).
+    pub fn clear_grid_selection(&mut self) {
+        self.grid_selection = None;
+    }
+
+    /// The grid selection's **cursor** cell `(row, col)`, the moving end shift-arrows
+    /// extend from. `None` when nothing is selected.
+    #[must_use]
+    pub fn grid_cursor(&self) -> Option<(usize, usize)> {
+        self.grid_selection.map(|(_, cursor)| cursor)
+    }
+
+    /// The grid selection's **anchor** cell `(row, col)`. `None` when nothing is
+    /// selected.
+    #[must_use]
+    pub fn grid_anchor(&self) -> Option<(usize, usize)> {
+        self.grid_selection.map(|(anchor, _)| anchor)
+    }
+
+    /// The normalized selection rectangle `(min_row, min_col, max_row, max_col)`
+    /// (inclusive), or `None` when nothing is selected.
+    #[must_use]
+    pub fn grid_selection_rect(&self) -> Option<(usize, usize, usize, usize)> {
+        self.grid_selection.map(|((ar, ac), (cr, cc))| {
+            (ar.min(cr), ac.min(cc), ar.max(cr), ac.max(cc))
+        })
     }
 
     /// `true` when the projection is stale (a reparse is in flight) (FR-015).

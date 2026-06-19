@@ -66,6 +66,11 @@ pub enum SectionShape {
     /// A list whose every element is a tuple of the same arity — positional
     /// `.0/.1/…` columns.
     TupleList,
+    /// A **combined / flattened** view (E018): a repeated child collection unioned
+    /// across every entry of a parent map/list of records, with a leading parent-key
+    /// column. Its `path` ends in [`PathStep::CombinedChild`]; `TableModel::derive_any`
+    /// dispatches it to `derive_combined`.
+    Combined,
 }
 
 /// One table-able section the scanner found, with its location, a readable label,
@@ -134,6 +139,8 @@ fn visit(
             {
                 out.push(section);
             }
+            // A list of records may have repeated child collections to combine (E018).
+            emit_combined_sections(node, &path, label_steps, out);
             for (i, elem) in list.items().enumerate() {
                 let child_path = path.child(PathStep::Index(i));
                 let child_label = pushed(label_steps, format!("[{i}]"));
@@ -144,6 +151,8 @@ fn visit(
             if let Some(section) = detect_record_map(node, map, &path, label_steps) {
                 out.push(section);
             }
+            // A map of records may have repeated child collections to combine (E018).
+            emit_combined_sections(node, &path, label_steps, out);
             for entry in map.entries() {
                 let Some(key) = entry.key() else { continue };
                 let Some(val) = entry.value() else { continue };
@@ -183,6 +192,31 @@ fn visit(
         }
         // Scalars / unit / error nodes have no children and are never sections.
         _ => {}
+    }
+}
+
+/// Emit a synthetic [`SectionShape::Combined`] section for each repeated child
+/// collection of `node` (a parent map/list of records) — the flattened/UNNEST view
+/// that unions a same-named child list across all entries with a parent-key column
+/// (E018). The combined section's `path` ends in [`PathStep::CombinedChild`].
+fn emit_combined_sections(
+    node: &SyntaxNode,
+    path: &StructuralPath,
+    label_steps: &[String],
+    out: &mut Vec<TableSection>,
+) {
+    for child in super::table::combinable_child_fields(node) {
+        out.push(TableSection {
+            path: path.child(PathStep::CombinedChild(child.field.clone())),
+            label: format!(
+                "{} \u{25B8} \u{2217} \u{25B8} {} \u{2014} combined",
+                join_label(label_steps),
+                child.field
+            ),
+            shape: SectionShape::Combined,
+            rows: child.rows,
+            cols: child.cols,
+        });
     }
 }
 
