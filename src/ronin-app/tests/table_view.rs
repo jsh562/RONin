@@ -398,10 +398,10 @@ fn table_view_renders_headlessly() {
 // =============================================================================
 
 #[test]
-fn tab_commits_and_advances_focus_to_next_cell() {
-    // FR-009: committing a cell (Tab) advances focus to the next cell in the row;
-    // the active-cell focus is keyed to the cell's structural path (FR-016). We seed
-    // focus on row 0 / `name`, press Tab, and confirm focus moved to row 0 / `hp`.
+fn tab_commits_the_edit_and_selects_the_next_cell() {
+    // E024 (Excel model): committing a cell with Tab moves the SELECTION to the next cell
+    // (row 0 / `hp`) and CLOSES the editor — it no longer opens that cell's editor. We seed
+    // an edit on row 0 / `name`, press Tab, and confirm the editor closed and `hp` is selected.
     use std::cell::RefCell;
     use std::rc::Rc;
 
@@ -440,23 +440,19 @@ fn tab_commits_and_advances_focus_to_next_cell() {
     });
     // First frame: the `name` cell renders its inline editor (focus is on it).
     harness.run();
-    // Press Tab → commit + advance to the next cell (FR-009).
+    // Press Tab → commit + move the selection right (no auto-editor).
     harness.key_press(egui::Key::Tab);
     harness.run();
 
-    // Focus now keys the row 0 / `hp` cell (column 1) — the next cell in row order.
     let d = doc.borrow();
-    let focus = d
-        .view_state()
-        .edit_focus()
-        .expect("focus advanced, not dropped");
-    let expected = StructuralPath::root()
-        .child(PathStep::Index(0))
-        .child(PathStep::Field("hp".to_string()));
-    assert_eq!(focus.path, expected, "Tab advanced focus to the next cell");
     assert!(
-        matches!(focus.surface, FocusSurface::TableCell { row: 0, column: 1 }),
-        "the advanced focus is the (row 0, column 1) cell"
+        d.view_state().edit_focus().is_none(),
+        "Tab commits and closes the editor (no auto-open on the next cell)"
+    );
+    assert_eq!(
+        d.view_state().grid_selection_rect(),
+        Some((0, 1, 0, 1)),
+        "Tab moved the selection to the next cell (row 0 / hp)"
     );
 }
 
@@ -1803,10 +1799,52 @@ fn enter_commits_the_edit_and_moves_down() {
 
     let d = doc.borrow();
     assert!(d.buffer.contains("hp: 99"), "Enter committed the edit: {}", d.buffer);
-    let focus = d.view_state().edit_focus().expect("Enter advanced focus, not dropped");
+    // E024 (Excel): Enter commits then MOVES the selection down + closes the editor —
+    // it no longer opens the next cell's editor.
     assert!(
-        matches!(focus.surface, FocusSurface::TableCell { row: 1, column: 1 }),
-        "Enter moved the active cell DOWN to row 1 / hp"
+        d.view_state().edit_focus().is_none(),
+        "Enter closes the editor after committing (no auto-open below)"
+    );
+    assert_eq!(
+        d.view_state().grid_selection_rect(),
+        Some((1, 1, 1, 1)),
+        "Enter moved the selection DOWN to row 1 / hp"
+    );
+}
+
+#[test]
+fn not_editing_enter_moves_selection_down_without_editing() {
+    // E024 (Excel): when a cell is just SELECTED (not editing), Enter moves the selection
+    // down — it does NOT open an editor (F2 / typing / double-click edit).
+    use std::rc::Rc;
+
+    let (worker, doc) = excel_doc();
+    doc.borrow_mut().view_state_mut().set_grid_anchor(0, 1); // select row 0 / hp
+    let doc_ui = Rc::clone(&doc);
+    let worker_ui = Rc::clone(&worker);
+    let mut harness = Harness::new_ui(move |ui| {
+        let mut d = doc_ui.borrow_mut();
+        render_table_view(
+            ui,
+            &mut d,
+            &worker_ui,
+            &StructuralPath::root(),
+            SectionShape::RecordList,
+        );
+    });
+    harness.run();
+    harness.key_press(egui::Key::Enter);
+    harness.run();
+
+    let d = doc.borrow();
+    assert_eq!(
+        d.view_state().grid_selection_rect(),
+        Some((1, 1, 1, 1)),
+        "Enter on a selected cell moves the selection down"
+    );
+    assert!(
+        d.view_state().edit_focus().is_none(),
+        "Enter on a selected cell does NOT open an editor"
     );
 }
 
@@ -1847,4 +1885,120 @@ fn typing_on_a_selected_cell_opens_the_editor_overwriting() {
         "the editor opened on the selected (row 0 / hp) cell"
     );
     assert_eq!(focus.draft, "9", "the editor is seeded with the typed character (overwrite)");
+}
+
+#[test]
+fn clear_writes_resets_editable_scalars_to_type_defaults() {
+    // E024 — Delete clears editable scalar cells to a type-appropriate empty value.
+    use ronin_app::structural::table::clear_writes;
+
+    let worker = ReparseWorker::new();
+    let doc = doc_at(
+        "[\n    (n: 5, s: \"hi\", b: true),\n    (n: 6, s: \"yo\", b: false),\n]",
+        &worker,
+    );
+    let model = model_of(&doc); // columns: n (int), s (string), b (bool)
+    let w = clear_writes(&model, 0, 0, 1, 2);
+    assert_eq!(w.len(), 6, "2 rows × 3 editable scalar columns");
+    let vals: Vec<String> = w.iter().map(|(_, v)| v.clone()).collect();
+    assert!(vals.iter().filter(|v| *v == "0").count() == 2, "ints clear to 0");
+    assert!(vals.iter().filter(|v| *v == "\"\"").count() == 2, "strings clear to \"\"");
+    assert!(vals.iter().filter(|v| *v == "false").count() == 2, "bools clear to false");
+}
+
+#[test]
+fn delete_clears_the_selected_cells_in_one_undo() {
+    // E024 — pressing Delete over a selection clears those cells (one undo), leaving the
+    // rest untouched.
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let worker = Rc::new(ReparseWorker::new());
+    let doc = Rc::new(RefCell::new(doc_at(
+        "[\n    (n: 5, s: \"hi\"),\n    (n: 6, s: \"yo\"),\n]",
+        &worker,
+    )));
+    let before = doc.borrow().buffer.clone();
+    // Select the whole `n` column (col 0, rows 0..=1).
+    {
+        let mut d = doc.borrow_mut();
+        d.view_state_mut().set_grid_anchor(0, 0);
+        d.view_state_mut().extend_grid_to(1, 0);
+    }
+    let doc_ui = Rc::clone(&doc);
+    let worker_ui = Rc::clone(&worker);
+    let mut harness = Harness::new_ui(move |ui| {
+        let mut d = doc_ui.borrow_mut();
+        render_table_view(
+            ui,
+            &mut d,
+            &worker_ui,
+            &StructuralPath::root(),
+            SectionShape::RecordList,
+        );
+    });
+    harness.run();
+    harness.key_press(egui::Key::Delete);
+    harness.run();
+
+    {
+        let d = doc.borrow();
+        assert_eq!(
+            d.buffer.matches("n: 0").count(),
+            2,
+            "both `n` cells cleared to 0: {}",
+            d.buffer
+        );
+        assert!(
+            d.buffer.contains("s: \"hi\"") && d.buffer.contains("s: \"yo\""),
+            "the `s` column is untouched: {}",
+            d.buffer
+        );
+    }
+    assert!(doc.borrow_mut().undo(Instant::now()), "undo steps back");
+    assert_eq!(
+        doc.borrow().buffer,
+        before,
+        "one undo restores all cleared cells"
+    );
+}
+
+#[test]
+fn typing_over_a_range_edits_the_active_cursor_cell() {
+    // E024 — typing while a multi-cell range is selected opens the ACTIVE (cursor) cell's
+    // editor seeded with the char (Excel overwrite), not the top-left.
+    use std::rc::Rc;
+
+    let (worker, doc) = excel_doc(); // [(name:"aa",hp:11),(name:"bb",hp:22)]
+    {
+        let mut d = doc.borrow_mut();
+        d.view_state_mut().set_grid_anchor(0, 0); // anchor top-left
+        d.view_state_mut().extend_grid_to(1, 1); // cursor at (1,1)
+    }
+    let doc_ui = Rc::clone(&doc);
+    let worker_ui = Rc::clone(&worker);
+    let mut harness = Harness::new_ui(move |ui| {
+        let mut d = doc_ui.borrow_mut();
+        render_table_view(
+            ui,
+            &mut d,
+            &worker_ui,
+            &StructuralPath::root(),
+            SectionShape::RecordList,
+        );
+    });
+    harness.run();
+    harness.event(egui::Event::Text("9".to_string()));
+    harness.run();
+
+    let d = doc.borrow();
+    let focus = d
+        .view_state()
+        .edit_focus()
+        .expect("typing over a range opens the cursor cell editor");
+    assert!(
+        matches!(focus.surface, FocusSurface::TableCell { row: 1, column: 1 }),
+        "the editor opened on the cursor (active) cell, not the top-left"
+    );
+    assert_eq!(focus.draft, "9");
 }

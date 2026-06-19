@@ -2198,7 +2198,11 @@ fn render_table_grid(
     if draft.is_none() {
         let rows = model.row_count();
         let cols = model.columns.len();
-        let (select_all, escape, shift, up, down, left, right, enter, f2) = ui.input(|i| {
+        // Tab / Shift+Tab move the selection right / left like Excel — consume them so they
+        // don't move egui's widget focus out of the grid (E024).
+        let tab = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Tab));
+        let shift_tab = ui.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, Key::Tab));
+        let (select_all, escape, shift, up, down, left, right, enter, f2, delete) = ui.input(|i| {
             (
                 i.modifiers.command && i.key_pressed(Key::A),
                 i.key_pressed(Key::Escape),
@@ -2209,21 +2213,28 @@ fn render_table_grid(
                 i.key_pressed(Key::ArrowRight),
                 i.key_pressed(Key::Enter),
                 i.key_pressed(Key::F2),
+                i.key_pressed(Key::Delete) || i.key_pressed(Key::Backspace),
             )
         });
         let arrow = up || down || left || right;
-        // Step the active cell one cell in the pressed arrow direction, clamped.
+        // Excel movement: arrows + Enter (down, Shift+Enter up) + Tab (right) / Shift+Tab
+        // (left). Editing is NOT entered by these — only by F2 / typing / double-click.
+        let move_up = up || (enter && shift);
+        let move_down = down || (enter && !shift);
+        let move_left = left || shift_tab;
+        let move_right = right || tab;
+        let moved = move_up || move_down || move_left || move_right;
         let step = |cr: usize, cc: usize| -> (usize, usize) {
-            let nr = if up {
+            let nr = if move_up {
                 cr.saturating_sub(1)
-            } else if down {
+            } else if move_down {
                 (cr + 1).min(rows.saturating_sub(1))
             } else {
                 cr
             };
-            let nc = if left {
+            let nc = if move_left {
                 cc.saturating_sub(1)
-            } else if right {
+            } else if move_right {
                 (cc + 1).min(cols.saturating_sub(1))
             } else {
                 cc
@@ -2234,13 +2245,22 @@ fn render_table_grid(
             doc.view_state_mut().select_grid_all(rows, cols);
         } else if escape {
             doc.view_state_mut().clear_grid_selection();
-        } else if arrow {
-            // Arrow moves the active cell (Excel); Shift+Arrow extends the selection.
-            // With no selection yet, an arrow lands on the top-left cell.
+        } else if delete {
+            // Delete / Backspace clears the editable scalar cells in the selection to a
+            // type-appropriate empty value, one undo (Excel-style clear — E024).
+            if let Some((r0, c0, r1, c1)) = doc.view_state().grid_selection_rect() {
+                let writes = clear_writes(model, r0, c0, r1, c1);
+                if !writes.is_empty() {
+                    let _ = doc.apply_grid_writes(&writes, worker, Instant::now());
+                }
+            }
+        } else if moved {
+            // Move the active cell; Shift+Arrow extends the selection (Tab/Enter always
+            // move + collapse). With no selection yet, the first move lands top-left.
             match doc.view_state().grid_cursor() {
                 Some((cr, cc)) => {
                     let (nr, nc) = step(cr, cc);
-                    if shift {
+                    if shift && arrow {
                         doc.view_state_mut().extend_grid_to(nr, nc);
                     } else {
                         doc.view_state_mut().set_grid_anchor(nr, nc);
@@ -2249,8 +2269,9 @@ fn render_table_grid(
                 None if rows > 0 && cols > 0 => doc.view_state_mut().set_grid_anchor(0, 0),
                 None => {}
             }
-        } else if (enter || f2) && !shift {
-            // Enter / F2 begins editing the active cell (if it is editable).
+        } else if f2 {
+            // F2 begins editing the active cell (if it is editable). Enter no longer edits —
+            // it moves down (Excel); typing / double-click also edit.
             if let Some((cr, cc)) = grid_cursor {
                 if let Some((path, seed)) = focus_target_for(model, cr, cc) {
                     doc.view_state_mut().set_focus(
@@ -2295,20 +2316,22 @@ fn render_table_grid(
                             let _ = doc.apply_grid_writes(&writes, worker, now);
                         }
                     }
-                    egui::Event::Text(t) if r0 == r1 && c0 == c1 && !t.is_empty() => {
-                        // Excel "just start typing" (E021): a printable char on a single
-                        // selected cell opens its editor seeded with the typed text
-                        // (overwrite). `focus_target_for` returns `None` for read-only /
-                        // nested cells, so those are left alone.
-                        if let Some((path, _)) = focus_target_for(model, r0, c0) {
-                            doc.view_state_mut().set_focus(
-                                path,
-                                FocusSurface::TableCell {
-                                    row: r0,
-                                    column: c0,
-                                },
-                                t.clone(),
-                            );
+                    egui::Event::Text(t) if !t.is_empty() => {
+                        // Excel "just start typing" (E021/E024): a printable char opens the
+                        // ACTIVE (cursor) cell's editor seeded with the char (overwrite) —
+                        // whether one cell or a range is selected. `focus_target_for` returns
+                        // `None` for read-only / nested cells, so those are left alone.
+                        if let Some((cr, cc)) = doc.view_state().grid_cursor() {
+                            if let Some((path, _)) = focus_target_for(model, cr, cc) {
+                                doc.view_state_mut().set_focus(
+                                    path,
+                                    FocusSurface::TableCell {
+                                        row: cr,
+                                        column: cc,
+                                    },
+                                    t.clone(),
+                                );
+                            }
                         }
                     }
                     _ => {}
@@ -2638,41 +2661,22 @@ fn advance_focus(
 ) {
     let section = &model.section_ref;
     if let Some((nr, nc)) = neighbour_cell(model, row, col, dir) {
-        // A neighbour exists: re-key focus to it (its path survives the reparse the
-        // commit triggered — FR-016). A read-only key cell yields no focus target.
-        if let Some((path, seed)) = focus_target_for(model, nr, nc) {
-            doc.view_state_mut().set_focus(
-                path,
-                FocusSurface::TableCell {
-                    row: nr,
-                    column: nc,
-                },
-                seed,
-            );
-        }
+        // Excel: a commit (Enter/Tab/arrow) MOVES the selection to the neighbour — it does
+        // NOT open that cell's editor. Close the editor and select the neighbour; the user
+        // types / F2 / double-clicks to edit it (E024).
+        doc.view_state_mut().clear_focus();
+        doc.view_state_mut().set_grid_anchor(nr, nc);
     } else if row_ops && matches!(dir, CellNav::Next) {
-        // Past the last cell of the last row → append a new row (one undo unit) and
-        // land focus in its first cell (FR-009). The appended row is a separate undo
-        // unit from the cell commit, matching the "append a row" action.
+        // Past the last cell of the last row → append a new row (one undo unit) and SELECT
+        // its first cell (FR-009). The appended row is a separate undo unit from the commit.
         let value = default_row_text(model);
         if doc
             .apply_table_append_row(section, value, worker, now)
             .is_ok()
         {
-            if let Some(first) = model.columns.first() {
-                let new_row = model.row_count();
-                let path = section
-                    .child(PathStep::Index(new_row))
-                    .child(PathStep::Field(first.field_name.clone()));
-                doc.view_state_mut().set_focus(
-                    path,
-                    FocusSurface::TableCell {
-                        row: new_row,
-                        column: 0,
-                    },
-                    String::new(),
-                );
-            }
+            let new_row = model.row_count();
+            doc.view_state_mut().clear_focus();
+            doc.view_state_mut().set_grid_anchor(new_row, 0);
         }
     }
 }
@@ -2758,6 +2762,44 @@ pub fn grid_paste_writes(
             if let Some(cell) = model.cell(r, c) {
                 if matches!(cell.class, CellClass::Scalar) {
                     if let Some(path) = &cell.value_ref {
+                        writes.push((path.clone(), val.to_string()));
+                    }
+                }
+            }
+        }
+    }
+    writes
+}
+
+/// A type-appropriate "empty" RON literal for clearing a scalar cell (E024 — Delete). RON
+/// has no empty literal, so clearing resets to the type's neutral value; unknown/unit types
+/// return `None` (left untouched rather than risk invalid RON).
+fn clear_value_for(scalar: Option<ScalarClass>) -> Option<&'static str> {
+    match scalar {
+        Some(ScalarClass::Integer) => Some("0"),
+        Some(ScalarClass::Float) => Some("0.0"),
+        Some(ScalarClass::Bool) => Some("false"),
+        Some(ScalarClass::Str) => Some("\"\""),
+        Some(ScalarClass::Char) => Some("' '"),
+        Some(ScalarClass::Unit) | Some(ScalarClass::Other) | None => None,
+    }
+}
+
+/// Build the writes that **clear** the editable scalar cells in a rectangular range to their
+/// type's empty value (E024 — Excel-style Delete). One write per `Scalar` cell with a
+/// `value_ref` and a known [`ScalarClass`]; read-only / nested / blank / unknown cells are
+/// skipped. Applied via the one-undo [`apply_grid_writes`].
+pub fn clear_writes(model: &TableModel, r0: usize, c0: usize, r1: usize, c1: usize) -> Vec<(StructuralPath, String)> {
+    let max_row = model.row_count().saturating_sub(1);
+    let max_col = model.columns.len().saturating_sub(1);
+    let (r0, r1) = (r0.min(max_row), r1.min(max_row));
+    let (c0, c1) = (c0.min(max_col), c1.min(max_col));
+    let mut writes = Vec::new();
+    for r in r0..=r1 {
+        for c in c0..=c1 {
+            if let Some(cell) = model.cell(r, c) {
+                if matches!(cell.class, CellClass::Scalar) {
+                    if let (Some(path), Some(val)) = (&cell.value_ref, clear_value_for(cell.scalar)) {
                         writes.push((path.clone(), val.to_string()));
                     }
                 }

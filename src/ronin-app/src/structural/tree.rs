@@ -1498,13 +1498,12 @@ fn render_variant_selector(ui: &mut Ui, node: &TreeNode, pending: &mut Option<Pe
     let mut selected = current.clone();
     // A transient buffer for the free-text "other variant name" field, held in egui
     // memory keyed by the node's path so typing persists while the popup is open.
-    let custom_id = egui::Id::new((
-        "ronin_variant_custom",
-        node.node_ref.steps().len(),
-        &node.label,
-    ));
+    // Key transient state + the combo by the node's FULL path (unique) — not (depth, label),
+    // which collides when two same-named fields sit at the same depth (egui ID clash → the
+    // red border). E024.
+    let custom_id = egui::Id::new(("ronin_variant_custom", &node.node_ref));
     let mut commit_custom: Option<String> = None;
-    egui::ComboBox::from_id_salt(("ronin_variant", node.node_ref.steps().len(), &node.label))
+    egui::ComboBox::from_id_salt(("ronin_variant", &node.node_ref))
         .selected_text(format!("variant: {current}"))
         .show_ui(ui, |ui| {
             for cand in &node.variant_candidates {
@@ -1703,7 +1702,7 @@ fn render_option_editor(ui: &mut Ui, node: &TreeNode, ctx: &mut RenderCtx) {
     // The Some/None selector (a non-blocking dropdown, FR-002).
     let mut selected_some = is_some;
     let label = if is_some { "Some" } else { "None" };
-    egui::ComboBox::from_id_salt(("ronin_option", node.node_ref.steps().len(), &node.label))
+    egui::ComboBox::from_id_salt(("ronin_option", &node.node_ref))
         .selected_text(label)
         .show_ui(ui, |ui| {
             ui.selectable_value(&mut selected_some, true, "Some");

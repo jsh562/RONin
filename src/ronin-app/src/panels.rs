@@ -240,9 +240,9 @@ pub fn render_table_sections_seam(
             ui.strong("Tables");
             ui.separator();
             egui::ScrollArea::vertical().show(ui, |ui| {
-                for (group_label, members) in &groups {
+                for (group_index, (group_label, members)) in groups.iter().enumerate() {
                     egui::CollapsingHeader::new(group_label)
-                        .id_salt(("ronin_tbl_sections_group", group_label))
+                        .id_salt(("ronin_tbl_sections_group", group_index, group_label))
                         .default_open(true)
                         .show(ui, |ui| {
                             for &idx in members {
