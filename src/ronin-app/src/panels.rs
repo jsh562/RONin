@@ -34,7 +34,7 @@ use crate::reparse::ReparseWorker;
 use crate::structural::indicators;
 use crate::structural::table::{
     breadcrumb_segments, combinable_child_fields, grouped_view_model, render_table_grid_for,
-    render_table_view_any, TableModel,
+    render_table_view_any, text_px_width, TableModel,
 };
 use crate::structural::tree::{TreeNode, TreeNodeKind};
 use crate::structural::view_state::{resolve_path, PathStep, StructuralPath};
@@ -63,6 +63,44 @@ use crate::structural::view_state::{resolve_path, PathStep, StructuralPath};
 /// This is the [COMPLETES FR-005] host point wired into the per-document view
 /// switcher's Table arm (FR-017). The `worker` is the document's off-frame reparse
 /// worker, used to re-derive the projection after an edit lands.
+/// The fitted width for a navigator side-panel (E023): the widest item label + the icon
+/// slot + scrollbar/padding, clamped. `default_size` only applies on first load; the panel
+/// stays user-resizable after.
+pub fn nav_panel_width(max_label_px: f32) -> f32 {
+    (max_label_px + indicators::SLOT_WIDTH + 28.0).clamp(200.0, 460.0)
+}
+
+/// The widest rendered outline-row label width (E023): for each container node, its indent
+/// (`depth * spacing.indent`) plus the measured label (+ child-count suffix). Depth-capped
+/// so a pathologically deep document can't make this costly (the width is only a first-load
+/// default).
+fn outline_max_label_px(ui: &egui::Ui, nodes: &[TreeNode], depth: usize) -> f32 {
+    if depth > 8 {
+        return 0.0;
+    }
+    let indent = ui.spacing().indent;
+    let mut max = 0.0_f32;
+    for node in nodes {
+        if !is_outline_container(node) {
+            continue;
+        }
+        let count = node
+            .children
+            .iter()
+            .filter(|c| is_outline_container(c))
+            .count();
+        let label = if count > 0 {
+            format!("{}  ({count})", node.label)
+        } else {
+            node.label.clone()
+        };
+        let w = depth as f32 * indent + text_px_width(ui, &label, egui::TextStyle::Body);
+        max = max.max(w);
+        max = max.max(outline_max_label_px(ui, &node.children, depth + 1));
+    }
+    max
+}
+
 pub fn render_table_seam(ui: &mut egui::Ui, doc: &mut EditorDocument, worker: &ReparseWorker) {
     render_binding_indicator(ui, doc);
 
@@ -87,10 +125,11 @@ pub fn render_table_seam(ui: &mut egui::Ui, doc: &mut EditorDocument, worker: &R
         .unwrap_or_else(StructuralPath::root);
 
     // The collapsible tree-outline navigator side list (Part A1).
+    let nav_w = nav_panel_width(outline_max_label_px(ui, &model.roots, 0));
     let mut clicked: Option<StructuralPath> = None;
     egui::Panel::left("ronin_table_navigator")
         .resizable(true)
-        .default_size(240.0)
+        .default_size(nav_w)
         .show_inside(ui, |ui| {
             ui.strong("Outline");
             ui.separator();
@@ -180,10 +219,23 @@ pub fn render_table_sections_seam(
         members.sort_by(|&a, &b| sections[b].rows.cmp(&sections[a].rows));
     }
 
+    let nav_w = nav_panel_width(
+        sections
+            .iter()
+            .map(|s| {
+                text_px_width(
+                    ui,
+                    &format!("{}  ({}\u{00D7}{})", s.label, s.rows, s.cols),
+                    egui::TextStyle::Body,
+                )
+            })
+            .fold(0.0_f32, f32::max)
+            + ui.spacing().indent, // section rows sit one level inside the ancestor header
+    );
     let mut clicked: Option<StructuralPath> = None;
     egui::Panel::left("ronin_table_sections_nav")
         .resizable(true)
-        .default_size(240.0)
+        .default_size(nav_w)
         .show_inside(ui, |ui| {
             ui.strong("Tables");
             ui.separator();
@@ -304,10 +356,11 @@ pub fn render_table_grouped_seam(
         .filter(|p| selection_is_table_able(doc, p))
         .unwrap_or_else(StructuralPath::root);
 
+    let nav_w = nav_panel_width(outline_max_label_px(ui, &tree.roots, 0));
     let mut clicked: Option<StructuralPath> = None;
     egui::Panel::left("ronin_table_grouped_nav")
         .resizable(true)
-        .default_size(240.0)
+        .default_size(nav_w)
         .show_inside(ui, |ui| {
             ui.strong("Outline");
             ui.separator();

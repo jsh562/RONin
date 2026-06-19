@@ -1810,40 +1810,47 @@ pub fn render_table_view_counting(
     render_table_grid(ui, doc, worker, &section, &model, row_ops, realized_rows);
 }
 
-/// Minimum/maximum and per-character estimates used to fit table columns to their content
-/// on initial load (E020). Widths are heuristic (no text layout); the user can drag to
-/// resize afterwards, and egui_extras persists the adjusted widths.
+/// The rendered pixel width of `text` in `style`'s resolved font — accurate (matches egui's
+/// own layout), used to fit columns / editors / nav panels to content (E023). Reusable
+/// wherever a `&Ui` is in hand.
+pub fn text_px_width(ui: &Ui, text: &str, style: egui::TextStyle) -> f32 {
+    let font_id = style.resolve(ui.style());
+    ui.painter()
+        .layout_no_wrap(text.to_owned(), font_id, egui::Color32::PLACEHOLDER)
+        .size()
+        .x
+}
+
+/// Min/max and padding used to fit table columns to their content on initial load
+/// (E020/E023). The user can drag to resize afterwards; egui_extras persists the width.
 const GRID_COL_MIN_W: f32 = 48.0;
-const GRID_COL_MAX_W: f32 = 360.0;
-/// Approximate advance width (px) of one Body-font character — enough for a sensible fit.
-const GRID_COL_CHAR_W: f32 = 7.0;
+const GRID_COL_MAX_W: f32 = 480.0;
 /// Per-cell horizontal padding allowance (cell margins + a little slack).
-const GRID_COL_PAD: f32 = 14.0;
+const GRID_COL_PAD: f32 = 16.0;
 /// How many leading rows to sample when fitting a column — bounded so per-frame work stays
 /// independent of the total row count (the SC-010 virtualization invariant).
 const GRID_COL_SAMPLE: usize = 64;
 
-/// Compute a content-fitted initial width per column (E020): the widest of the column
-/// header and the first [`GRID_COL_SAMPLE`] cells' text, converted to pixels via a simple
-/// per-character estimate plus the type-icon slot and padding, clamped to
-/// `[GRID_COL_MIN_W, GRID_COL_MAX_W]`. Pure + cheap (`str` length is O(1)); used as each
-/// column's `initial` width so columns auto-size on first view, then stay user-resizable.
-pub fn auto_column_widths(model: &TableModel) -> Vec<f32> {
+/// Compute a content-fitted initial width per column (E020/E023): the widest of the column
+/// header and the first [`GRID_COL_SAMPLE`] cells' text — measured by `measure` (E023 passes
+/// an accurate galley measurer; tests pass a fake) — plus the type-icon slot and padding,
+/// clamped to `[GRID_COL_MIN_W, GRID_COL_MAX_W]`. Used as each column's `initial` width so
+/// columns auto-size on first view, then stay user-resizable.
+pub fn auto_column_widths(model: &TableModel, measure: impl Fn(&str) -> f32) -> Vec<f32> {
     model
         .columns
         .iter()
         .enumerate()
         .map(|(c, col)| {
-            let mut chars = col.field_name.chars().count();
+            let mut text_w = measure(&col.field_name);
             for row in model.rows.iter().take(GRID_COL_SAMPLE) {
                 if let Some(cell) = row.cells.get(c) {
                     if let Some(text) = &cell.text {
-                        chars = chars.max(text.chars().count());
+                        text_w = text_w.max(measure(text));
                     }
                 }
             }
-            let w = indicators::SLOT_WIDTH + chars as f32 * GRID_COL_CHAR_W + GRID_COL_PAD;
-            w.clamp(GRID_COL_MIN_W, GRID_COL_MAX_W)
+            (indicators::SLOT_WIDTH + text_w + GRID_COL_PAD).clamp(GRID_COL_MIN_W, GRID_COL_MAX_W)
         })
         .collect()
 }
@@ -2017,10 +2024,11 @@ fn render_table_grid(
     let columns = &model.columns;
     let rows = &model.rows;
     let realized = Rc::clone(realized_rows);
-    // E020: per-column widths fitted to content (header + sampled cells) so columns auto-
-    // size on initial load. `initial(..)` is only consulted on the first frame; egui_extras
-    // then persists per-column widths, so this is "fit on load, then stable + resizable".
-    let col_widths = auto_column_widths(model);
+    // E020/E023: per-column widths fitted to content (header + sampled cells), measured with
+    // the real Body font (accurate). `initial(..)` is only consulted on the first frame for a
+    // given column-state id; egui_extras then persists per-column widths (fit on load, then
+    // stable + resizable).
+    let col_widths = auto_column_widths(model, |s| text_px_width(ui, s, egui::TextStyle::Body));
 
     // HORIZONTAL SCROLL (E013): a wide table (e.g. the `hulls` RecordMap = key column
     // + 12 fields ≈ 13 columns) exceeds the viewport width. egui_extras 0.34's
@@ -2033,8 +2041,13 @@ fn render_table_grid(
     // disabled), so it does NOT take over the body's VERTICAL virtualization: the
     // Table body keeps its own vertical `ScrollArea` + `TableBody::rows`, so the
     // realized-row count stays bounded by the viewport (SC-010 unchanged).
+    // E023: key the table + scroll state by the FULL section path AND the column signature,
+    // not just `section.depth()`. Two different sections at the same depth (e.g.
+    // hulls ▸ (1) ▸ cells vs hulls ▸ (2) ▸ cells) must NOT share egui_extras' persisted
+    // column widths; and the grouped view's projected column-set gets its own state too.
+    let col_sig: Vec<&str> = columns.iter().map(|c| c.field_name.as_str()).collect();
     egui::ScrollArea::horizontal()
-        .id_salt(("ronin_table_hscroll", section.depth()))
+        .id_salt(("ronin_table_hscroll", &section, &col_sig))
         .auto_shrink([false, false])
         // E019b: a click-drag must SELECT a cell range (Excel-style), not pan the view.
         // Keep the scrollbar + mouse-wheel as scroll sources but drop drag-to-scroll, so
@@ -2045,7 +2058,7 @@ fn render_table_grid(
         })
         .show(ui, |ui| {
             let mut builder = TableBuilder::new(ui)
-                .id_salt(("ronin_table", section.depth()))
+                .id_salt(("ronin_table", &section, &col_sig))
                 .striped(true)
                 .resizable(true)
                 .auto_shrink([false, false])

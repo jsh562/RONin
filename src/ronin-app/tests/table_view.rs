@@ -1586,9 +1586,10 @@ fn body_click_on_a_nested_cell_selects_and_does_not_navigate() {
 
 #[test]
 fn auto_column_widths_fit_content_header_and_clamp() {
-    // E020 — columns auto-size to content on load: a column of long values is wider than a
-    // column of short values, a long header widens its column even with short values, and
-    // every width clamps to [GRID_COL_MIN_W, GRID_COL_MAX_W] (48..=360).
+    // E020/E023 — columns auto-size to content on load: a column of long values is wider
+    // than a column of short values, a long header widens its column even with short values,
+    // and every width clamps to [GRID_COL_MIN_W, GRID_COL_MAX_W] (48..=480). The width is
+    // computed from a text-measurer (a fake one here; the app passes an accurate galley one).
     use ronin_app::structural::table::auto_column_widths;
 
     let worker = ReparseWorker::new();
@@ -1606,7 +1607,8 @@ fn auto_column_widths_fit_content_header_and_clamp() {
             .unwrap_or_else(|| panic!("column {name} present"))
     };
 
-    let w = auto_column_widths(&model);
+    // Fake measurer: ~7px per character (stand-in for the galley measurer).
+    let w = auto_column_widths(&model, |s: &str| s.chars().count() as f32 * 7.0);
     assert_eq!(w.len(), model.columns.len(), "one width per column");
     assert!(
         w[idx("wide")] > w[idx("s")],
@@ -1618,10 +1620,21 @@ fn auto_column_widths_fit_content_header_and_clamp() {
     );
     for width in &w {
         assert!(
-            (48.0..=360.0).contains(width),
+            (48.0..=480.0).contains(width),
             "column width {width} stays within the clamp range"
         );
     }
+}
+
+#[test]
+fn nav_panel_width_clamps_to_a_sensible_range() {
+    // E023 — the navigator side-panel fits its widest label but stays within a clamp so it
+    // never collapses or eats the window.
+    use ronin_app::panels::nav_panel_width;
+    assert_eq!(nav_panel_width(0.0), 200.0, "tiny content → the minimum width");
+    assert_eq!(nav_panel_width(10_000.0), 460.0, "huge content → the maximum width");
+    let mid = nav_panel_width(300.0);
+    assert!((200.0..=460.0).contains(&mid), "mid content stays in range, got {mid}");
 }
 
 #[test]

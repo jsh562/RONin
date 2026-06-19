@@ -682,19 +682,19 @@ fn legend_strip(ui: &mut egui::Ui) {
     // [containers, containers+scalars) = scalars, [..] = status.
     let scalar_end = containers + scalars;
 
-    // Emit right-to-left: iterate `ALL` in reverse so the first group (containers)
-    // ends up leftmost. Insert a gap when crossing a group boundary.
+    // Emit FORWARD (containers → scalars → status), inserting a gap *before* each new
+    // group. Forward order reads left→right correctly in BOTH the same-row right-aligned
+    // case (wrapped in a `left_to_right` inside a `right_to_left`) and the wrapped own-row
+    // `left_to_right` case — so the legend never flips order when it wraps (E023).
     let all = TypeIndicator::ALL;
-    for i in (0..all.len()).rev() {
-        let indicator = all[i];
+    for (i, &indicator) in all.iter().enumerate() {
+        // A new group starts at `containers` (scalars) and `scalar_end` (status).
+        if i == containers || i == scalar_end {
+            ui.add_space(GROUP_GAP);
+        }
         // Each legend glyph goes through the shared fixed-width slot (E014) so the
         // strip shares a uniform per-glyph slot + baseline with the views' icons.
         indicator.show(ui).on_hover_text(indicator.word());
-        // A group starts at index `containers` (scalars) and `scalar_end` (status);
-        // when we step left across one of those boundaries, add the inter-group gap.
-        if i == scalar_end || i == containers {
-            ui.add_space(GROUP_GAP);
-        }
     }
 }
 
@@ -4209,8 +4209,12 @@ impl App {
             // the tree + table paint. If the remaining width is too small it would overlap
             // the tabs, so defer it to its own row below (E021).
             if ui.available_width() >= legend_min_width() {
+                // Right-align the legend on this row while keeping its forward (left→right)
+                // order: a `left_to_right` group placed by an outer `right_to_left` (E023).
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    legend_strip(ui);
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        legend_strip(ui);
+                    });
                 });
             } else {
                 legend_wrapped = true;

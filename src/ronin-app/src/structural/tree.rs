@@ -1420,6 +1420,19 @@ fn draw_indent_guides(ui: &Ui, depth: usize, top: f32, bottom: f32) {
     }
 }
 
+/// An inline single-line editor whose width **fits its content** (E023): it matches the
+/// monospace value summary's width (so the field doesn't jump wide when you click to edit)
+/// and auto-grows as you type (recomputed each frame), clamped to the available width.
+fn fit_singleline(ui: &mut Ui, text: &mut String) -> egui::Response {
+    let w = (crate::structural::table::text_px_width(ui, text, egui::TextStyle::Monospace) + 12.0)
+        .clamp(48.0, ui.available_width());
+    ui.add(
+        egui::TextEdit::singleline(text)
+            .font(egui::TextStyle::Monospace)
+            .desired_width(w),
+    )
+}
+
 /// Render the discoverable **rename** control for a node whose key is renameable
 /// (FR-003/FR-022): a struct field or map/variant entry, never a list index. When a
 /// rename is open it renders an inline text field that commits on Enter (a collision
@@ -1649,7 +1662,7 @@ fn render_leaf_editor(ui: &mut Ui, node: &TreeNode, ctx: &mut RenderCtx) {
                     .as_ref()
                     .map(|(_, t)| t.clone())
                     .unwrap_or_default();
-                let resp = ui.text_edit_singleline(&mut text);
+                let resp = fit_singleline(ui, &mut text);
                 *ctx.draft = Some((node.node_ref.clone(), text.clone()));
                 if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                     *ctx.pending = Some(PendingAction::SetValue {
@@ -1724,7 +1737,7 @@ fn render_option_editor(ui: &mut Ui, node: &TreeNode, ctx: &mut RenderCtx) {
                 .as_ref()
                 .map(|(_, t)| t.clone())
                 .unwrap_or_default();
-            let resp = ui.text_edit_singleline(&mut text);
+            let resp = fit_singleline(ui, &mut text);
             *ctx.draft = Some((node.node_ref.clone(), text.clone()));
             if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                 *ctx.pending = Some(PendingAction::SetValue {
