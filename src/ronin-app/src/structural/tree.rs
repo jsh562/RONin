@@ -1104,7 +1104,7 @@ pub fn render_tree_view(ui: &mut Ui, doc: &mut EditorDocument, worker: &ReparseW
                 if i > 0 {
                     ui.separator();
                 }
-                render_node(ui, root, None, 0, &mut ctx);
+                render_node(ui, root, None, &mut ctx);
             }
         });
 
@@ -1315,19 +1315,15 @@ pub fn set_subtree_open(ctx: &egui::Context, doc_id: u64, node: &TreeNode, open:
 
 /// Render one tree node row + (recursively) its expanded children. `sibling` is
 /// `Some` for a child within a collection (it then offers reorder/remove controls),
-/// `None` for the root; `depth` is the node's nesting level (root = 0), used to draw
-/// the per-level indent guides in the left margin (visual only).
+/// `None` for the root. Per-level indent guides are egui's native left vline
+/// (`Visuals::indent_has_left_vline`, on by default), drawn by each `CollapsingState`
+/// body's indented region — no custom guide painting (which previously doubled up).
 fn render_node(
     ui: &mut Ui,
     node: &TreeNode,
     sibling: Option<&SiblingCtx>,
-    depth: usize,
     ctx: &mut RenderCtx,
 ) {
-    // Indent guides: a thin vertical line per nesting level in the left margin,
-    // painted across this node row's vertical extent (visual only — no model change).
-    let row_top = ui.cursor().top();
-
     let indicator = node_indicator(node);
     let header = node_header(node, ui);
     let summary = node_summary_text(node);
@@ -1375,7 +1371,7 @@ fn render_node(
                     index: i,
                     count,
                 };
-                render_node(ui, child, Some(&sib), depth + 1, ctx);
+                render_node(ui, child, Some(&sib), ctx);
             }
         });
     } else {
@@ -1390,33 +1386,6 @@ fn render_node(
             render_rename_control(ui, node, sibling, ctx);
             render_sibling_controls(ui, node, sibling, ctx.pending);
         });
-    }
-
-    // Paint the indent guides over this row's vertical extent (after layout so the
-    // row's height is known). One thin vertical line per ancestor level (depth), in a
-    // weak theme color, in the left margin.
-    let row_bottom = ui.cursor().top();
-    draw_indent_guides(ui, depth, row_top, row_bottom);
-}
-
-/// Draw `depth` thin vertical guide lines in the left margin spanning `[top, bottom)`
-/// (E013 / Part B — indent guides). Visual only: it paints over already-laid-out rows
-/// and reads nothing from the model. A weak theme color keeps the guides subtle.
-fn draw_indent_guides(ui: &Ui, depth: usize, top: f32, bottom: f32) {
-    if depth == 0 || bottom <= top {
-        return;
-    }
-    /// Horizontal spacing between adjacent indent guide lines (px).
-    const STEP: f32 = 14.0;
-    let left = ui.max_rect().left() + 4.0;
-    let color = ui.visuals().weak_text_color().gamma_multiply(0.5);
-    let painter = ui.painter();
-    for level in 0..depth {
-        let x = left + level as f32 * STEP;
-        painter.line_segment(
-            [egui::pos2(x, top), egui::pos2(x, bottom)],
-            egui::Stroke::new(1.0, color),
-        );
     }
 }
 
