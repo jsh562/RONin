@@ -90,7 +90,7 @@ jobs:
       - name: Install cargo-semver-checks + cargo-cyclonedx + actionlint (pinned action)
         uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
         with:
-          tool: cargo-semver-checks@0.42.0,cargo-cyclonedx@0.5.7,actionlint
+          tool: cargo-semver-checks@0.48.0,cargo-cyclonedx@0.5.7,actionlint
 
       # ----------------------------------------------------------------------
       # PURE OFFLINE CHECK SCRIPTS (no tooling needed; also runnable locally).
