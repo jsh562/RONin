@@ -124,7 +124,10 @@ jobs:
           # GITHUB_TOKEN for opening the PR — scoped by the job `permissions`
           # above (contents+pull-requests write only). NOT a publish secret.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: release-plz release-pr --config release-plz.toml
+        # release-plz 0.3.135 doesn't auto-read GITHUB_TOKEN from the env for this
+        # subcommand; pass it explicitly via --git-token (value still comes from the
+        # env secret above, so it isn't inlined into the command).
+        run: release-plz release-pr --config release-plz.toml --git-token "${GITHUB_TOKEN}"
 
   # ===========================================================================
   # PUBLISH (OR-005 / HINT-002): the maintainer-pushed UMBRELLA tag `vX.Y.Z` is
@@ -188,4 +191,6 @@ jobs:
           # uses it only for read metadata, NOT to create a GitHub Release
           # (git_release_enable = false).
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: release-plz release --config release-plz.toml
+        # Pass the git token explicitly (release-plz 0.3.135 doesn't auto-read the
+        # env var here); CARGO_REGISTRY_TOKEN above is the crates.io auth.
+        run: release-plz release --config release-plz.toml --git-token "${GITHUB_TOKEN}"
