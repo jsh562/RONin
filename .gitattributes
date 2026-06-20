@@ -1,0 +1,10 @@
+# Canonical line endings: LF in the working tree on every platform.
+#
+# The repo's blobs are already LF; without this, `core.autocrlf=true` checks them
+# out as CRLF on Windows, which breaks byte-identity tests (e.g. bevy_elision's
+# shrink->expand->shrink) on the Windows CI `test` job. Forcing eol=lf keeps the
+# working tree LF everywhere so those tests pass cross-platform.
+* text=auto eol=lf
+
+# Binary assets must never be line-ending converted.
+*.png binary
