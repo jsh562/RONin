@@ -24,11 +24,11 @@
 
 use std::path::PathBuf;
 
-use ronin_core::parse;
-use ronin_types::{BevyRegistry, BevySource, TypeSource};
 use ronin_app::bevy::{
     validate_scene, SceneDiagnostic, SceneDiagnosticCode, SceneModel, SceneSeverity,
 };
+use ronin_core::parse;
+use ronin_types::{BevyRegistry, BevySource, TypeSource};
 use serde_json::Value;
 
 /// Load a `.scn.ron` fixture's source text by file name.

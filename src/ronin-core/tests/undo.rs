@@ -202,7 +202,10 @@ fn misconfigured_cap_falls_back_to_default_never_unbounded() {
         stack.cap().max_count,
         ronin_core::undo::DEFAULT_UNDO_COUNT_CAP
     );
-    assert_eq!(stack.cap().max_bytes, ronin_core::undo::DEFAULT_UNDO_BYTE_CAP);
+    assert_eq!(
+        stack.cap().max_bytes,
+        ronin_core::undo::DEFAULT_UNDO_BYTE_CAP
+    );
 }
 
 // ---------------------------------------------------------------------------

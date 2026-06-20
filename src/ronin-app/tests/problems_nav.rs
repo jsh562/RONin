@@ -112,8 +112,8 @@ fn problems_panel_shows_empty_state_for_no_diagnostics() {
 
 #[test]
 fn problems_panel_orders_rows_by_source_location_without_mutating_input() {
-    use ronin_core::{DiagnosticCode, Severity};
     use ronin_app::diagnostics_map::DiagnosticView;
+    use ronin_core::{DiagnosticCode, Severity};
 
     // Two diagnostics supplied out of source order: the input order must be
     // preserved (returned index refers to the original slice), while display is

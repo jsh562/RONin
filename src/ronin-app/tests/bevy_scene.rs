@@ -9,8 +9,8 @@
 
 use std::path::PathBuf;
 
-use ronin_core::parse;
 use ronin_app::bevy::{SceneModel, SceneValueKind, SceneValueRef};
+use ronin_core::parse;
 
 /// Load a `.scn.ron` fixture's source text by file name.
 fn fixture(name: &str) -> String {

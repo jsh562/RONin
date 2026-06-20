@@ -177,7 +177,8 @@ fn unrecognized_kind_degrades_to_unknown_with_diagnostic() {
         acq.diagnostics
             .iter()
             .any(|d| d.subject == "some_mod::experimental::FancyThing"
-                && d.category == ronin_types::diagnostics::DiagnosticCategory::UnsupportedConstruct),
+                && d.category
+                    == ronin_types::diagnostics::DiagnosticCategory::UnsupportedConstruct),
         "the degradation is recorded as a non-fatal diagnostic"
     );
     // Diagnostics carry the source provenance.

@@ -22,7 +22,6 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use ronin_core::{ast, parse, SyntaxNode};
 use ronin_app::document::EditorDocument;
 use ronin_app::reparse::ReparseWorker;
 use ronin_app::structural::classifier::{classify, FallbackReason};
@@ -31,6 +30,7 @@ use ronin_app::structural::view_state::{
     ActiveView, FocusSurface, PathStep, SectionOverride, SectionRendering, StructuralPath,
     ViewSelectionAndFocus,
 };
+use ronin_core::{ast, parse, SyntaxNode};
 
 /// Request a reparse and spin-poll until a current result installs, or panic on
 /// timeout. Drives the *real* off-frame worker to completion.
@@ -1090,9 +1090,8 @@ fn navigator_lists_sections_and_selection_switches_grid() {
     let before = doc.buffer.clone();
 
     // The scan finds all three sections (a RecordList, a TupleList, a RecordMap).
-    let sections = ronin_app::structural::sections::scan_table_sections(
-        &doc.parse.as_ref().unwrap().cst,
-    );
+    let sections =
+        ronin_app::structural::sections::scan_table_sections(&doc.parse.as_ref().unwrap().cst);
     use ronin_app::structural::sections::SectionShape as Sh;
     assert!(sections.iter().any(|s| s.shape == Sh::RecordList));
     assert!(sections.iter().any(|s| s.shape == Sh::TupleList));
@@ -1119,18 +1118,23 @@ fn navigator_lists_sections_and_selection_switches_grid() {
             "the outline lists the `rows` list node"
         );
         assert!(
-            harness.query_all_by_label_contains("coords").next().is_some(),
+            harness
+                .query_all_by_label_contains("coords")
+                .next()
+                .is_some(),
             "the outline lists the `coords` list node"
         );
         assert!(
-            harness.query_all_by_label_contains("hulls").next().is_some(),
+            harness
+                .query_all_by_label_contains("hulls")
+                .next()
+                .is_some(),
             "the outline lists the `hulls` map node"
         );
     }
 
     // Select the `coords` TupleList section by path (byte-free view-state write).
-    let coords_path =
-        StructuralPath::from_steps(vec![PathStep::Field("coords".to_string())]);
+    let coords_path = StructuralPath::from_steps(vec![PathStep::Field("coords".to_string())]);
     doc.borrow_mut()
         .view_state_mut()
         .set_selected_table_section(Some(coords_path.clone()));
@@ -1215,7 +1219,10 @@ fn table_sections_navigator_groups_lists_dims_and_shares_grid() {
             });
         harness.run();
         assert!(
-            harness.query_all_by_label_contains("Tables").next().is_some(),
+            harness
+                .query_all_by_label_contains("Tables")
+                .next()
+                .is_some(),
             "the grouped-sections navigator shows its `Tables` header"
         );
         assert!(
@@ -1294,10 +1301,8 @@ fn scalar_only_document_renders_root_as_field_value_grid_never_empty() {
     // The root struct DOES project a field/value table via `derive_any` even though the
     // scanner finds no strict table-able section.
     assert!(
-        ronin_app::structural::sections::scan_table_sections(
-            &doc.parse.as_ref().unwrap().cst
-        )
-        .is_empty(),
+        ronin_app::structural::sections::scan_table_sections(&doc.parse.as_ref().unwrap().cst)
+            .is_empty(),
         "the scalar-only doc has no strict table-able section"
     );
 
@@ -1404,8 +1409,7 @@ fn clicking_nested_table_cell_switches_grid_to_nested_path_byte_free() {
             "opening a List as a table records no tree drill-in return"
         );
         assert_eq!(
-            d.buffer,
-            before,
+            d.buffer, before,
             "opening a nested collection as a table changes zero bytes"
         );
     }
@@ -1425,7 +1429,10 @@ fn clicking_nested_table_cell_switches_grid_to_nested_path_byte_free() {
         harness.run();
         // The nested grid's single `value` column header renders.
         assert!(
-            harness.query_all_by_label_contains("value").next().is_some(),
+            harness
+                .query_all_by_label_contains("value")
+                .next()
+                .is_some(),
             "the nested scalar list renders a single `value` column grid"
         );
         // The breadcrumb `rows` segment is a clickable button (rows is an openable list).
@@ -1446,11 +1453,7 @@ fn clicking_nested_table_cell_switches_grid_to_nested_path_byte_free() {
             Some(&rows_path),
             "clicking the breadcrumb `rows` segment navigates the grid back to the rows list"
         );
-        assert_eq!(
-            d.buffer,
-            before,
-            "breadcrumb navigation changes zero bytes"
-        );
+        assert_eq!(d.buffer, before, "breadcrumb navigation changes zero bytes");
     }
 }
 
@@ -1612,7 +1615,10 @@ fn outline_lists_container_nodes_not_scalar_leaves_and_selecting_switches_grid()
             "the outline lists the `rows` container node"
         );
         assert!(
-            harness.query_all_by_label_contains("coords").next().is_some(),
+            harness
+                .query_all_by_label_contains("coords")
+                .next()
+                .is_some(),
             "the outline lists the `coords` container node"
         );
 
@@ -1662,7 +1668,10 @@ fn outline_lists_container_nodes_not_scalar_leaves_and_selecting_switches_grid()
         // Falls back to the root field/value grid (the leading `(field)` column renders),
         // never a scalar leaf and never empty.
         assert!(
-            harness.query_all_by_label_contains("(field)").next().is_some(),
+            harness
+                .query_all_by_label_contains("(field)")
+                .next()
+                .is_some(),
             "a non-table-able stored selection falls back to the root field/value grid"
         );
     }
@@ -1682,7 +1691,8 @@ fn grouped_seam_renders_an_editable_grid_grouped_by_the_selected_field() {
     // A RecordList whose `kind` field has values x, y, x → grouping by `kind` clusters the
     // two "x" rows together; the grid renders the `kind` column first plus the values.
     doc.buffer =
-        "[\n    (kind: \"x\", n: 1),\n    (kind: \"y\", n: 2),\n    (kind: \"x\", n: 3),\n]".to_string();
+        "[\n    (kind: \"x\", n: 1),\n    (kind: \"y\", n: 2),\n    (kind: \"x\", n: 3),\n]"
+            .to_string();
     doc.on_edit();
     drive_reparse(&mut doc, &worker);
     // View the root list, grouped by column 0 (`kind`, first-seen).
@@ -1708,7 +1718,10 @@ fn grouped_seam_renders_an_editable_grid_grouped_by_the_selected_field() {
         "the group field `kind` is present (column header / picker)"
     );
     assert!(
-        harness.query_all_by_label_contains("\"x\"").next().is_some(),
+        harness
+            .query_all_by_label_contains("\"x\"")
+            .next()
+            .is_some(),
         "a grouped data cell value renders"
     );
 }

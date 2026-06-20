@@ -148,14 +148,15 @@ fn every_sample_parses_with_zero_error_diagnostics() {
 #[test]
 fn tables_sample_finds_every_table_shape_and_nested_sections() {
     let src = sample("showcase_tables.ron");
-    assert_eq!(parse_error_count(&src), 0, "tables sample must be valid RON");
+    assert_eq!(
+        parse_error_count(&src),
+        0,
+        "tables sample must be valid RON"
+    );
 
     let cst = parse(&src);
     let sections = scan_table_sections(&cst);
-    assert!(
-        !sections.is_empty(),
-        "expected table sections, found none"
-    );
+    assert!(!sections.is_empty(), "expected table sections, found none");
 
     let by_shape = |shape: SectionShape| sections.iter().filter(|s| s.shape == shape).count();
 
@@ -205,7 +206,10 @@ fn tables_sample_finds_every_table_shape_and_nested_sections() {
 
     // Nested sections exist: the `cells` TupleLists live inside the `hulls`
     // RecordMap values, so there must be MORE than the three top-level sections.
-    let nested_tuple_lists = tuple_lists.iter().filter(|s| s.label.contains('\u{25B8}')).count();
+    let nested_tuple_lists = tuple_lists
+        .iter()
+        .filter(|s| s.label.contains('\u{25B8}'))
+        .count();
     assert!(
         nested_tuple_lists >= 1,
         "expected at least one NESTED tuple-list section (a hull's `cells`), \
@@ -264,7 +268,11 @@ fn fallbacks_sample_triggers_each_reason() {
 #[test]
 fn interop_sample_emits_each_loss_code() {
     let src = sample("showcase_interop.ron");
-    assert_eq!(parse_error_count(&src), 0, "interop sample must be valid RON");
+    assert_eq!(
+        parse_error_count(&src),
+        0,
+        "interop sample must be valid RON"
+    );
 
     let cst = parse(&src);
 
@@ -276,14 +284,14 @@ fn interop_sample_emits_each_loss_code() {
     // Every achievable code (a valid RON file cannot produce RON-I0010
     // UnparseableRegion — that needs an unparseable region — so it is excluded).
     let expected = [
-        LossKind::StructName,    // RON-I0001 — named structs (Showcase, Inner)
-        LossKind::TupleVsList,   // RON-I0002 — the anonymous (1, 2, 3) tuple
-        LossKind::Char,          // RON-I0003 — 'x'
-        LossKind::EnumTagging,   // RON-I0004 — Running
-        LossKind::NonStringKey,  // RON-I0005 — integer map keys 1, 2
-        LossKind::UnitVsNull,    // RON-I0006 — ()
-        LossKind::RawString,     // RON-I0007 — r#"..."#
-        LossKind::TrailingComma, // RON-I0008 — a trailing comma
+        LossKind::StructName,     // RON-I0001 — named structs (Showcase, Inner)
+        LossKind::TupleVsList,    // RON-I0002 — the anonymous (1, 2, 3) tuple
+        LossKind::Char,           // RON-I0003 — 'x'
+        LossKind::EnumTagging,    // RON-I0004 — Running
+        LossKind::NonStringKey,   // RON-I0005 — integer map keys 1, 2
+        LossKind::UnitVsNull,     // RON-I0006 — ()
+        LossKind::RawString,      // RON-I0007 — r#"..."#
+        LossKind::TrailingComma,  // RON-I0008 — a trailing comma
         LossKind::DroppedComment, // RON-I0009 — a comment, dropped under pure JSON
     ];
     for kind in expected {
@@ -341,10 +349,7 @@ fn bevy_sample_is_recognized_as_a_scene() {
         !model.resources().is_empty(),
         "the scene must read resources"
     );
-    assert!(
-        !model.entities().is_empty(),
-        "the scene must read entities"
-    );
+    assert!(!model.entities().is_empty(), "the scene must read entities");
     let component_count = model.components().count();
     assert!(
         component_count >= 3,

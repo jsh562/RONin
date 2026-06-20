@@ -129,7 +129,8 @@ fn type_error_yields_squiggle_and_problem_then_refreshes_on_fix() {
             .unwrap()
         + 1;
     let mismatch = type_views.iter().find(|v| {
-        v.code == ronin_core::DiagnosticCode::TypeMismatch && v.char_range == (value_start, value_end)
+        v.code == ronin_core::DiagnosticCode::TypeMismatch
+            && v.char_range == (value_start, value_end)
     });
     assert!(
         mismatch.is_some(),

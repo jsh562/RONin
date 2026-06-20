@@ -9,11 +9,11 @@
 //! and surfaces the residual ambiguity. Assertions key on the reconstructed RON
 //! TEXT shape (and the serde `ron` grammar cross-check), never on detail wording.
 
+use ronin_app::interop::{json_to_ron, JsonToRonBinding};
 use ronin_types::extension::{RonKind, RonTypeExtension};
 use ronin_types::model::{
     Discriminator, Field, NodeKind, Primitive, TypeModel, TypeNode, TypeRef, Variant, VariantShape,
 };
-use ronin_app::interop::{json_to_ron, JsonToRonBinding};
 
 /// Reconstruct `json` unbound (best-effort) and return the RON text + notes.
 fn unbound(json: serde_json::Value) -> (String, Vec<String>) {

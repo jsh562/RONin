@@ -180,15 +180,31 @@ fn scalar_cells_carry_their_type_for_the_indicator() {
             .unwrap_or_else(|| panic!("column {name} present"))
     };
 
-    assert_eq!(model.cell(0, col("i")).unwrap().scalar_type_name(), Some("integer"));
-    assert_eq!(model.cell(0, col("f")).unwrap().scalar_type_name(), Some("float"));
-    assert_eq!(model.cell(0, col("s")).unwrap().scalar_type_name(), Some("string"));
-    assert_eq!(model.cell(0, col("b")).unwrap().scalar_type_name(), Some("bool"));
+    assert_eq!(
+        model.cell(0, col("i")).unwrap().scalar_type_name(),
+        Some("integer")
+    );
+    assert_eq!(
+        model.cell(0, col("f")).unwrap().scalar_type_name(),
+        Some("float")
+    );
+    assert_eq!(
+        model.cell(0, col("s")).unwrap().scalar_type_name(),
+        Some("string")
+    );
+    assert_eq!(
+        model.cell(0, col("b")).unwrap().scalar_type_name(),
+        Some("bool")
+    );
 
     // A nested-LIST cell stays NestedTable and carries no scalar type indicator.
     let tags = model.cell(0, col("tags")).unwrap();
     assert_eq!(tags.class, CellClass::NestedTable);
-    assert_eq!(tags.scalar_type_name(), None, "a nested cell carries no scalar type");
+    assert_eq!(
+        tags.scalar_type_name(),
+        None,
+        "a nested cell carries no scalar type"
+    );
 }
 
 #[test]
@@ -207,7 +223,11 @@ fn struct_cell_stays_nested_and_carries_no_scalar_type() {
         .position(|c| c.field_name == "meta")
         .expect("meta column");
     let cell = model.cell(0, meta).expect("row 0 / meta cell");
-    assert_eq!(cell.class, CellClass::Nested, "a struct cell stays a drill-in");
+    assert_eq!(
+        cell.class,
+        CellClass::Nested,
+        "a struct cell stays a drill-in"
+    );
     assert_eq!(cell.scalar_type_name(), None);
 }
 
@@ -855,7 +875,12 @@ fn derive_combined_unions_child_rows_with_parent_key_column() {
 
     // A data cell's value_ref is the REAL nested path (hulls ▸ (2) ▸ cells ▸ [1] ▸ x),
     // resolvable against the live CST so editing works.
-    let x_ref = model.cell(3, 1).unwrap().value_ref.clone().expect("x cell ref");
+    let x_ref = model
+        .cell(3, 1)
+        .unwrap()
+        .value_ref
+        .clone()
+        .expect("x cell ref");
     assert_eq!(
         x_ref,
         StructuralPath::from_steps(vec![
@@ -883,7 +908,8 @@ fn derive_combined_unions_child_rows_with_parent_key_column() {
 
 #[test]
 fn record_map_model_has_leading_readonly_key_column() {
-    let cst = ronin_core::parse("(hulls: { (1): (hp: 1, name: \"a\"), (2): (hp: 2, name: \"b\") })");
+    let cst =
+        ronin_core::parse("(hulls: { (1): (hp: 1, name: \"a\"), (2): (hp: 2, name: \"b\") })");
     let section = StructuralPath::from_steps(vec![PathStep::Field("hulls".to_string())]);
     let model = TableModel::derive_section(&cst, &section, Shape::RecordMap, &[])
         .expect("record map derives a model");
@@ -892,7 +918,10 @@ fn record_map_model_has_leading_readonly_key_column() {
     assert_eq!(model.columns[0].field_name, "(key)");
     let key_cell = model.cell(0, 0).expect("row 0 key cell");
     assert_eq!(key_cell.class, CellClass::ReadOnly);
-    assert!(key_cell.value_ref.is_none(), "read-only key carries no value_ref");
+    assert!(
+        key_cell.value_ref.is_none(),
+        "read-only key carries no value_ref"
+    );
     assert_eq!(key_cell.text.as_deref(), Some("(1)"));
 
     // The value-field columns follow (union of value record fields).
@@ -1013,10 +1042,7 @@ fn derive_any_over_a_scalar_list_has_single_value_column() {
     assert_eq!(cell.class, CellClass::Scalar);
     assert_eq!(cell.text.as_deref(), Some("20"));
     // The value cell IS the element itself (path / Index(1)).
-    assert_eq!(
-        cell.value_ref,
-        Some(path.child(PathStep::Index(1)))
-    );
+    assert_eq!(cell.value_ref, Some(path.child(PathStep::Index(1))));
 }
 
 #[test]
@@ -1067,7 +1093,9 @@ fn derive_any_over_a_single_struct_is_a_field_value_grid() {
     // The value cell IS the field value itself (root / Field("x")).
     assert_eq!(
         value_cell.value_ref,
-        Some(StructuralPath::from_steps(vec![PathStep::Field("x".to_string())]))
+        Some(StructuralPath::from_steps(vec![PathStep::Field(
+            "x".to_string()
+        )]))
     );
 }
 
@@ -1119,7 +1147,10 @@ fn derive_any_over_a_single_tuple_is_a_one_row_positional_grid() {
     assert_eq!(c1.class, CellClass::Scalar);
     assert_eq!(c1.text.as_deref(), Some("2"));
     // Each cell is the member at root / Index(i).
-    assert_eq!(c1.value_ref, Some(StructuralPath::from_steps(vec![PathStep::Index(1)])));
+    assert_eq!(
+        c1.value_ref,
+        Some(StructuralPath::from_steps(vec![PathStep::Index(1)]))
+    );
 }
 
 #[test]
@@ -1144,13 +1175,21 @@ fn list_cell_is_nested_table_while_struct_cell_stays_nested() {
     let cst = ronin_core::parse("[(items: [1, 2], meta: (k: 1))]");
     let model = AnyTableModel::derive_any(&cst, &StructuralPath::root(), &[]).expect("projects");
 
-    let items = model.columns.iter().position(|c| c.field_name == "items").unwrap();
+    let items = model
+        .columns
+        .iter()
+        .position(|c| c.field_name == "items")
+        .unwrap();
     assert_eq!(
         model.cell(0, items).unwrap().class,
         CellClass::NestedTable,
         "a List cell opens as a table"
     );
-    let meta = model.columns.iter().position(|c| c.field_name == "meta").unwrap();
+    let meta = model
+        .columns
+        .iter()
+        .position(|c| c.field_name == "meta")
+        .unwrap();
     assert_eq!(
         model.cell(0, meta).unwrap().class,
         CellClass::Nested,
@@ -1164,22 +1203,23 @@ fn breadcrumb_prefix_chain_marks_list_map_segments_clickable() {
     // clickable iff its prefix resolves to a List or Map (the openable kinds).
     // Doc: root struct → `hulls` MAP → key (1) → struct → `cells` LIST → index 0 →
     // struct → `coord` TUPLE.
-    let cst = ronin_core::parse(
-        "(hulls: { (1): (cells: [(coord: (0, 0))]) })",
-    );
+    let cst = ronin_core::parse("(hulls: { (1): (cells: [(coord: (0, 0))]) })");
     // Path down to the `coord` tuple value.
     let deep = StructuralPath::from_steps(vec![
-        PathStep::Field("hulls".to_string()),  // map (openable)
-        PathStep::Key("(1)".to_string()),      // struct (not openable)
-        PathStep::Field("cells".to_string()),  // list (openable)
-        PathStep::Index(0),                    // struct (not openable)
-        PathStep::Field("coord".to_string()),  // tuple (not openable)
+        PathStep::Field("hulls".to_string()), // map (openable)
+        PathStep::Key("(1)".to_string()),     // struct (not openable)
+        PathStep::Field("cells".to_string()), // list (openable)
+        PathStep::Index(0),                   // struct (not openable)
+        PathStep::Field("coord".to_string()), // tuple (not openable)
     ]);
     let segs = breadcrumb_segments(&cst, &deep);
 
     // One segment per prefix: root + 5 steps = 6 segments.
     let labels: Vec<_> = segs.iter().map(|s| s.label.clone()).collect();
-    assert_eq!(labels, vec!["root", "hulls", "(1)", "cells", "[0]", "coord"]);
+    assert_eq!(
+        labels,
+        vec!["root", "hulls", "(1)", "cells", "[0]", "coord"]
+    );
 
     // Clickability: root (the top struct) is NOT a list/map; `hulls` is a map; `(1)`
     // is a struct; `cells` is a list; `[0]` is a struct; `coord` is a tuple.
@@ -1283,7 +1323,11 @@ fn paste_block_is_one_undo_unit() {
         .expect("the block paste applies");
     drive_reparse(&mut doc, &worker);
 
-    assert!(doc.buffer.contains("name: \"x\""), "row 0 name updated: {}", doc.buffer);
+    assert!(
+        doc.buffer.contains("name: \"x\""),
+        "row 0 name updated: {}",
+        doc.buffer
+    );
     assert!(doc.buffer.contains("hp: 10"));
     assert!(doc.buffer.contains("name: \"y\""));
     assert!(doc.buffer.contains("hp: 20"));
@@ -1291,7 +1335,10 @@ fn paste_block_is_one_undo_unit() {
     assert!(doc.buffer.contains("(name: \"c\", hp: 3)"));
 
     // ONE undo restores the whole block (single undo unit).
-    assert!(doc.undo(Instant::now()), "one undo steps back the whole batch");
+    assert!(
+        doc.undo(Instant::now()),
+        "one undo steps back the whole batch"
+    );
     assert_eq!(
         doc.buffer, before,
         "one undo restores exact prior bytes for the entire block"
@@ -1460,18 +1507,16 @@ fn double_click_a_scalar_cell_opens_the_inline_editor() {
     let worker_ui = Rc::clone(&worker);
     // A small step_dt so the two queued clicks register as a double-click (see
     // `click_selects_*` note — the default 0.25s/frame spaces them too far apart).
-    let mut harness = Harness::builder()
-        .with_step_dt(0.05)
-        .build_ui(move |ui| {
-            let mut d = doc_ui.borrow_mut();
-            render_table_view(
-                ui,
-                &mut d,
-                &worker_ui,
-                &StructuralPath::root(),
-                SectionShape::RecordList,
-            );
-        });
+    let mut harness = Harness::builder().with_step_dt(0.05).build_ui(move |ui| {
+        let mut d = doc_ui.borrow_mut();
+        render_table_view(
+            ui,
+            &mut d,
+            &worker_ui,
+            &StructuralPath::root(),
+            SectionShape::RecordList,
+        );
+    });
     harness.run();
 
     // Double-click row 0 / hp ("11") → begins editing that cell.
@@ -1627,10 +1672,21 @@ fn nav_panel_width_clamps_to_a_sensible_range() {
     // E023 — the navigator side-panel fits its widest label but stays within a clamp so it
     // never collapses or eats the window.
     use ronin_app::panels::nav_panel_width;
-    assert_eq!(nav_panel_width(0.0), 200.0, "tiny content → the minimum width");
-    assert_eq!(nav_panel_width(10_000.0), 460.0, "huge content → the maximum width");
+    assert_eq!(
+        nav_panel_width(0.0),
+        200.0,
+        "tiny content → the minimum width"
+    );
+    assert_eq!(
+        nav_panel_width(10_000.0),
+        460.0,
+        "huge content → the maximum width"
+    );
     let mid = nav_panel_width(300.0);
-    assert!((200.0..=460.0).contains(&mid), "mid content stays in range, got {mid}");
+    assert!(
+        (200.0..=460.0).contains(&mid),
+        "mid content stays in range, got {mid}"
+    );
 }
 
 #[test]
@@ -1645,7 +1701,11 @@ fn group_rows_by_partitions_rows_by_field_value() {
         &worker,
     );
     let model = model_of(&doc);
-    let k = model.columns.iter().position(|c| c.field_name == "k").unwrap();
+    let k = model
+        .columns
+        .iter()
+        .position(|c| c.field_name == "k")
+        .unwrap();
 
     let groups = group_rows_by(&model, &[k]);
     let keys: Vec<_> = groups.iter().map(|(key, _)| key.clone()).collect();
@@ -1675,19 +1735,48 @@ fn grouped_view_model_clusters_rows_and_projects_columns() {
         &worker,
     );
     let model = model_of(&doc); // columns: k, a, z
-    let col = |n: &str| model.columns.iter().position(|c| c.field_name == n).unwrap();
+    let col = |n: &str| {
+        model
+            .columns
+            .iter()
+            .position(|c| c.field_name == n)
+            .unwrap()
+    };
     let (k, a) = (col("k"), col("a"));
 
     // Group by k, show only [a] — k is forced first, z excluded.
     let g = grouped_view_model(&model, &[k], &[a]);
     let names: Vec<_> = g.columns.iter().map(|c| c.field_name.clone()).collect();
-    assert_eq!(names, vec!["k".to_string(), "a".to_string()], "group col first, then shown cols");
+    assert_eq!(
+        names,
+        vec!["k".to_string(), "a".to_string()],
+        "group col first, then shown cols"
+    );
 
     // Rows cluster by k's sorted value: "a" (orig row 1) then "b" (orig rows 0, 2).
-    let kt: Vec<_> = g.rows.iter().map(|r| r.cells[0].text.clone().unwrap_or_default()).collect();
-    assert_eq!(kt, vec!["\"a\"".to_string(), "\"b\"".to_string(), "\"b\"".to_string()]);
-    let at: Vec<_> = g.rows.iter().map(|r| r.cells[1].text.clone().unwrap_or_default()).collect();
-    assert_eq!(at, vec!["2".to_string(), "1".to_string(), "3".to_string()], "rows follow the clustered order");
+    let kt: Vec<_> = g
+        .rows
+        .iter()
+        .map(|r| r.cells[0].text.clone().unwrap_or_default())
+        .collect();
+    assert_eq!(
+        kt,
+        vec![
+            "\"a\"".to_string(),
+            "\"b\"".to_string(),
+            "\"b\"".to_string()
+        ]
+    );
+    let at: Vec<_> = g
+        .rows
+        .iter()
+        .map(|r| r.cells[1].text.clone().unwrap_or_default())
+        .collect();
+    assert_eq!(
+        at,
+        vec!["2".to_string(), "1".to_string(), "3".to_string()],
+        "rows follow the clustered order"
+    );
 
     // Kept cells preserve value_ref → still editable by path.
     assert!(
@@ -1698,18 +1787,40 @@ fn grouped_view_model_clusters_rows_and_projects_columns() {
     // No group + no show → all columns, original row order.
     let id = grouped_view_model(&model, &[], &[]);
     let names2: Vec<_> = id.columns.iter().map(|c| c.field_name.clone()).collect();
-    assert_eq!(names2, vec!["k".to_string(), "a".to_string(), "z".to_string()]);
-    let kt2: Vec<_> = id.rows.iter().map(|r| r.cells[0].text.clone().unwrap_or_default()).collect();
-    assert_eq!(kt2, vec!["\"b\"".to_string(), "\"a\"".to_string(), "\"b\"".to_string()], "original order");
+    assert_eq!(
+        names2,
+        vec!["k".to_string(), "a".to_string(), "z".to_string()]
+    );
+    let kt2: Vec<_> = id
+        .rows
+        .iter()
+        .map(|r| r.cells[0].text.clone().unwrap_or_default())
+        .collect();
+    assert_eq!(
+        kt2,
+        vec![
+            "\"b\"".to_string(),
+            "\"a\"".to_string(),
+            "\"b\"".to_string()
+        ],
+        "original order"
+    );
 
     // Out-of-range picks are ignored and fall back to all columns / original order.
     let oob = grouped_view_model(&model, &[99], &[99]);
-    assert_eq!(oob.columns.len(), 3, "stale indices fall back to all columns");
+    assert_eq!(
+        oob.columns.len(),
+        3,
+        "stale indices fall back to all columns"
+    );
     assert_eq!(oob.rows.len(), 3);
 }
 
 /// A 2-row RecordList doc for the Excel-editing tests, wrapped for the harness closure.
-fn excel_doc() -> (std::rc::Rc<ReparseWorker>, std::rc::Rc<std::cell::RefCell<EditorDocument>>) {
+fn excel_doc() -> (
+    std::rc::Rc<ReparseWorker>,
+    std::rc::Rc<std::cell::RefCell<EditorDocument>>,
+) {
     use std::cell::RefCell;
     use std::rc::Rc;
     let worker = Rc::new(ReparseWorker::new());
@@ -1733,8 +1844,11 @@ fn clicking_another_cell_commits_the_edit_and_selects_it() {
         let hp0 = StructuralPath::root()
             .child(PathStep::Index(0))
             .child(PathStep::Field("hp".to_string()));
-        d.view_state_mut()
-            .set_focus(hp0, FocusSurface::TableCell { row: 0, column: 1 }, "99".to_string());
+        d.view_state_mut().set_focus(
+            hp0,
+            FocusSurface::TableCell { row: 0, column: 1 },
+            "99".to_string(),
+        );
     }
     let doc_ui = Rc::clone(&doc);
     let worker_ui = Rc::clone(&worker);
@@ -1778,8 +1892,11 @@ fn enter_commits_the_edit_and_moves_down() {
         let hp0 = StructuralPath::root()
             .child(PathStep::Index(0))
             .child(PathStep::Field("hp".to_string()));
-        d.view_state_mut()
-            .set_focus(hp0, FocusSurface::TableCell { row: 0, column: 1 }, "99".to_string());
+        d.view_state_mut().set_focus(
+            hp0,
+            FocusSurface::TableCell { row: 0, column: 1 },
+            "99".to_string(),
+        );
     }
     let doc_ui = Rc::clone(&doc);
     let worker_ui = Rc::clone(&worker);
@@ -1798,7 +1915,11 @@ fn enter_commits_the_edit_and_moves_down() {
     harness.run();
 
     let d = doc.borrow();
-    assert!(d.buffer.contains("hp: 99"), "Enter committed the edit: {}", d.buffer);
+    assert!(
+        d.buffer.contains("hp: 99"),
+        "Enter committed the edit: {}",
+        d.buffer
+    );
     // E024 (Excel): Enter commits then MOVES the selection down + closes the editor —
     // it no longer opens the next cell's editor.
     assert!(
@@ -1884,7 +2005,10 @@ fn typing_on_a_selected_cell_opens_the_editor_overwriting() {
         matches!(focus.surface, FocusSurface::TableCell { row: 0, column: 1 }),
         "the editor opened on the selected (row 0 / hp) cell"
     );
-    assert_eq!(focus.draft, "9", "the editor is seeded with the typed character (overwrite)");
+    assert_eq!(
+        focus.draft, "9",
+        "the editor is seeded with the typed character (overwrite)"
+    );
 }
 
 #[test]
@@ -1901,9 +2025,18 @@ fn clear_writes_resets_editable_scalars_to_type_defaults() {
     let w = clear_writes(&model, 0, 0, 1, 2);
     assert_eq!(w.len(), 6, "2 rows × 3 editable scalar columns");
     let vals: Vec<String> = w.iter().map(|(_, v)| v.clone()).collect();
-    assert!(vals.iter().filter(|v| *v == "0").count() == 2, "ints clear to 0");
-    assert!(vals.iter().filter(|v| *v == "\"\"").count() == 2, "strings clear to \"\"");
-    assert!(vals.iter().filter(|v| *v == "false").count() == 2, "bools clear to false");
+    assert!(
+        vals.iter().filter(|v| *v == "0").count() == 2,
+        "ints clear to 0"
+    );
+    assert!(
+        vals.iter().filter(|v| *v == "\"\"").count() == 2,
+        "strings clear to \"\""
+    );
+    assert!(
+        vals.iter().filter(|v| *v == "false").count() == 2,
+        "bools clear to false"
+    );
 }
 
 #[test]

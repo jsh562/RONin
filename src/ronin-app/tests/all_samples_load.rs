@@ -124,7 +124,11 @@ fn recovery_sidecars_in(dir: &Path) -> BTreeSet<String> {
 #[test]
 fn every_sample_on_disk_opens_and_renders() {
     for path in sample_paths() {
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap().to_string();
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap()
+            .to_string();
         let mut app = App::new(AppSettings::default(), None);
 
         // The REAL open path with an absolute path.
@@ -193,7 +197,12 @@ fn multi_open_session_each_tab_renders() {
     // than creating a duplicate, so this drives the real focus-existing switch via
     // the public open path. Each revisited tab must still render a tree model (the
     // cached projection from its earlier reparse), never a blank.
-    let revisit = ["sample.ron", "showcase_interop.ron", "ships.ron", "sample.ron"];
+    let revisit = [
+        "sample.ron",
+        "showcase_interop.ron",
+        "ships.ron",
+        "sample.ron",
+    ];
     let count_before_revisit = app.document_count();
     for name in revisit {
         let path = dir.join(name);
@@ -273,7 +282,11 @@ fn every_sample_table_view_is_non_empty_at_root() {
     // sample (a struct → field/value grid, a list → records/tuples/value, a map →
     // key+value). A scalar-leaf root is the only `None` case and no sample has one.
     for path in sample_paths() {
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap().to_string();
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap()
+            .to_string();
         let mut app = App::new(AppSettings::default(), None);
         app.open_file(&path);
         drive_app_reparse(&mut app);
@@ -311,7 +324,11 @@ fn sample_ron_root_renders_a_field_value_grid() {
     let model = doc
         .cached_table_model_any(&StructuralPath::root())
         .expect("sample.ron root projects a field/value grid");
-    let cols: Vec<&str> = model.columns.iter().map(|c| c.field_name.as_str()).collect();
+    let cols: Vec<&str> = model
+        .columns
+        .iter()
+        .map(|c| c.field_name.as_str())
+        .collect();
     assert_eq!(
         cols,
         vec!["(field)", "value"],

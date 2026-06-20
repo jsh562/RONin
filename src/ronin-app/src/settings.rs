@@ -1020,7 +1020,10 @@ mod tests {
         // The default app settings embed the default undo config.
         assert_eq!(AppSettings::default().undo, UndoConfig::default());
         // Defaults mirror the ronin_core::undo constants (never diverge).
-        assert_eq!(u.history_count_cap, ronin_core::undo::DEFAULT_UNDO_COUNT_CAP);
+        assert_eq!(
+            u.history_count_cap,
+            ronin_core::undo::DEFAULT_UNDO_COUNT_CAP
+        );
         assert_eq!(u.history_byte_cap, ronin_core::undo::DEFAULT_UNDO_BYTE_CAP);
         assert_eq!(
             u.effective_coalesce_window(),
