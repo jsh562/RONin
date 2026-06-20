@@ -24,13 +24,18 @@
 members = ["cargo:."]
 
 [dist]
-# Pin the dist CLI version so `dist generate --check` is reproducible and the
-# committed release.yml cannot silently drift against a newer generator
-# (OR-010 / HINT-001). The CI `release-verify` job installs THIS version via
-# taiki-e/install-action and asserts no drift.
-# TODO(OR-010): confirm this matches the dist version installed in
-# release-verify / used to (re)generate release.yml before the first release.
+# Pin the dist CLI version used by `dist plan` (release-verify) and `dist build`
+# (release.yml at release time). release.yml is hand-authored (see allow-dirty
+# below), so this is just the dist version those steps install via `cargo install`.
 cargo-dist-version = "0.30.0"
+
+# release.yml is HAND-AUTHORED (SHA-pinned actions, least-privilege per-job
+# permissions, the E002 gates re-run, and custom provenance/SBOM + channel
+# routing) — NOT dist's default generated output. `allow-dirty = ["ci"]` tells
+# dist the CI workflow is maintained by hand, so it will NOT try to regenerate or
+# freshness-check it; without this, `dist plan`/`dist build` abort with
+# "release.yml has out of date contents and needs to be regenerated".
+allow-dirty = ["ci"]
 
 # Generate CI for GitHub Actions only (Phase-1 GitHub-first — DDR-001).
 ci = "github"
