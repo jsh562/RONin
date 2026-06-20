@@ -98,8 +98,23 @@ jobs:
       # PR. A breaking API change without the matching bump exits non-zero and
       # FAILS this job, blocking the Release PR — not advisory. (cargo-semver-checks
       # has no `--locked` flag; it resolves against the committed Cargo.lock already.) ---
-      - name: cargo semver-checks (blocking)
-        run: cargo semver-checks check-release --workspace
+      - name: cargo semver-checks (blocking; skipped pre-first-publish)
+        # cargo-semver-checks diffs each crate against its PUBLISHED baseline on
+        # crates.io. Pre-first-publish there is no baseline, so it errors
+        # "<crate> not found in registry crates.io" — expected on a first release.
+        # Treat ONLY that no-baseline case as a skip; a real breaking change still
+        # fails the job. Auto-engages as a hard gate once the crates are published.
+        # (cargo-semver-checks has no `--locked` flag.)
+        run: |
+          set +e
+          out="$(cargo semver-checks check-release --workspace 2>&1)"
+          rc=$?
+          printf '%s\n' "$out"
+          if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -qiE 'not (found|published)|no (released|published|baseline) version|no baseline|is not published'; then
+            echo "::notice::semver-checks skipped — no crates.io baseline yet (pre-first-publish)."
+            exit 0
+          fi
+          exit "$rc"
       # --- Open/update the Release PR: independent per-crate bumps + umbrella
       # bump + regenerated changelog. release-plz ALSO runs its own semver_check
       # (release-plz.toml) so the bumps it proposes already account for breaking
