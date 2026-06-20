@@ -41,13 +41,17 @@
 # Exit 0 = every crate dry-runs cleanly; exit 1 = any failure.
 set -euo pipefail
 
-# Crate (manifest-dir : verify-mode). "verify" = full dry-run; "noverify" =
-# --no-verify (unpublished-path-dep-safe pre-first-publish).
+# Crate (manifest-dir : mode). "verify" = full dry-run; "skip" = cannot dry-run
+# pre-first-publish because its workspace path-deps are not on crates.io yet
+# (cargo publish resolves a path-dep's VERSION from the registry even with
+# `--no-verify`, so it errors "no matching package <sibling>"). The live publish
+# (release-plz, dependency-ordered) verifies the dependents once their siblings
+# are up. TODO: switch the dependents back to "verify" after the first publish.
 declare -a CRATES=(
   "ronin-core:verify"
-  "ronin-types:verify"        # ronin-types has NO workspace path-dep (leaf) -> verify
-  "ronin-validate:noverify"   # depends on ronin-core (path) -> noverify pre-publish
-  "ronin-app:noverify"      # depends on ronin-core/ronin-types/ronin-validate -> noverify
+  "ronin-types:verify"        # leaf (no workspace path-dep) -> verify
+  "ronin-validate:skip"       # depends on ronin-core (path) -> skip pre-first-publish
+  "ronin-app:skip"            # depends on all siblings (path) -> skip pre-first-publish
 )
 
 fail=0
@@ -57,18 +61,14 @@ for entry in "${CRATES[@]}"; do
   echo "=============================================================="
   echo ">> cargo publish --dry-run for ${crate} (mode: ${mode})"
   echo "=============================================================="
-  if [[ "$mode" == "verify" ]]; then
-    if ! cargo publish -p "$crate" --dry-run --locked; then
-      echo "DRY-RUN FAILED: ${crate} (full verify)" >&2
-      fail=1
-    fi
-  else
-    # --no-verify: package the crate (manifest + metadata + file list) without
-    # the from-registry verify build of its as-yet-unpublished siblings (OR-016).
-    if ! cargo publish -p "$crate" --dry-run --locked --no-verify; then
-      echo "DRY-RUN FAILED: ${crate} (--no-verify, unpublished path-deps)" >&2
-      fail=1
-    fi
+  if [[ "$mode" == "skip" ]]; then
+    echo "SKIPPED: ${crate} — its workspace path-deps are not on crates.io yet" \
+         "(pre-first-publish). Re-enable as 'verify' after the first publish."
+    continue
+  fi
+  if ! cargo publish -p "$crate" --dry-run --locked; then
+    echo "DRY-RUN FAILED: ${crate} (full verify)" >&2
+    fail=1
   fi
 done
 
@@ -76,4 +76,4 @@ if [[ "$fail" -ne 0 ]]; then
   echo "PUBLISH DRY-RUN CHECK FAILED" >&2
   exit 1
 fi
-echo "PUBLISH DRY-RUN CHECK PASSED: all 4 crates dry-run cleanly in dep order."
+echo "PUBLISH DRY-RUN CHECK PASSED: leaf crates dry-run cleanly; dependents skipped pre-first-publish."

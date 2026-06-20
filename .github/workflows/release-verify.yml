@@ -87,10 +87,10 @@ jobs:
       # actionlint. cargo-semver-checks / cargo-cyclonedx are in the manifest.
       - name: Install cargo-dist (matches dist-workspace.toml cargo-dist-version 0.30.0)
         run: cargo install cargo-dist@0.30.0 --locked
-      - name: Install cargo-semver-checks + cargo-cyclonedx + actionlint (pinned action)
+      - name: Install cargo-semver-checks + cargo-cyclonedx (pinned action)
         uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
         with:
-          tool: cargo-semver-checks@0.48.0,cargo-cyclonedx@0.5.7,actionlint
+          tool: cargo-semver-checks@0.48.0,cargo-cyclonedx@0.5.7
 
       # ----------------------------------------------------------------------
       # PURE OFFLINE CHECK SCRIPTS (no tooling needed; also runnable locally).
@@ -152,7 +152,12 @@ jobs:
       # --- T034 (part 2) {COMPLETES OR-017}: actionlint over ALL workflow YAML.
       # A passing result == zero actionlint findings (OR-015c). ---
       - name: actionlint (zero findings over all workflow YAML)
-        run: actionlint -color
+        # install-action / cargo-binstall can't install actionlint (it's a Go tool,
+        # not a Rust crate), so install it with Go (preinstalled on the runner) at a
+        # pinned version, then run it.
+        run: |
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+          "$(go env GOPATH)/bin/actionlint" -color
 
       # --- T032 {COMPLETES SC-003}: cargo publish --dry-run --locked per crate in
       # dependency order (ronin-core -> ronin-types -> ronin-validate -> ronin-app),
