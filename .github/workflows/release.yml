@@ -13,11 +13,12 @@
 # It NEVER publishes a crate — release-plz (release-plz.yml) is the sole
 # crates.io publisher (OR-005). So no CARGO_REGISTRY_TOKEN is referenced here.
 #
-# DRIFT (HINT-001): because this file is hand-edited after generate, the CI
-# `release-verify` job (OR-015 / T030) runs `dist generate --check` to assert the
-# committed file still matches what the pinned dist version would emit. Re-run
-# `dist generate` and re-apply the SHA pins + the provenance/SBOM steps below
-# whenever the dist version (dist-workspace.toml `cargo-dist-version`) changes.
+# NOTE (HINT-001): this file is HAND-AUTHORED (install-action / `cargo install`
+# installs + manual provenance/SBOM steps), not literal `dist generate` output, so
+# `dist generate --check` is NOT run against it (it could never match). dist itself
+# is still used at run time (`dist plan` / `dist build`) to do the cross-target
+# build/tarball/checksum/installer work; release-verify validates the config via
+# `dist plan` + the provenance/SBOM/hardening static checks.
 #
 # SHA-PIN PROVENANCE (T010):
 #   - actions/checkout / taiki-e/install-action / Swatinem/rust-cache /
@@ -97,15 +98,11 @@ jobs:
       - name: Install Rust toolchain
         # Stable pin from rust-toolchain.toml (OR-014) — same as the E002 gates.
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-      - name: Install dist (pinned, prebuilt)
-        # dist is NOT vendored on the runner; install the pinned version via the
-        # already-pinned taiki-e/install-action (same pin as gates.yml). The
-        # version MUST match dist-workspace.toml `cargo-dist-version` so the
-        # generated workflow / `dist generate --check` stay consistent (HINT-001).
-        # TODO(OR-010): keep cargo-dist@<ver> in lockstep with dist-workspace.toml.
-        uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
-        with:
-          tool: cargo-dist@0.30.0
+      - name: Install dist (from crates.io)
+        # install-action@2.82.0's manifest doesn't carry cargo-dist@0.30.0, so
+        # install it from crates.io (exact version MUST match dist-workspace.toml
+        # cargo-dist-version). Installs the `dist` binary used by the steps below.
+        run: cargo install cargo-dist@0.30.0 --locked
       - name: dist plan
         id: plan
         # `--output-format=json` emits the manifest the matrix/host jobs consume.
@@ -163,13 +160,14 @@ jobs:
           targets: ${{ matrix.target }}
       - name: Cache cargo registry + target
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-      - name: Install dist + cargo-auditable (pinned, prebuilt)
+      - name: Install cargo-auditable (pinned, prebuilt)
         uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
         with:
-          # cargo-auditable embeds dependency metadata in the binary (OR-007);
-          # cargo-dist drives the per-target build/tarball/checksum/installer.
-          # TODO(OR-010): keep cargo-dist@<ver> == dist-workspace.toml version.
-          tool: cargo-dist@0.30.0,cargo-auditable@0.7.0
+          # cargo-auditable embeds dependency metadata in the binary (OR-007).
+          tool: cargo-auditable@0.7.5
+      - name: Install dist (from crates.io)
+        # install-action's manifest lacks cargo-dist@0.30.0; install from crates.io.
+        run: cargo install cargo-dist@0.30.0 --locked
       - name: dist build (this target)
         # `--locked` is enforced by dist-workspace.toml; the auditable wrapper is
         # enabled via `cargo-auditable = true`. Tarball + SHA-256 checksum +
@@ -202,11 +200,9 @@ jobs:
           fetch-depth: 0
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-      - name: Install dist (pinned, prebuilt)
-        uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
-        with:
-          # TODO(OR-010): keep cargo-dist@<ver> == dist-workspace.toml version.
-          tool: cargo-dist@0.30.0
+      - name: Install dist (from crates.io)
+        # install-action's manifest lacks cargo-dist@0.30.0; install from crates.io.
+        run: cargo install cargo-dist@0.30.0 --locked
       - name: Download per-target artifacts
         uses: actions/download-artifact@v8 # TODO(OR-010): resolve to full commit SHA before first release — offline now; SHA not resolvable offline
         with:
@@ -254,13 +250,14 @@ jobs:
           fetch-depth: 0
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-      - name: Install dist + cargo-cyclonedx (pinned, prebuilt)
+      - name: Install cargo-cyclonedx (pinned, prebuilt)
         uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
         with:
-          # cargo-cyclonedx generates the single CycloneDX SBOM (OR-007 / T022);
-          # cargo-dist performs the Release upload/host.
-          # TODO(OR-010): keep cargo-dist@<ver> == dist-workspace.toml version.
-          tool: cargo-dist@0.30.0,cargo-cyclonedx@0.5.7
+          # cargo-cyclonedx generates the single CycloneDX SBOM (OR-007 / T022).
+          tool: cargo-cyclonedx@0.5.7
+      - name: Install dist (from crates.io)
+        # install-action's manifest lacks cargo-dist@0.30.0; install from crates.io.
+        run: cargo install cargo-dist@0.30.0 --locked
       - name: Download all artifacts
         uses: actions/download-artifact@v8 # TODO(OR-010): resolve to full commit SHA before first release — offline now; SHA not resolvable offline
         with:
