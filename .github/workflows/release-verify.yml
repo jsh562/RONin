@@ -80,12 +80,17 @@ jobs:
       # MUST match dist-workspace.toml `cargo-dist-version` so `dist generate
       # --check` compares against the SAME generator that produced release.yml
       # (HINT-001). ---
-      - name: Install dist + cargo-semver-checks + cargo-cyclonedx + actionlint (pinned)
+      # install-action@2.82.0's bundled manifest doesn't carry cargo-dist@0.30.0 or
+      # actionlint@1.7.7, so install cargo-dist from crates.io (its exact version MUST
+      # match dist-workspace.toml `cargo-dist-version` so `dist generate --check`
+      # compares against the same generator) and let install-action pick a known
+      # actionlint. cargo-semver-checks / cargo-cyclonedx are in the manifest.
+      - name: Install cargo-dist (matches dist-workspace.toml cargo-dist-version 0.30.0)
+        run: cargo install cargo-dist@0.30.0 --locked
+      - name: Install cargo-semver-checks + cargo-cyclonedx + actionlint (pinned action)
         uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
         with:
-          # TODO(OR-010): keep cargo-dist@<ver> == dist-workspace.toml
-          # cargo-dist-version (0.30.0). cargo-cyclonedx version matches release.yml.
-          tool: cargo-dist@0.30.0,cargo-semver-checks@0.42.0,cargo-cyclonedx@0.5.7,actionlint@1.7.7
+          tool: cargo-semver-checks@0.42.0,cargo-cyclonedx@0.5.7,actionlint
 
       # ----------------------------------------------------------------------
       # PURE OFFLINE CHECK SCRIPTS (no tooling needed; also runnable locally).
@@ -166,4 +171,6 @@ jobs:
       # crate; once a baseline exists on crates.io it becomes a hard breaking-change
       # gate. It is wired here so the gate is live from the first published version. ---
       - name: cargo semver-checks (blocking breaking-change gate)
-        run: cargo semver-checks check-release --locked --workspace
+        # cargo-semver-checks 0.42.0 has no `--locked` flag; it resolves against the
+        # committed Cargo.lock already.
+        run: cargo semver-checks check-release --workspace
