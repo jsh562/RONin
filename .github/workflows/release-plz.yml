@@ -92,7 +92,7 @@ jobs:
         # reproducibility (Dependabot/maintainer bumps the tool versions).
         uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
         with:
-          tool: release-plz@0.3.135,cargo-semver-checks@0.42.0
+          tool: release-plz@0.3.135,cargo-semver-checks@0.48.0
       # --- BLOCKING semver gate (OR-004 / T015 / [COMPLETES OR-004]): run
       # cargo-semver-checks as a REQUIRED, hard step BEFORE building the Release
       # PR. A breaking API change without the matching bump exits non-zero and
