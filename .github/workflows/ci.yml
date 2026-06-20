@@ -2,7 +2,7 @@
 #
 # Enforces the RONin "Verified Quality" invariants on every change. As of E011
 # (AD-003 / HINT-004) the gate jobs themselves live in the REUSABLE workflow
-# `.github/workflows/gates.yml`; this workflow only owns the PR/push/cron
+# `.github/workflows/gates.yml`; this workflow only owns the PR/push
 # *triggers* and DELEGATES to that reusable workflow via `uses:`. The release
 # pipeline calls the SAME `gates.yml`, so PR CI and the release re-run identical
 # gate definitions — no duplicated drift (OR-009 / SC-007).
@@ -13,16 +13,15 @@
 #   - test         : cargo test on Linux/Windows/macOS          [OR-003, OR-009]
 #   - wasm         : ronin-core builds for wasm32-unknown-unknown  [OR-004]
 #   - wasm-validate: ronin-validate builds for wasm32-unknown-unknown [FR-023]
-#   - supply-chain : cargo-audit + cargo-deny (PR/push + cron)   [OR-005]
+#   - supply-chain : cargo-audit + cargo-deny (PR/push)          [OR-005]
 #
-# Triggers preserved from E002 (unchanged):
+# Triggers:
 #   - pull_request (never pull_request_target; fork PRs validate identically —
 #     OR-011 / SC-010, and the reusable gates.yml references no `secrets.*`).
 #   - push to main.
-#   - the daily supply-chain cron — every trigger that fires this workflow runs
-#     ALL gates in gates.yml, so the cron still runs the supply-chain gate (and
-#     the rest), catching newly published advisories with no new commit
-#     (AD-004 / OR-005 / SC-004).
+# (The former daily supply-chain cron was removed; the supply-chain gate still
+# runs on every PR/push. Re-add a `schedule:` trigger here to restore the daily
+# no-commit advisory re-scan — AD-004 / OR-005 / SC-004.)
 #
 # Least-privilege GITHUB_TOKEN preserved: top-level `permissions: contents:
 # read` here AND in gates.yml; the called workflow cannot exceed the caller's
@@ -44,11 +43,6 @@ on:
   pull_request:
   push:
     branches: [main]
-  schedule:
-    # Daily supply-chain scan (00:00 UTC) so newly published advisories are
-    # caught with no new commit (AD-004 / OR-005 / SC-004). On this trigger the
-    # called gates.yml still runs the supply-chain gate (and all other gates).
-    - cron: "0 0 * * *"
 
 # Least-privilege GITHUB_TOKEN for all jobs; no write scopes, no inheritance of
 # the repository's default token permissions (OR-012 / SC-009). A reusable
@@ -60,7 +54,7 @@ permissions:
 jobs:
   # Delegate every E002 gate (check/test/wasm/wasm-validate/supply-chain) to the
   # reusable workflow. This single `uses:` runs ALL five jobs defined in
-  # gates.yml on each trigger (PR, push:main, daily cron) — same job
-  # definitions the release pipeline re-runs (OR-009 / AD-003 / HINT-004).
+  # gates.yml on each trigger (PR, push:main) — same job definitions the
+  # release pipeline re-runs (OR-009 / AD-003 / HINT-004).
   gates:
     uses: ./.github/workflows/gates.yml

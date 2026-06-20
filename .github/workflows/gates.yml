@@ -1,7 +1,7 @@
 # Reusable CI Quality Gates (feature 00011-release-distribution, AD-003 / HINT-004).
 #
 # This is the single source of truth for the E002 "Verified Quality" gate jobs.
-# Both `ci.yml` (PR/push/cron) and the release pipeline call it via
+# Both `ci.yml` (PR/push) and the release pipeline call it via
 # `uses: ./.github/workflows/gates.yml`, so the release re-runs the EXACT same
 # gate definitions as PR CI — no duplicated drift (OR-009 / SC-007).
 #
@@ -126,8 +126,8 @@ jobs:
         run: cargo build -p ronin-validate --target wasm32-unknown-unknown --locked
 
   # Supply-chain scanning: cargo-audit (RustSec advisories) + cargo-deny
-  # (deny.toml license/ban/advisory/source policy). Runs on PR/push AND the
-  # daily cron. Hard-fails on any advisory/disallowed license; the only waiver
+  # (deny.toml license/ban/advisory/source policy). Runs on every PR/push.
+  # Hard-fails on any advisory/disallowed license; the only waiver
   # is a dated entry in deny.toml / the cargo-audit ignore-list
   # (docs/runbooks/advisory-response.md) [OR-005].
   supply-chain:
