@@ -309,8 +309,9 @@ automated).
   live release out of CI.)*
 
 The mechanically-re-checkable items are also exercised — without a live release —
-by the `release-verify` CI job (`.github/workflows/release-verify.yml`, run on
-every PR + push to main): `dist plan` / `dist generate --check`, tag→channel
+by the `release-verify` workflow (`.github/workflows/release-verify.yml`), which
+you run MANUALLY (`workflow_dispatch`, from the Actions tab) before cutting a
+release: `dist plan`, tag→channel
 routing (`ci/check-channel-routing.{py,sh}`), `cargo publish --dry-run` per crate
 (`ci/publish-dry-run.sh`), blocking `cargo-semver-checks`, the manifest-metadata
 (`ci/check-manifest-metadata.py`) + SHA-pin (`ci/check-sha-pins.py`) checks,

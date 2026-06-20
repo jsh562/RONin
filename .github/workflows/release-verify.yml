@@ -1,10 +1,12 @@
 # Release-pipeline VERIFICATION gate — feature 00011-release-distribution
 # (Phase 8 / OR-015..018 / SC-001..007 / T029..T036).
 #
-# This is the DRY-RUN + LINT CI gate that PROVES the release pipeline's config is
-# correct WITHOUT cutting a live release. It is a PR/push gate, NOT a release
-# trigger: it runs on `pull_request` + `push: main`, never on a tag, and NEVER
-# publishes/uploads/attests anything (OR-015). The live tag-triggered release
+# This is the DRY-RUN + LINT gate that PROVES the release pipeline's config is
+# correct WITHOUT cutting a live release. It is a MANUAL, before-a-release gate —
+# NOT an every-push PR gate and NOT a release trigger: it runs ONLY on
+# `workflow_dispatch` (a maintainer runs it by hand before cutting a release),
+# never on a PR, push, or tag, and it NEVER publishes/uploads/attests anything
+# (OR-015). The live tag-triggered release
 # (real artifact upload, real crates.io publish, real attestation/SBOM emission)
 # is exercised ONLY by an actual maintainer-pushed tag via release.yml /
 # release-plz.yml — never here.
@@ -30,17 +32,18 @@
 # source of truth; Dependabot bumps them in "/").
 name: release-verify
 
-# PR GATE (NOT a release trigger): runs on PRs and pushes to main so config drift
-# / a broken pin is caught before merge. No `tags:` trigger (that is release.yml's
-# job), no `pull_request_target` (no fork-secret exposure — OR-011 / SC-007).
+# MANUAL GATE (NOT a release trigger): runs ONLY on `workflow_dispatch` so a
+# maintainer runs the full release-readiness suite by hand before cutting a
+# release. There is deliberately NO `pull_request` / `push` trigger — every-push
+# correctness is ci.yml's job (the after-any-push bucket) — NO `tags:` trigger
+# (that is release.yml's job), and NO `pull_request_target` (no fork-secret
+# exposure — OR-011 / SC-007).
 on:
-  pull_request:
-  push:
-    branches: [main]
+  workflow_dispatch:
 
 # LEAST-PRIVILEGE (OR-011 / SC-007): read-only. This job never writes a Release,
 # never attests, never publishes — it only inspects config + dry-runs. No secret
-# is referenced (no CARGO_REGISTRY_TOKEN), so fork PRs run it identically.
+# is referenced (no CARGO_REGISTRY_TOKEN), so it is safe to run from any branch.
 permissions:
   contents: read
 
