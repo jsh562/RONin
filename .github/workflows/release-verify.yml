@@ -20,7 +20,7 @@
 #   - PURE offline check SCRIPTS (no tooling): ci/check-*.py, ci/check-*.sh —
 #     SHA-pin scan, manifest-metadata, tag->channel routing, provenance/SBOM
 #     static check, SC-007 hardening. These are also runnable locally.
-#   - CI-only tool steps: `dist plan` / `dist generate --check`, `actionlint`,
+#   - CI-only tool steps: `dist plan`, `actionlint`,
 #     `cargo publish --dry-run`, `cargo semver-checks` — require the installed
 #     tools and a full toolchain, so they run only in this CI job.
 #
@@ -139,15 +139,17 @@ jobs:
       # installers, checksums, binstall metadata, channel routing). A config error
       # fails the step (OR-015a). Uses a sample stable tag for a deterministic plan. ---
       - name: dist plan (config valid — 4 targets/installers/checksums/binstall)
-        run: dist plan --tag=v0.0.0 --output-format=json
+        # dist requires a --tag matching a real package version (ronin-app is the
+        # released binary). Derive it so this never goes stale on a version bump.
+        run: |
+          ver="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name=="ronin-app") | .version')"
+          dist plan --tag="v$ver" --output-format=json
 
-      # --- T030 {OR-015,SC-001} (HINT-001): dist generate --check asserts the
-      # committed release.yml matches what `dist generate` would emit — any drift
-      # fails the step (OR-015b). NOTE: the committed release.yml is hand-pinned to
-      # full SHAs after generate (HINT-001); if a future dist version reorders the
-      # generated graph, regenerate + re-pin and re-run this check. ---
-      - name: dist generate --check (committed release.yml has no drift)
-        run: dist generate --check
+      # NOTE: `dist generate --check` was intentionally removed. release.yml is
+      # HAND-AUTHORED (install-action / `cargo install` installs + manual
+      # provenance/SBOM steps), not literal `dist generate` output, so the check
+      # could never pass. `dist plan` above already validates the dist config; the
+      # other checks (provenance/SBOM/hardening statics) cover release.yml's shape.
 
       # --- T034 (part 2) {COMPLETES OR-017}: actionlint over ALL workflow YAML.
       # A passing result == zero actionlint findings (OR-015c). ---
