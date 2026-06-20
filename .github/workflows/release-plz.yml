@@ -96,10 +96,10 @@ jobs:
       # --- BLOCKING semver gate (OR-004 / T015 / [COMPLETES OR-004]): run
       # cargo-semver-checks as a REQUIRED, hard step BEFORE building the Release
       # PR. A breaking API change without the matching bump exits non-zero and
-      # FAILS this job, blocking the Release PR — not advisory. `--locked` keeps
-      # it reproducible against the committed Cargo.lock (OR-010). ---
+      # FAILS this job, blocking the Release PR — not advisory. (cargo-semver-checks
+      # has no `--locked` flag; it resolves against the committed Cargo.lock already.) ---
       - name: cargo semver-checks (blocking)
-        run: cargo semver-checks check-release --locked --workspace
+        run: cargo semver-checks check-release --workspace
       # --- Open/update the Release PR: independent per-crate bumps + umbrella
       # bump + regenerated changelog. release-plz ALSO runs its own semver_check
       # (release-plz.toml) so the bumps it proposes already account for breaking

@@ -15,9 +15,10 @@
 #      `pull_request_target`; release.yml triggers on tags only, release-plz on
 #      push:main + tags. No `secrets.*` is referenced in any `pull_request*` path
 #      (there is none).
-#   4. LOCKED: every `cargo <build|test|publish|clippy|semver-checks>` invocation
-#      across the release workflows passes `--locked` (OR-010). (release-plz's
-#      publish wrapper is exempted with a documented note — see release-plz.yml.)
+#   4. LOCKED: every `cargo <build|test|publish|clippy>` invocation across the
+#      release workflows passes `--locked` (OR-010). (cargo-semver-checks has no
+#      `--locked` flag, so it is excluded; release-plz's publish wrapper is
+#      exempted with a documented note — see release-plz.yml.)
 #
 # This is a STATIC YAML check (pyyaml). It does NOT run actionlint/dist/etc.
 # PURE / offline. Exit 0 = all SC-007 statics hold; exit 1 otherwise.
@@ -42,12 +43,14 @@ RELEASE_PLZ_YML = WORKFLOWS / "release-plz.yml"
 GATES_REF = "./.github/workflows/gates.yml"
 
 # cargo subcommands that build/resolve and therefore MUST be --locked.
+# (cargo-semver-checks is excluded: it has no `--locked` flag and resolves against
+# the committed Cargo.lock already.)
 LOCKED_REQUIRED = re.compile(
-    r"\bcargo\s+(build|test|clippy|publish|semver-checks)\b"
+    r"\bcargo\s+(build|test|clippy|publish)\b"
 )
 # `release-plz release`/`release-pr` wrap cargo publish internally; the committed
-# lockfile + the blocking `cargo semver-checks --locked` gate provide the
-# equivalent guarantee (documented in release-plz.yml). Exempt those lines.
+# lockfile + the blocking `cargo semver-checks` gate provide the equivalent
+# guarantee (documented in release-plz.yml). Exempt those lines.
 LOCKED_EXEMPT = re.compile(r"\brelease-plz\s+(release|release-pr)\b")
 
 
