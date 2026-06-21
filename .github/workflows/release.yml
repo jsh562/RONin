@@ -90,10 +90,6 @@ jobs:
     permissions:
       contents: read
     outputs:
-      # The dist plan manifest consumed by the build/host jobs (modeled on
-      # `dist generate` — the real generated workflow passes the full dist-manifest
-      # JSON; kept as a string output here).
-      dist-manifest: ${{ steps.plan.outputs.manifest }}
       # "true"  → GitHub pre-release (any -rc/-nightly/other pre-release tag)
       # "false" → stable Release (bare vX.Y.Z)
       prerelease: ${{ steps.channel.outputs.prerelease }}
@@ -110,12 +106,11 @@ jobs:
         # install it from crates.io (exact version MUST match dist-workspace.toml
         # cargo-dist-version). Installs the `dist` binary used by the steps below.
         run: cargo install cargo-dist@0.30.0 --locked
-      - name: dist plan
-        id: plan
-        # `--output-format=json` emits the manifest the matrix/host jobs consume.
-        run: |
-          dist plan --tag="${GITHUB_REF_NAME}" --output-format=json > dist-manifest.json
-          echo "manifest=$(cat dist-manifest.json)" >> "$GITHUB_OUTPUT"
+      - name: dist plan (validate release config)
+        # Validates the dist config for this tag (targets/installers/checksums).
+        # The build matrix below is hardcoded and each build/host job re-runs dist
+        # itself, so no manifest is passed between jobs — this is a config gate.
+        run: dist plan --tag="${GITHUB_REF_NAME}" --output-format=json
       - name: Derive release channel from tag suffix
         id: channel
         # Bare `vMAJOR.MINOR.PATCH` (digits only) → stable; anything with a `-`

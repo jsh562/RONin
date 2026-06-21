@@ -7,14 +7,6 @@ RONin preserves comments, formatting, key/field ordering, and struct names
 through every edit, saves atomically with crash-recovery sidecars, and makes
 **no network calls and collects no telemetry** by default.
 
-The Cargo workspace:
-
-| Crate | Role |
-|-------|------|
-| `ronin-core` | I/O-free, WASM-clean RON engine (lossless CST: parse / format / transform) |
-| `ronin-types` | Static Rust type extraction → normalized type model |
-| `ronin-validate` | Schema-optional, type-aware validation |
-| `ronin-app` | The egui/eframe desktop editor (also installable via `cargo install` / `cargo binstall`) |
 
 ## Screenshots
 
@@ -142,6 +134,16 @@ expected (DDR-003) and does **not** indicate a bad download once steps 1–2 pas
 
 Signed installers / notarization (which remove these prompts) are deferred to a
 later phase (DDR-003).
+
+
+The Cargo workspace:
+
+| Crate | Role |
+|-------|------|
+| `ronin-core` | I/O-free, WASM-clean RON engine (lossless CST: parse / format / transform) |
+| `ronin-types` | Static Rust type extraction → normalized type model |
+| `ronin-validate` | Schema-optional, type-aware validation |
+| `ronin-app` | The egui/eframe desktop editor (also installable via `cargo install` / `cargo binstall`) |
 
 ## Documentation
 
