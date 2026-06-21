@@ -43,7 +43,7 @@ fn fixture(name: &str) -> String {
 
 /// Load `samples/ships.ron` relative to the crate manifest (Step-0 localization).
 fn ships_ron() -> String {
-    let path = format!("{}/../../samples/ships.ron", env!("CARGO_MANIFEST_DIR"));
+    let path = format!("{}/samples/ships.ron", env!("CARGO_MANIFEST_DIR"));
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"))
 }
 

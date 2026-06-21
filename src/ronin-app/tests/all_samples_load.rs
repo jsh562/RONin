@@ -35,11 +35,11 @@ use ronin_app::structural::view_state::StructuralPath;
 // Harness
 // =============================================================================
 
-/// The absolute path to the repo-root `samples/` directory (robust regardless of
+/// The absolute path to the crate's `samples/` directory (robust regardless of
 /// the test's working directory).
 fn samples_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../samples")
+        .join("samples")
         .canonicalize()
         .expect("samples/ directory resolves")
 }

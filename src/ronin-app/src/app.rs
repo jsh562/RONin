@@ -78,41 +78,41 @@ const INFO_NOTICE_TTL: Duration = Duration::from_secs(4);
 /// The bundled showcase samples surfaced under **File ▸ Open Sample ▸** (E015).
 ///
 /// Each entry is `(file_name, embedded_text)`: the text is shipped in the binary
-/// via [`include_str!`] (path relative to this file: `../../../samples/<name>` —
-/// `app.rs` is `src/ronin-app/src/`, so three `..` reach the repo-root `samples/`),
+/// via [`include_str!`] (path relative to this file: `../samples/<name>` —
+/// `app.rs` is `src/ronin-app/src/`, so one `..` reaches the crate's `samples/`),
 /// so a sample loads one-click in ANY working directory. The `file_name` becomes
 /// the opened document's title and (for `.scn.ron`) drives extension-based Bevy
 /// mode auto-detection. Authored + self-checked by `tests/showcase_samples.rs`.
 const SHOWCASE_SAMPLES: &[(&str, &str)] = &[
-    ("sample.ron", include_str!("../../../samples/sample.ron")),
-    ("ships.ron", include_str!("../../../samples/ships.ron")),
+    ("sample.ron", include_str!("../samples/sample.ron")),
+    ("ships.ron", include_str!("../samples/ships.ron")),
     (
         "showcase_tree.ron",
-        include_str!("../../../samples/showcase_tree.ron"),
+        include_str!("../samples/showcase_tree.ron"),
     ),
     (
         "showcase_tables.ron",
-        include_str!("../../../samples/showcase_tables.ron"),
+        include_str!("../samples/showcase_tables.ron"),
     ),
     (
         "showcase_fallbacks.ron",
-        include_str!("../../../samples/showcase_fallbacks.ron"),
+        include_str!("../samples/showcase_fallbacks.ron"),
     ),
     (
         "showcase_interop.ron",
-        include_str!("../../../samples/showcase_interop.ron"),
+        include_str!("../samples/showcase_interop.ron"),
     ),
     (
         "showcase_highlight.ron",
-        include_str!("../../../samples/showcase_highlight.ron"),
+        include_str!("../samples/showcase_highlight.ron"),
     ),
     (
         "showcase_bevy.scn.ron",
-        include_str!("../../../samples/showcase_bevy.scn.ron"),
+        include_str!("../samples/showcase_bevy.scn.ron"),
     ),
     (
         "showcase_kitchen_sink.ron",
-        include_str!("../../../samples/showcase_kitchen_sink.ron"),
+        include_str!("../samples/showcase_kitchen_sink.ron"),
     ),
 ];
 

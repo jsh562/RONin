@@ -26,10 +26,10 @@ use ronin_app::app::App;
 use ronin_app::settings::AppSettings;
 use ronin_app::structural::view_state::{ActiveView, PathStep, StructuralPath};
 
-const SAMPLE: &str = include_str!("../../../samples/sample.ron");
-const SHIPS: &str = include_str!("../../../samples/ships.ron");
-const TREE: &str = include_str!("../../../samples/showcase_tree.ron");
-const BEVY: &str = include_str!("../../../samples/showcase_bevy.scn.ron");
+const SAMPLE: &str = include_str!("../samples/sample.ron");
+const SHIPS: &str = include_str!("../samples/ships.ron");
+const TREE: &str = include_str!("../samples/showcase_tree.ron");
+const BEVY: &str = include_str!("../samples/showcase_bevy.scn.ron");
 
 fn screenshots_dir() -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../screenshots");

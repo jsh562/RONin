@@ -53,7 +53,7 @@ const SAMPLES: &[&str] = &[
 /// Load a `samples/<name>` file from disk relative to the crate manifest (robust
 /// regardless of the test's working directory).
 fn sample(name: &str) -> String {
-    let path = format!("{}/../../samples/{name}", env!("CARGO_MANIFEST_DIR"));
+    let path = format!("{}/samples/{name}", env!("CARGO_MANIFEST_DIR"));
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"))
 }
 
@@ -403,7 +403,7 @@ fn tree_sample_yields_every_tree_node_kind() {
 #[test]
 fn sample_files_all_exist_on_disk() {
     for name in SAMPLES {
-        let path = format!("{}/../../samples/{name}", env!("CARGO_MANIFEST_DIR"));
+        let path = format!("{}/samples/{name}", env!("CARGO_MANIFEST_DIR"));
         assert!(
             Path::new(&path).exists(),
             "expected showcase sample `{name}` at {path}"
