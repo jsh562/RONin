@@ -54,7 +54,8 @@ git_release_enable = false
 # Per-crate git tags are PROVENANCE-ONLY (HINT-002 / STF-001): release-plz may
 # record them, but they are never a release trigger (the umbrella tag is). Use
 # the conventional `{{ package }}-v{{ version }}` form so a per-crate tag can
-# never collide with the umbrella `vX.Y.Z` product tag.
+# never collide with the umbrella `vX.Y.Z` product tag. (The publish job in
+# release-plz.yml sets a git committer identity so `git tag -m` can create these.)
 git_tag_enable = true
 git_tag_name = "{{ package }}-v{{ version }}"
 

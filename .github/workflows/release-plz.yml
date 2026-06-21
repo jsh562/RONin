@@ -203,14 +203,20 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: git config --global url."https://x-access-token:${GITHUB_TOKEN}@github.com/".insteadOf "https://github.com/"
       # On a TAG push, actions/checkout leaves HEAD DETACHED at the tag, but
-      # `release-plz release` runs `git rev-parse @{upstream}` to find the current
-      # branch and fails with "cannot determine current branch" on a detached HEAD.
-      # Check out main (DWIM creates a local `main` tracking origin/main, giving it
-      # an upstream) so release-plz has a branch. The umbrella tag is pushed on main,
-      # so this is the same commit/versions; release-plz publishes by Cargo.toml
-      # version vs crates.io regardless. (fetch-depth: 0 above fetched origin/main.)
-      - name: Put HEAD on main (release-plz can't run on the detached tag checkout)
-        run: git checkout main
+      # `release-plz release` needs two things the runner doesn't have by default:
+      #   1. a current BRANCH — it runs `git rev-parse @{upstream}` and fails with
+      #      "cannot determine current branch" on a detached HEAD; and
+      #   2. a git COMMITTER IDENTITY — it creates annotated per-crate tags with
+      #      `git tag -m`, which fails with "Committer identity unknown" if unset.
+      # Fix both: check out main (DWIM creates a local `main` tracking origin/main,
+      # giving it an upstream) and configure a bot identity. The umbrella tag is on
+      # main, so this is the same commit/versions; release-plz publishes by
+      # Cargo.toml version vs crates.io. (fetch-depth: 0 above fetched origin/main.)
+      - name: Prepare git for release-plz (branch + committer identity)
+        run: |
+          git checkout main
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
       - name: release-plz release (publish crates.io, dep order)
         env:
           # crates.io auth — scoped to THIS step ONLY (T019). The maintainer sets
