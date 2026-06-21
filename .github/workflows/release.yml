@@ -174,7 +174,7 @@ jobs:
         # installer fragments for this target are written to the dist artifact dir.
         run: dist build --tag="${GITHUB_REF_NAME}" --target="${{ matrix.target }}" --output-format=json
       - name: Upload local artifacts (for host job)
-        uses: actions/upload-artifact@v7 # TODO(OR-010): resolve to full commit SHA before first release — offline now; SHA not resolvable offline
+        uses: actions/upload-artifact@v4 # real major tag; TODO(OR-010): SHA-pin once resolvable
         with:
           name: artifacts-${{ matrix.target }}
           path: |
@@ -204,7 +204,7 @@ jobs:
         # install-action's manifest lacks cargo-dist@0.30.0; install from crates.io.
         run: cargo install cargo-dist@0.30.0 --locked
       - name: Download per-target artifacts
-        uses: actions/download-artifact@v8 # TODO(OR-010): resolve to full commit SHA before first release — offline now; SHA not resolvable offline
+        uses: actions/download-artifact@v4 # real major tag; TODO(OR-010): SHA-pin once resolvable
         with:
           pattern: artifacts-*
           path: target/distrib
@@ -212,7 +212,7 @@ jobs:
       - name: dist build (global installers + manifest)
         run: dist build --tag="${GITHUB_REF_NAME}" --artifacts=global --output-format=json
       - name: Upload global artifacts (for host job)
-        uses: actions/upload-artifact@v7 # TODO(OR-010): resolve to full commit SHA before first release — offline now; SHA not resolvable offline
+        uses: actions/upload-artifact@v4 # real major tag; TODO(OR-010): SHA-pin once resolvable
         with:
           name: artifacts-global
           path: |
@@ -259,7 +259,7 @@ jobs:
         # install-action's manifest lacks cargo-dist@0.30.0; install from crates.io.
         run: cargo install cargo-dist@0.30.0 --locked
       - name: Download all artifacts
-        uses: actions/download-artifact@v8 # TODO(OR-010): resolve to full commit SHA before first release — offline now; SHA not resolvable offline
+        uses: actions/download-artifact@v4 # real major tag; TODO(OR-010): SHA-pin once resolvable
         with:
           pattern: artifacts-*
           path: target/distrib
@@ -287,7 +287,7 @@ jobs:
         # NEW action (not in gates/ci.yml): cannot resolve its tag→SHA offline.
         # TODO(OR-010): resolve actions/attest-build-provenance@v3 to a full
         # commit SHA before the first release — offline now.
-        uses: actions/attest-build-provenance@v3 # TODO(OR-010): resolve to full commit SHA before first release — offline now; SHA not resolvable offline
+        uses: actions/attest-build-provenance@v2 # real major tag; TODO(OR-010): SHA-pin once resolvable
         with:
           subject-path: "target/distrib/*.tar.gz"
 

@@ -51,9 +51,9 @@ USES_RE = re.compile(r"""^\s*-?\s*uses:\s*['"]?(?P<ref>[^'"\s#]+)['"]?""")
 # resolved pin).
 # ---------------------------------------------------------------------------
 ALLOWLIST: set[tuple[str, str]] = {
-    ("release.yml", "actions/upload-artifact@v7"),
-    ("release.yml", "actions/download-artifact@v8"),
-    ("release.yml", "actions/attest-build-provenance@v3"),
+    ("release.yml", "actions/upload-artifact@v4"),
+    ("release.yml", "actions/download-artifact@v4"),
+    ("release.yml", "actions/attest-build-provenance@v2"),
 }
 
 
