@@ -370,6 +370,22 @@ to publish crates. It is the **only** repository secret in the pipeline.
 pipeline never grants it global write; each job re-declares only the scopes it
 needs.
 
+**Required repository setting (one-time, repo-admin).** The `release-pr` job opens
+the Release PR via the API, which GitHub blocks by default — even with
+`pull-requests: write` — until you enable:
+
+> **Settings → Actions → General → Workflow permissions →
+> ✅ "Allow GitHub Actions to create and approve pull requests" → Save**
+
+Without it, `release-plz release-pr` fails with `GitHub Actions is not permitted to
+create or approve pull requests` (403). `jsh562/RONin` is a personal account, so
+the repo setting is sufficient; in an org, the same checkbox must also be enabled
+at the org level (it can override the repo). Note: a PR opened by `GITHUB_TOKEN`
+does **not** trigger `pull_request` workflows, so `ci.yml` does not run on the
+Release PR itself — it runs when the PR is merged to `main`. (To CI-gate the
+Release PR you would switch release-plz to a PAT / GitHub App token, adding a
+second secret — deliberately not done here.)
+
 ### Least-privilege per-job token scopes
 
 Every workflow sets `permissions: {}` at the top level (grant nothing) and each
@@ -384,7 +400,7 @@ job re-declares the minimum it needs (OR-011 / HINT-003 / AD-005):
 | `release.yml` › **`host`** (the only write job) | **write** | **write** | **write** | — | none |
 | `release.yml` › `announce` | read | — | — | — | none |
 | `release-plz.yml` › `release-pr` | write | — | — | write | none |
-| `release-plz.yml` › **`publish`** | read | — | — | — | **`CARGO_REGISTRY_TOKEN`** |
+| `release-plz.yml` › **`publish`** | write | — | — | — | **`CARGO_REGISTRY_TOKEN`** |
 
 Notes:
 
@@ -397,9 +413,10 @@ Notes:
   only and never publishes a crate (AD-002).
 - In `release-plz.yml`, `CARGO_REGISTRY_TOKEN` is injected on the **single**
   `release-plz release` step of the `publish` job and nowhere else. The
-  `publish` job needs only `contents: read` (it pushes to crates.io with the
-  registry token, not `GITHUB_TOKEN`, and creates no GitHub Release —
-  `git_release_enable = false`).
+  `publish` job has `contents: write` so release-plz can push the per-crate
+  provenance tags (`git_tag_enable = true`) — pushing a git tag inherently needs
+  write. It still creates no GitHub Release (`git_release_enable = false`); the
+  crates.io push uses the registry token, not `GITHUB_TOKEN`.
 - The `release-pr` job gets `contents: write` + `pull-requests: write` to
   open/update the Release PR and nothing more; it never sees
   `CARGO_REGISTRY_TOKEN`.
