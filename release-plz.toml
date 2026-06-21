@@ -23,9 +23,13 @@
 #
 # The root-excluded `src/ronin-core/fuzz` crate is NOT a workspace member (root
 # Cargo.toml `exclude = ["src/ronin-core/fuzz"]`), so release-plz never sees it; it
-# can never be versioned or published (OR-005 / HINT-005). The explicit
-# `[[package]]` block below additionally pins `publish = false` as defense in
-# depth in case the crate is ever re-added as a member.
+# can never be versioned or published (OR-005 / HINT-005). It must therefore have
+# NO `[[package]]` override here: release-plz validates every override against the
+# actual workspace members and hard-errors ("overrides not present in the
+# workspace") on an entry for a non-member. The crate is already protected three
+# ways — the workspace `exclude`, its own isolated `[workspace]`, and `publish =
+# false` in its own Cargo.toml — so no override is needed (or possible). If it is
+# ever re-added as a member, add a `[[package]] release = false` block back then.
 
 # ---------------------------------------------------------------------------
 # WORKSPACE-WIDE DEFAULTS (apply to every publishable member unless a per-crate
@@ -110,13 +114,3 @@ publish = true
 # release version. The maintainer-pushed umbrella tag `vX.Y.Z` matches this
 # version and is the single release trigger (dist binaries + release-plz publish).
 git_release_enable = false
-
-# ---------------------------------------------------------------------------
-# DEFENSE IN DEPTH: explicitly mark the root-excluded fuzz crate non-publishable
-# in case it is ever re-added as a workspace member. As configured today it is
-# `exclude`d in the root Cargo.toml, so release-plz never enumerates it (OR-005).
-# ---------------------------------------------------------------------------
-[[package]]
-name = "ronin-core-fuzz"
-release = false
-publish = false
