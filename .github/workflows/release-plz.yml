@@ -115,6 +115,16 @@ jobs:
             exit 0
           fi
           exit "$rc"
+      # release-plz prepares the Release PR in a TEMP CLONE and runs `git push`
+      # from there; that clone does NOT inherit the credentials actions/checkout
+      # configured on the main checkout, so the push fails with "could not read
+      # Username for https://github.com". Make github.com git pushes use the
+      # GITHUB_TOKEN globally so the temp-clone push authenticates. (--git-token
+      # only authenticates the GitHub API/PR call, NOT the git CLI push.)
+      - name: Authenticate git pushes (release-plz pushes from a temp clone)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: git config --global url."https://x-access-token:${GITHUB_TOKEN}@github.com/".insteadOf "https://github.com/"
       # --- Open/update the Release PR: independent per-crate bumps + umbrella
       # bump + regenerated changelog. release-plz ALSO runs its own semver_check
       # (release-plz.toml) so the bumps it proposes already account for breaking
@@ -146,13 +156,15 @@ jobs:
     # release.yml's concern — OR-008).
     if: startsWith(github.ref, 'refs/tags/v') && github.event_name == 'push'
     runs-on: ubuntu-latest
-    # SCOPES (OR-011 / T019): least-privilege. `contents: read` is all the
-    # crates.io publish needs — the push to crates.io uses CARGO_REGISTRY_TOKEN,
-    # NOT the GITHUB_TOKEN. release-plz must NOT create a GitHub Release here
-    # (git_release_enable = false in release-plz.toml; the binary Release is
-    # dist's job — AD-002), so no `contents: write` is granted.
+    # SCOPES (OR-011 / T019): least-privilege for a tag-gated, maintainer-only
+    # job. `contents: write` is required because release-plz pushes the per-crate
+    # provenance git tags (git_tag_enable = true in release-plz.toml) during
+    # `release`, and pushing a git tag inherently needs contents:write. It still
+    # must NOT create a GitHub Release (git_release_enable = false; the binary
+    # Release is dist's job — AD-002). The crates.io push uses the scoped
+    # CARGO_REGISTRY_TOKEN, NOT the GITHUB_TOKEN.
     permissions:
-      contents: read
+      contents: write
     steps:
       - name: Checkout (full history)
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -182,14 +194,22 @@ jobs:
       # --locked` gate on the release-pr job assert lockfile consistency. (older
       # release-plz CLIs do not expose a generic `--locked` publish passthrough;
       # the committed lockfile + the gate provide the equivalent guarantee.) ---
+      # release-plz pushes the per-crate git tags from a temp clone that doesn't
+      # inherit the checkout credentials; authenticate github.com git pushes with
+      # the GITHUB_TOKEN so the tag push succeeds (same reason as the release-pr
+      # job). --git-token covers only the API call, not the git CLI push.
+      - name: Authenticate git pushes (release-plz pushes tags from a temp clone)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: git config --global url."https://x-access-token:${GITHUB_TOKEN}@github.com/".insteadOf "https://github.com/"
       - name: release-plz release (publish crates.io, dep order)
         env:
           # crates.io auth — scoped to THIS step ONLY (T019). The maintainer sets
           # this repo secret per docs/runbooks/release.md (RR-003).
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-          # GITHUB_TOKEN is bounded by this job's `contents: read`; release-plz
-          # uses it only for read metadata, NOT to create a GitHub Release
-          # (git_release_enable = false).
+          # GITHUB_TOKEN is bounded by this job's `contents: write`; release-plz
+          # uses it to push the per-crate provenance tags, NOT to create a GitHub
+          # Release (git_release_enable = false).
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         # Pass the git token explicitly (release-plz 0.3.135 doesn't auto-read the
         # env var here); CARGO_REGISTRY_TOKEN above is the crates.io auth.
