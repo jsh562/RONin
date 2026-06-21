@@ -275,11 +275,14 @@ jobs:
         run: |
           cargo cyclonedx --locked --all --format json
           # Collect the per-crate CycloneDX outputs into ONE release SBOM file.
-          # `cargo cyclonedx` writes <crate>.cdx.json next to each manifest; the
-          # aggregate workspace graph is identical, so we ship the ronin-app SBOM
-          # (the umbrella product) as the single release SBOM (OR-007).
-          cp src/ronin-app/ronin-app.cdx.json target/distrib/ronin-app.cdx.json
-          echo "Single CycloneDX SBOM staged: target/distrib/ronin-app.cdx.json"
+          # `cargo cyclonedx` writes <crate>.cdx.json next to each manifest, but the
+          # exact path varies by version — locate the ronin-app SBOM robustly rather
+          # than assuming src/ronin-app/. The aggregate workspace graph is identical,
+          # so the ronin-app SBOM (the umbrella product) is the single release SBOM.
+          sbom="$(find . -path ./target -prune -o -name 'ronin-app.cdx.json' -print | head -n1)"
+          [ -n "$sbom" ] || { echo "::error::ronin-app.cdx.json not found after cargo cyclonedx"; exit 1; }
+          cp "$sbom" target/distrib/ronin-app.cdx.json
+          echo "Single CycloneDX SBOM staged: target/distrib/ronin-app.cdx.json (from $sbom)"
 
       # --- PER-BINARY PROVENANCE (OR-006 / T020): one keyless Sigstore/SLSA
       # build-provenance attestation per release tarball, verifiable later via

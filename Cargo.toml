@@ -18,3 +18,10 @@ edition = "2021"
 rust-version = "1.77"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/jsh562/RONin"
+
+# Build profile used by cargo-dist (`dist build` runs `cargo --profile dist`).
+# Without this, dist fails with "profile `dist` is not defined". This is what
+# `dist init` would add; the dist pipeline was hand-authored so it was missing.
+[profile.dist]
+inherits = "release"
+lto = "thin"
