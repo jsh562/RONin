@@ -61,6 +61,13 @@ jobs:
   # ----------------------------------------------------------------------------
   gates:
     name: gates (E002 CI re-run)
+    # The reusable gates.yml requests `contents: read`. A called workflow can't
+    # exceed the CALLING job's grant, and this workflow's top-level permissions are
+    # `{}` (none) — so without an explicit grant here the call is rejected at
+    # startup ("requesting 'contents: read', but only allowed 'contents: none'").
+    # Granting it on THIS job keeps the top-level least-privilege intact.
+    permissions:
+      contents: read
     uses: ./.github/workflows/gates.yml
 
   # ----------------------------------------------------------------------------
