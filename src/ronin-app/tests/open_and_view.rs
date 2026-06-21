@@ -7,6 +7,7 @@
 //! open → render path end-to-end without a GPU/wgpu backend.
 
 use std::io::Write;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use egui_kittest::kittest::Queryable;
 use egui_kittest::Harness;
@@ -29,10 +30,18 @@ fn node_value_contains(harness: &Harness<'_>, needle: &str) -> bool {
 
 /// Write `contents` to a uniquely-named temp `.ron` file and return its path.
 fn temp_ron(contents: &str) -> std::path::PathBuf {
+    // A process-wide counter guarantees a distinct name per call. pid + nanos
+    // alone is NOT enough: on Windows the system clock is coarse (~15 ms), so two
+    // tests in this file calling `temp_ron` in the same tick get identical nanos
+    // and thus the same path — and when run in parallel they clobber each other's
+    // fixture (the empty-file test then reads the other test's content). The
+    // counter makes collisions impossible regardless of clock resolution.
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
     let mut path = std::env::temp_dir();
     let unique = format!(
-        "ronin_test_{}_{}.ron",
+        "ronin_test_{}_{}_{}.ron",
         std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
