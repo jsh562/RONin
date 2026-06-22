@@ -282,7 +282,7 @@ jobs:
       # `cargo-auditable = true`) so `cargo audit` can read embedded metadata. ---
       - name: Generate single CycloneDX SBOM
         run: |
-          cargo cyclonedx --locked --all --format json
+          cargo cyclonedx --all --format json
           # Collect the per-crate CycloneDX outputs into ONE release SBOM file.
           # `cargo cyclonedx` writes <crate>.cdx.json next to each manifest, but the
           # exact path varies by version — locate the ronin-app SBOM robustly rather
