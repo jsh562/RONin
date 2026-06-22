@@ -6,6 +6,12 @@
 //! backend. A missing / unreadable / non-UTF-8 CLI path does **not** abort launch
 //! — [`App::new`] records a notice and still starts into an empty workspace.
 
+// Use the Windows GUI subsystem in RELEASE builds so launching the app does not
+// pop a console window behind the GUI. Left as the default console subsystem in
+// debug builds so `cargo run` keeps stdout/panics during development. Logs always
+// go to a file via `init_logging`, so no output is lost either way.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use std::path::PathBuf;
 
 use ronin_app::app::App;

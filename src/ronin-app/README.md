@@ -17,6 +17,7 @@
 - **RON⇄JSON interop** — bidirectional conversion with explicit, never-silent loss reporting, plus derive-from-type scaffolding.
 - **Local-first** — no telemetry, no network calls at runtime.
 
+
 ## Views
 
 RONin projects the active document through five views, selectable from the **View** switcher:
