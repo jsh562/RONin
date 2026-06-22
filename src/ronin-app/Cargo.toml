@@ -1,6 +1,6 @@
 [package]
 name = "ronin-app"
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 # Native egui/eframe 0.34 + egui_kittest require a newer toolchain than ronin-core's
 # 1.77 MSRV; native deps are confined to ronin-app, so this override is local-only.
