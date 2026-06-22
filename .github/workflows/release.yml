@@ -50,6 +50,15 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
 
+# Force bash for every `run:` step on ALL runners. The build matrix includes
+# windows-latest, whose default shell is PowerShell — there `${GITHUB_REF_NAME}`
+# is an undefined variable (not the env var), so `dist build --tag="${GITHUB_REF_NAME}"`
+# would pass an empty tag. bash expands it correctly on every OS (cargo-dist's
+# own generated workflow does the same). GitHub-hosted Windows runners ship bash.
+defaults:
+  run:
+    shell: bash
+
 jobs:
   # ----------------------------------------------------------------------------
   # GATE (OR-009 / T012): re-run the EXACT E002 CI gates (fmt/clippy + test
