@@ -33,7 +33,8 @@ pub mod validate;
 
 pub use projection::{CstJsonProjection, PointerRangeIndex, PointerSpans};
 pub use validate::{
-    dedup_against_structural, validate_against, validate_root, validate_subtree_against_type,
+    dedup_against_structural, resolve_type_at_pointer, validate_against, validate_root,
+    validate_subtree_against_type,
 };
 
 /// Validate a RON document against its bound type model and return the type

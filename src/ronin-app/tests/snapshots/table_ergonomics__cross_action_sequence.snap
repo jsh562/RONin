@@ -1,0 +1,10 @@
+---
+source: src/ronin-app/tests/table_ergonomics.rs
+expression: doc.buffer
+---
+// scene
+[
+    (/* boss */ name: "boss", on: false, hp: 10, kind: Off),
+    (/* mob */ name: "pasted",  on: true,  hp: 10,  kind: Idle),
+    (/* hero */ name: "hero", on: false,  hp: 10, kind: On),
+] // end

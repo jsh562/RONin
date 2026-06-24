@@ -866,6 +866,86 @@ impl App {
         }
     }
 
+    // --- E012 / US3: Table column-layout persistence sync (FR-007 / FR-015) ---
+
+    /// The section paths whose Table column layout the persistence sync reconciles for
+    /// the document at `idx`: the root section (the auto-routed structural view and the
+    /// table seam's default) plus the selected table section (the table navigator's
+    /// current level), de-duplicated.
+    ///
+    /// Returns an empty vec when the index is invalid. View-only / byte-free — reading
+    /// the selection never touches the document.
+    fn synced_sections(&self, idx: usize) -> Vec<crate::structural::view_state::StructuralPath> {
+        use crate::structural::view_state::StructuralPath;
+        let Some(doc) = self.workspace.get(idx) else {
+            return Vec::new();
+        };
+        let mut sections = vec![StructuralPath::root()];
+        if let Some(sel) = doc.view_state().selected_table_section() {
+            if !sections.contains(sel) {
+                sections.push(sel.clone());
+            }
+        }
+        sections
+    }
+
+    /// Seed the live column view-state of the document at `idx` from the persisted
+    /// settings for each shown section (E012 / US3 / FR-007 — the (a) load leg of T025).
+    ///
+    /// For each synced section it derives the live model's column count, then loads any
+    /// persisted layout into the live view-state ONLY when no live state exists yet
+    /// (first-show); stale / out-of-range indices are dropped on materialization. A
+    /// no-op for an untitled document (no stable key). View-only / byte-free.
+    fn load_active_column_layouts(&mut self, idx: usize) {
+        for section in self.synced_sections(idx) {
+            let Some(doc) = self.workspace.get_mut(idx) else {
+                return;
+            };
+            // Already-live state → first-show load already happened; skip the model derive.
+            if doc.view_state().column_view_state(&section).is_some() {
+                continue;
+            }
+            let Some(model) = doc.cached_table_model_any(&section) else {
+                continue; // not a table-able section at this path right now.
+            };
+            let model_cols = model.columns.len();
+            crate::structural::load_persisted_column_layout(
+                doc,
+                &self.settings,
+                &section,
+                model_cols,
+            );
+        }
+    }
+
+    /// Persist the live column view-state of the document at `idx` back to settings for
+    /// every section it customized this session, plus the shown sections (E012 / US3 —
+    /// the (b) save leg of T025 and FR-015's reset-clears-persisted).
+    ///
+    /// A non-default live layout is stored; a section whose live state was reset/dropped
+    /// is saved as the DEFAULT layout, which removes its persisted entry — so a reset
+    /// returns the section to its first-seen default across launches (FR-015). A no-op
+    /// for an untitled document. PRESENTATION config only — never a CST edit.
+    fn save_active_column_layouts(&mut self, idx: usize) {
+        let Some(doc) = self.workspace.get(idx) else {
+            return;
+        };
+        // Sections with live customization PLUS the shown sections (so a just-reset
+        // section, no longer live, still gets its persisted entry cleared).
+        let mut sections = doc.view_state().column_view_state_paths();
+        for s in self.synced_sections(idx) {
+            if !sections.contains(&s) {
+                sections.push(s);
+            }
+        }
+        for section in sections {
+            let Some(doc) = self.workspace.get(idx) else {
+                return;
+            };
+            crate::structural::save_persisted_column_layout(doc, &mut self.settings, &section);
+        }
+    }
+
     /// Number of open documents (one per tab).
     #[must_use]
     pub fn document_count(&self) -> usize {
@@ -4104,6 +4184,10 @@ impl App {
                     .get(idx)
                     .map(|d| d.view_state().active_view())
                     .unwrap_or(ActiveView::TreeForm);
+                // E012 / US3 / FR-007: seed the active document's column layout from the
+                // persisted settings BEFORE rendering, so a section's saved hide/order/pin
+                // is in effect the first time it is shown this session. View-only / byte-free.
+                self.load_active_column_layouts(idx);
                 match view {
                     ActiveView::Text => {
                         if let Some(doc) = self.workspace.get_mut(idx) {
@@ -4161,6 +4245,11 @@ impl App {
                         }
                     }
                 }
+                // E012 / US3 / FR-007+FR-015: persist the active document's live column
+                // layout back to settings AFTER rendering, so a hide/reorder/pin made this
+                // frame survives the next launch — and a reset (which dropped the live state)
+                // clears the persisted entry, returning the section to its default (FR-015).
+                self.save_active_column_layouts(idx);
             }
             _ => {
                 // FR-022: a non-blank welcome/empty-state, never an ambiguous blank

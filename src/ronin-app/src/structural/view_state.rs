@@ -501,6 +501,192 @@ impl SectionRendering {
     }
 }
 
+/// Per-section column **presentation** state for the Table view (E012 / US3 /
+/// FR-007): which columns are hidden, what order they display in, and which single
+/// column is pinned (frozen at the left).
+///
+/// # View-only — NEVER a CST/file edit (Principle I / HINT-002 / AD-004)
+///
+/// Hiding, reordering, and pinning a column are pure presentation changes: every
+/// mutator here is byte-free and the document buffer stays byte-identical. The grid
+/// applies this state as a **view transform** over [`TableModel::columns`] at render
+/// time; it never reshapes the CST. Keep this distinction strict — a column op must
+/// not flow into any [`StructuralOp`](ronin_core::StructuralOp).
+///
+/// # Indices are MODEL-column indices (the stable key)
+///
+/// `order`, `hidden`, and `pinned` all carry **model**-column indices (indices into
+/// `TableModel::columns`), not visible/screen positions. This is the load-bearing
+/// invariant for correctness: selection, editing, and the US1/US2 cell gestures all
+/// index into the model's columns, so keying view-state by the same model index lets
+/// the renderer compute a clean VISIBLE→MODEL mapping without disturbing any of them.
+///
+/// Out-of-range indices are ignored everywhere (mirroring [`grid_selection`] /
+/// [`group_show_cols`] robustness), so a section switch or a reparse that changes the
+/// column set can never corrupt the view — stale indices simply drop out.
+///
+/// [`TableModel::columns`]: crate::structural::table::TableModel
+/// [`grid_selection`]: ViewSelectionAndFocus
+/// [`group_show_cols`]: ViewSelectionAndFocus::group_show_cols
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ColumnViewState {
+    /// The display order as a permutation of MODEL-column indices. A column index
+    /// absent from `order` (e.g. a column added by a later reparse) is appended in
+    /// its natural model order by the renderer, so a partial/stale `order` still
+    /// shows every column. Pinning floats `pinned` to the front at render time; it
+    /// is NOT reordered within this vector (so unpin restores the prior position).
+    pub order: Vec<usize>,
+    /// The MODEL-column indices that are hidden (not rendered). A
+    /// [`std::collections::BTreeSet`] for deterministic iteration + cheap membership.
+    pub hidden: std::collections::BTreeSet<usize>,
+    /// The single pinned/frozen key column (a MODEL-column index), floated to the
+    /// left and kept sticky during horizontal scroll. `None` when no column is
+    /// pinned. A pinned column is always shown even if it is also in `hidden`
+    /// (pinning a column reveals it).
+    pub pinned: Option<usize>,
+}
+
+impl ColumnViewState {
+    /// A fresh, empty column view-state: no hidden columns, default (natural model)
+    /// order, nothing pinned.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// `true` when this is the default layout (nothing hidden, no explicit order, no
+    /// pin) — the renderer shows the natural model order, and the reset action treats
+    /// such a section as already-default.
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        self.order.is_empty() && self.hidden.is_empty() && self.pinned.is_none()
+    }
+
+    /// Hide the MODEL column `col` (byte-free). A no-op when `col` is already hidden.
+    /// Hiding the pinned column also unpins it (a hidden column cannot stay frozen
+    /// visible — one gesture, one consistent result).
+    pub fn hide(&mut self, col: usize) {
+        self.hidden.insert(col);
+        if self.pinned == Some(col) {
+            self.pinned = None;
+        }
+    }
+
+    /// Show (un-hide) the MODEL column `col` (byte-free). A no-op when `col` is not
+    /// hidden.
+    pub fn show(&mut self, col: usize) {
+        self.hidden.remove(&col);
+    }
+
+    /// Toggle the hidden state of the MODEL column `col` (byte-free).
+    pub fn toggle_hidden(&mut self, col: usize) {
+        if self.hidden.contains(&col) {
+            self.show(col);
+        } else {
+            self.hide(col);
+        }
+    }
+
+    /// `true` when the MODEL column `col` is hidden. The pinned column is never
+    /// reported hidden (pinning reveals it).
+    #[must_use]
+    pub fn is_hidden(&self, col: usize) -> bool {
+        self.pinned != Some(col) && self.hidden.contains(&col)
+    }
+
+    /// Pin the MODEL column `col` as the frozen key column (byte-free), replacing any
+    /// prior pin. Pinning a hidden column also reveals it.
+    pub fn pin(&mut self, col: usize) {
+        self.hidden.remove(&col);
+        self.pinned = Some(col);
+    }
+
+    /// Clear the pin (byte-free); a no-op when nothing is pinned.
+    pub fn unpin(&mut self) {
+        self.pinned = None;
+    }
+
+    /// Toggle the pin on the MODEL column `col` (byte-free): pin it if it is not the
+    /// current pin, otherwise unpin.
+    pub fn toggle_pinned(&mut self, col: usize) {
+        if self.pinned == Some(col) {
+            self.unpin();
+        } else {
+            self.pin(col);
+        }
+    }
+
+    /// Move the MODEL column `col` to display position `to` within the order
+    /// (byte-free). The order is first normalized to the full model column set
+    /// (`model_cols` columns) so a never-reordered or partial `order` reorders
+    /// correctly; `col`/`to` out of range are ignored (no panic, no corruption).
+    pub fn move_column(&mut self, col: usize, to: usize, model_cols: usize) {
+        if col >= model_cols {
+            return;
+        }
+        let mut order = self.effective_order(model_cols);
+        let Some(from) = order.iter().position(|&c| c == col) else {
+            return;
+        };
+        let to = to.min(order.len().saturating_sub(1));
+        let moved = order.remove(from);
+        order.insert(to, moved);
+        self.order = order;
+    }
+
+    /// The full display order over a model of `model_cols` columns: the stored
+    /// `order` filtered to valid in-range indices, with any model column missing from
+    /// it appended in natural model order. This is the canonical permutation the
+    /// renderer and [`move_column`](Self::move_column) build on, so a stale/partial
+    /// `order` (after a reparse changed the column set) still names every column
+    /// exactly once.
+    #[must_use]
+    pub fn effective_order(&self, model_cols: usize) -> Vec<usize> {
+        let mut seen = vec![false; model_cols];
+        let mut order: Vec<usize> = Vec::with_capacity(model_cols);
+        for &c in &self.order {
+            if c < model_cols && !seen[c] {
+                seen[c] = true;
+                order.push(c);
+            }
+        }
+        for (c, was_seen) in seen.iter().enumerate() {
+            if !was_seen {
+                order.push(c);
+            }
+        }
+        order
+    }
+
+    /// The VISIBLE→MODEL column mapping for a model of `model_cols` columns: the
+    /// model-column index shown at each visible position, left to right. The pinned
+    /// column (when set + in range) leads; the remaining columns follow in
+    /// [`effective_order`](Self::effective_order), skipping hidden ones.
+    ///
+    /// This is the single source of truth the grid uses to remap a visible click /
+    /// cell render back to its MODEL column, so selection / editing / fill / paste /
+    /// increment / enum-picker (all of which index `TableModel::columns`) keep
+    /// targeting the correct model column after any hide / reorder / pin.
+    #[must_use]
+    pub fn visible_columns(&self, model_cols: usize) -> Vec<usize> {
+        let mut visible: Vec<usize> = Vec::with_capacity(model_cols);
+        let pinned = self.pinned.filter(|&p| p < model_cols);
+        if let Some(p) = pinned {
+            visible.push(p);
+        }
+        for c in self.effective_order(model_cols) {
+            if Some(c) == pinned {
+                continue; // already floated to the front
+            }
+            if self.hidden.contains(&c) {
+                continue; // hidden (the pin path above already revealed any pin)
+            }
+            visible.push(c);
+        }
+        visible
+    }
+}
+
 /// The per-document active-view selection + edit focus + section overrides + stale
 /// marker (data-model `ViewSelectionAndFocus`).
 ///
@@ -563,6 +749,22 @@ pub struct ViewSelectionAndFocus {
     /// render (E021 — Excel "the cell I'm editing is ready to type into"). Set by
     /// [`set_focus`](Self::set_focus) for a `TableCell`, consumed by the grid renderer.
     editor_focus_pending: bool,
+    /// Per-section column **presentation** state (E012 / US3 / FR-007): hide / order /
+    /// pin, keyed by the section's [`StructuralPath`]. View-only / byte-free — a column
+    /// op NEVER touches the CST (Principle I / HINT-002). Kept as a path-keyed
+    /// association list (the same shape as [`section_overrides`](Self::section_overrides))
+    /// since [`StructuralPath`] is `Hash`/`Eq` but not `Ord`; out-of-range column indices
+    /// are ignored, so a section switch / reparse can never corrupt the view.
+    column_view_states: Vec<(StructuralPath, ColumnViewState)>,
+    /// The **type-rejected** table cells from the most recent fill-down / paste
+    /// (E012 / US4 / FR-016), keyed by each rejected cell's value [`StructuralPath`].
+    /// A bulk fill / paste DROPS a write whose value is incompatible with the target
+    /// cell's declared type (never silently corrupting it) and records the target path
+    /// here so the grid can flag exactly which cells were refused. Byte-free / transient:
+    /// it carries no value (only "this cell was a rejected target"), is replaced by the
+    /// next fill / paste, and is cleared by any other grid action (selection move, edit,
+    /// escape) so a stale rejection never lingers.
+    rejected_cells: Vec<StructuralPath>,
 }
 
 /// The originating table cell a tree/form drill-in returns to (FR-006).
@@ -873,6 +1075,100 @@ impl ViewSelectionAndFocus {
     pub fn grid_selection_rect(&self) -> Option<(usize, usize, usize, usize)> {
         self.grid_selection
             .map(|((ar, ac), (cr, cc))| (ar.min(cr), ac.min(cc), ar.max(cr), ac.max(cc)))
+    }
+
+    // --- E012 / US4 / FR-016 — type-rejected fill/paste cell flags ---------------
+
+    /// Record the cells a bulk fill / paste **refused to write** because their value was
+    /// incompatible with the target cell's declared type (E012 / FR-016). REPLACES any
+    /// prior set (each fill / paste reports its own rejections), so the grid flags only
+    /// the cells the latest operation refused. Byte-free / transient (FR-020): a refused
+    /// write changes zero document bytes; this only marks which targets were skipped.
+    pub fn set_rejected_cells(&mut self, paths: Vec<StructuralPath>) {
+        self.rejected_cells = paths;
+    }
+
+    /// Clear the type-rejected fill/paste cell flags (E012 / FR-016) — called when a
+    /// different grid action runs (selection move, edit, escape) so a stale rejection
+    /// marker never lingers past the operation it described. A no-op when none are set.
+    pub fn clear_rejected_cells(&mut self) {
+        if !self.rejected_cells.is_empty() {
+            self.rejected_cells.clear();
+        }
+    }
+
+    /// `true` when the cell at `path` was a type-rejected target of the most recent
+    /// fill / paste (E012 / FR-016) — the grid paints the rejected marker on it. By
+    /// value [`StructuralPath`], so it survives a virtualization scroll like the other
+    /// cell state. Read-only / byte-free.
+    #[must_use]
+    pub fn is_rejected_cell(&self, path: &StructuralPath) -> bool {
+        self.rejected_cells.iter().any(|p| p == path)
+    }
+
+    /// `true` when at least one cell is flagged type-rejected (E012 / FR-016). A cheap
+    /// guard the renderer uses to skip the per-cell lookup when nothing was rejected.
+    #[must_use]
+    pub fn has_rejected_cells(&self) -> bool {
+        !self.rejected_cells.is_empty()
+    }
+
+    /// The type-rejected fill/paste cell paths (E012 / FR-016), for snapshotting once per
+    /// frame so the immutable-borrow render closures can flag each target without
+    /// re-borrowing the document. Empty when the last fill / paste refused nothing.
+    #[must_use]
+    pub fn rejected_cells(&self) -> &[StructuralPath] {
+        &self.rejected_cells
+    }
+
+    // --- E012 / US3 — per-section column view-state (hide / order / pin) ---------
+
+    /// The column view-state for the section at `path`, if one has been set (E012 /
+    /// FR-007). `None` when the section uses the default layout (the renderer then
+    /// shows every column in natural model order). Read-only; byte-free.
+    #[must_use]
+    pub fn column_view_state(&self, path: &StructuralPath) -> Option<&ColumnViewState> {
+        self.column_view_states
+            .iter()
+            .find(|(p, _)| p == path)
+            .map(|(_, s)| s)
+    }
+
+    /// The column view-state for the section at `path`, creating an empty default one
+    /// if absent (E012 / FR-007) — the mutable entry point for a hide / reorder / pin
+    /// gesture. Every mutation through the returned reference is view-only / byte-free
+    /// (Principle I): it changes presentation state only and NEVER the document buffer.
+    pub fn column_view_state_mut(&mut self, path: &StructuralPath) -> &mut ColumnViewState {
+        if let Some(idx) = self.column_view_states.iter().position(|(p, _)| p == path) {
+            return &mut self.column_view_states[idx].1;
+        }
+        self.column_view_states
+            .push((path.clone(), ColumnViewState::new()));
+        &mut self
+            .column_view_states
+            .last_mut()
+            .expect("just pushed an entry")
+            .1
+    }
+
+    /// Reset the section at `path` to the default column layout (E012 / FR-015):
+    /// drop its column view-state so the renderer shows every column in natural model
+    /// order, nothing hidden, nothing pinned. A no-op when the section is already
+    /// default. Byte-free.
+    pub fn reset_column_view_state(&mut self, path: &StructuralPath) {
+        self.column_view_states.retain(|(p, _)| p != path);
+    }
+
+    /// The section paths that currently have a live column view-state (E012 / FR-007).
+    ///
+    /// Used by the settings-sync seam to write each live layout back to its persisted
+    /// entry; the order mirrors first-seen insertion order. Byte-free.
+    #[must_use]
+    pub fn column_view_state_paths(&self) -> Vec<StructuralPath> {
+        self.column_view_states
+            .iter()
+            .map(|(p, _)| p.clone())
+            .collect()
     }
 
     /// `true` when the projection is stale (a reparse is in flight) (FR-015).
@@ -1295,6 +1591,92 @@ mod tests {
         // At the root selection, can_go_up is false.
         vsf.set_selected_table_section(Some(StructuralPath::root()));
         assert!(!vsf.can_go_up());
+    }
+
+    // =========================================================================
+    // E012 / US3 — ColumnViewState (hide / reorder / pin), view-only / byte-free
+    // =========================================================================
+
+    #[test]
+    fn column_view_state_default_is_natural_order_all_visible() {
+        let cvs = ColumnViewState::new();
+        assert!(cvs.is_default());
+        // 4 model columns → visible = [0,1,2,3] (natural order, nothing hidden).
+        assert_eq!(cvs.visible_columns(4), vec![0, 1, 2, 3]);
+        assert_eq!(cvs.effective_order(4), vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn column_view_state_hide_removes_from_visible_only() {
+        let mut cvs = ColumnViewState::new();
+        cvs.hide(1);
+        assert!(cvs.is_hidden(1));
+        assert_eq!(cvs.visible_columns(4), vec![0, 2, 3], "column 1 hidden");
+        cvs.show(1);
+        assert!(!cvs.is_hidden(1));
+        assert_eq!(cvs.visible_columns(4), vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn column_view_state_move_reorders_visible() {
+        let mut cvs = ColumnViewState::new();
+        // Move model column 3 to display position 0.
+        cvs.move_column(3, 0, 4);
+        assert_eq!(cvs.visible_columns(4), vec![3, 0, 1, 2]);
+        // Move model column 0 to position 2 within the new order [3,0,1,2].
+        cvs.move_column(0, 2, 4);
+        assert_eq!(cvs.visible_columns(4), vec![3, 1, 0, 2]);
+    }
+
+    #[test]
+    fn column_view_state_pin_floats_to_front_and_reveals() {
+        let mut cvs = ColumnViewState::new();
+        cvs.hide(2);
+        cvs.pin(2); // pinning a hidden column reveals it
+        assert!(!cvs.is_hidden(2), "pin reveals a hidden column");
+        // Pinned column leads; the rest follow in natural order (2 not repeated).
+        assert_eq!(cvs.visible_columns(4), vec![2, 0, 1, 3]);
+        cvs.unpin();
+        assert_eq!(cvs.visible_columns(4), vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn column_view_state_hide_pinned_unpins() {
+        let mut cvs = ColumnViewState::new();
+        cvs.pin(1);
+        assert_eq!(cvs.pinned, Some(1));
+        cvs.hide(1);
+        assert_eq!(cvs.pinned, None, "hiding the pinned column unpins it");
+        assert_eq!(cvs.visible_columns(4), vec![0, 2, 3]);
+    }
+
+    #[test]
+    fn column_view_state_ignores_out_of_range_indices() {
+        let mut cvs = ColumnViewState::new();
+        // Stale indices from a wider prior model must not corrupt a now-narrower one.
+        cvs.hide(9);
+        cvs.pin(9);
+        cvs.move_column(9, 0, 3); // col out of range → no-op
+        cvs.order = vec![5, 1, 0]; // a stale order entry (5) is dropped
+        assert_eq!(
+            cvs.visible_columns(3),
+            vec![1, 0, 2],
+            "out-of-range pin/hide/order entries are ignored; col 2 appended"
+        );
+    }
+
+    #[test]
+    fn reset_column_view_state_restores_default() {
+        let mut vsf = ViewSelectionAndFocus::new();
+        let sec = field("rows");
+        vsf.column_view_state_mut(&sec).hide(0);
+        vsf.column_view_state_mut(&sec).pin(2);
+        assert!(vsf.column_view_state(&sec).is_some());
+        vsf.reset_column_view_state(&sec);
+        assert!(
+            vsf.column_view_state(&sec).is_none(),
+            "reset drops the section's column view-state (default layout)"
+        );
     }
 
     #[test]

@@ -56,8 +56,9 @@ pub use indicators::TypeIndicator;
 pub use projection::{capture_path, derive_projection, ChildOutline, DerivedProjection, NodeKind};
 pub use sections::{scan_table_sections, SectionShape, TableSection};
 pub use table::{
-    breadcrumb_segments, render_table_view, render_table_view_any, render_table_view_any_counting,
-    render_table_view_counting, BreadcrumbSegment, Cell, CellClass, Column, ColumnClass, Row,
+    breadcrumb_segments, load_persisted_column_layout, render_table_view, render_table_view_any,
+    render_table_view_any_counting, render_table_view_counting, reset_column_layout,
+    save_persisted_column_layout, BreadcrumbSegment, Cell, CellClass, Column, ColumnClass, Row,
     TableModel,
 };
 pub use tree::{

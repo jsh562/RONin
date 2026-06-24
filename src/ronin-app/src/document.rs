@@ -58,7 +58,7 @@ use crate::structural::projection::{derive_projection, DerivedProjection};
 use crate::structural::sections::{scan_table_sections, SectionShape, TableSection};
 use crate::structural::table::TableModel;
 use crate::structural::tree::TreeFormModel;
-use crate::structural::view_state::{StructuralPath, ViewSelectionAndFocus};
+use crate::structural::view_state::{PathStep, StructuralPath, ViewSelectionAndFocus};
 
 /// Process-wide monotonic source of per-document identity tokens.
 ///
@@ -325,6 +325,54 @@ impl StructuralModelCache {
             self.sections = None;
         }
     }
+}
+
+/// The declared scalar kind of a table cell, derived from the bound type's
+/// schema at the cell's location (E012 — FR-005/FR-013, AD-002).
+///
+/// This is the coarse "which editor widget fits this cell" classification the
+/// Table view's editor dispatch keys on: a boolean cell wants a checkbox /
+/// Space-toggle, a number cell wants increment, an enum cell wants a variant
+/// picker, and a string (or anything else) falls back to the plain text editor.
+/// [`Unknown`](Self::Unknown) is the safe default whenever the declared type is
+/// absent or carries no constraining keyword (Principle III — never block
+/// editing; FR-013).
+///
+/// `#[non_exhaustive]` so future declared kinds (e.g. a distinct char/byte) can be
+/// added without a breaking change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CellKind {
+    /// A boolean (`"type": "boolean"`) — toggle/checkbox editor.
+    Bool,
+    /// An integer or float (`"type": "integer"` / `"number"`) — increment editor.
+    Number,
+    /// A RON enum (a `oneOf` whose branches carry `x-ron-variant`) — variant
+    /// picker; the variant names are in [`CellTypeInfo::enum_variants`].
+    Enum,
+    /// A string (`"type": "string"`) — plain text editor.
+    String,
+    /// No declared type, or a type with no constraining keyword (e.g.
+    /// `x-ron-kind: "unknown"`): treat as free text (FR-013).
+    Unknown,
+}
+
+/// The declared type information for one table cell, computed from the bound
+/// type's schema at the cell's location (E012 — FR-005/FR-013).
+///
+/// Produced by [`EditorDocument::query_cell_type`]; `None` from that method means
+/// the document is unbound (no type info ⇒ text fallback). When present, the
+/// editor dispatch chooses a widget from [`declared_kind`](Self::declared_kind)
+/// and, for an [`CellKind::Enum`] cell, offers the [`enum_variants`](Self::enum_variants)
+/// as the picker's choices.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CellTypeInfo {
+    /// The cell's coarse declared kind, driving editor-widget selection.
+    pub declared_kind: CellKind,
+    /// The variant names for an [`CellKind::Enum`] cell (the `x-ron-variant`
+    /// names of the schema's `oneOf` branches), in declaration order. Empty for
+    /// every non-enum kind.
+    pub enum_variants: Vec<String>,
 }
 
 /// One editor tab's document: editable text plus on-disk identity and derived
@@ -1621,6 +1669,51 @@ impl EditorDocument {
         self.structural_cache.sections.as_deref().unwrap_or(&[])
     }
 
+    // --- E012: type-aware cell editing (declared type query) -------------------
+
+    /// The declared type of the table cell identified by `path`, derived from the
+    /// document's bound type schema (E012 — FR-005/FR-013, AD-002).
+    ///
+    /// Returns `None` when the document is **unbound** ([`bound_type`](Self::bound_type)
+    /// is `None`): with no type model there is no declared type to honor, so the
+    /// editor dispatch falls back to the plain text editor (FR-013). It also returns
+    /// `None` when the path cannot be addressed as a single instance location (a
+    /// synthetic combined-table step has no schema location).
+    ///
+    /// When bound, the cell's [`StructuralPath`] is mapped to a JSON pointer
+    /// (mirroring the instance location) and resolved against the bound schema via
+    /// [`ronin_validate::resolve_type_at_pointer`] — the same schema-by-pointer
+    /// walker the validator uses, exposed once so the app need not duplicate it
+    /// (AD-002). The resolved sub-schema's keywords decide
+    /// [`declared_kind`](CellTypeInfo::declared_kind):
+    ///
+    /// * `"type": "boolean"` → [`CellKind::Bool`];
+    /// * `"type": "integer"` / `"number"` → [`CellKind::Number`];
+    /// * a `oneOf` whose branches carry `x-ron-variant` → [`CellKind::Enum`]
+    ///   (the branch `x-ron-variant` names become [`CellTypeInfo::enum_variants`]);
+    /// * `"type": "string"` → [`CellKind::String`];
+    /// * anything else (including `x-ron-kind: "unknown"`) → [`CellKind::Unknown`].
+    ///
+    /// Read-only (FR-020): it borrows the bound schema and the path and never
+    /// mutates the CST, the document, or the bound type — it performs **no** edit.
+    #[must_use]
+    pub fn query_cell_type(&self, path: &StructuralPath) -> Option<CellTypeInfo> {
+        // Unbound ⇒ no declared type ⇒ text fallback (FR-013).
+        let bound = self.bound_type.as_ref()?;
+        let pointer = path_to_json_pointer(path)?;
+
+        // Address the cell relative to the bound type's named def. A wrapper schema
+        // `{ "$ref": "#/$defs/<type>", "$defs": ... }` lets the resolver enter at the
+        // bound def (it resolves the root `$ref` first) and follow internal `$ref`s.
+        let schema = serde_json::json!({
+            "$ref": format!("#/$defs/{}", bound.type_name),
+            "$defs": bound.model.get("$defs").cloned().unwrap_or(serde_json::Value::Null),
+        });
+        let subschema = ronin_validate::resolve_type_at_pointer(&schema, &pointer)?;
+
+        Some(cell_type_info_from_schema(subschema))
+    }
+
     /// `true` when the structural model cache currently holds a derived tree model for
     /// the live parse generation (test seam for the per-parse cache regression guard).
     #[must_use]
@@ -1892,6 +1985,81 @@ pub fn merge_type_diagnostics(result: &ParseResult, buffer: &str) -> Vec<Diagnos
     );
 
     views
+}
+
+/// Map a [`StructuralPath`] to the RFC-6901 JSON pointer addressing the same
+/// instance location, for schema-by-pointer resolution (E012 — FR-005).
+///
+/// Each [`PathStep`] mirrors a JSON instance segment: a struct field / map key /
+/// enum-variant field by its name, a list/tuple element by its 0-based index.
+/// Names are escaped per RFC-6901 (`~` → `~0`, `/` → `~1`) so a key containing a
+/// pointer metacharacter still addresses the right location. The empty path maps
+/// to the empty pointer (the document's top-level value).
+///
+/// Returns `None` for a [`PathStep::CombinedChild`]: a synthetic combined-table
+/// step is not a single instance location, so it has no schema sub-node to query
+/// (the caller then treats the cell as untyped — text fallback, FR-013).
+fn path_to_json_pointer(path: &StructuralPath) -> Option<String> {
+    let mut pointer = String::new();
+    for step in path.steps() {
+        pointer.push('/');
+        match step {
+            PathStep::Field(name)
+            | PathStep::Key(name)
+            | PathStep::VariantField(name) => {
+                pointer.push_str(&escape_pointer_segment(name));
+            }
+            PathStep::Index(idx) => {
+                pointer.push_str(&idx.to_string());
+            }
+            // A synthetic combined-table step addresses no single instance.
+            PathStep::CombinedChild(_) => return None,
+        }
+    }
+    Some(pointer)
+}
+
+/// Escape a single JSON-Pointer segment per RFC-6901 (`~` → `~0`, `/` → `~1`).
+///
+/// `~0`/`~1` mirror the unescaping `ronin-validate`'s resolver applies when it
+/// walks the pointer, so a key with a metacharacter round-trips.
+fn escape_pointer_segment(segment: &str) -> String {
+    segment.replace('~', "~0").replace('/', "~1")
+}
+
+/// Derive a [`CellTypeInfo`] from a resolved sub-schema node (E012 — FR-005).
+///
+/// Classifies the node's declared kind from its keywords (`type` / enum `oneOf` +
+/// `x-ron-variant`), defaulting to [`CellKind::Unknown`] for anything with no
+/// constraining keyword so the editor never blocks (Principle III / FR-013).
+fn cell_type_info_from_schema(schema: &serde_json::Value) -> CellTypeInfo {
+    // A RON enum: a `oneOf` whose branches carry `x-ron-variant`. Collect the
+    // variant names (in declaration order) for the picker.
+    if let Some(branches) = schema.get("oneOf").and_then(serde_json::Value::as_array) {
+        let variants: Vec<String> = branches
+            .iter()
+            .filter_map(|b| b.get("x-ron-variant").and_then(serde_json::Value::as_str))
+            .map(str::to_owned)
+            .collect();
+        if !variants.is_empty() {
+            return CellTypeInfo {
+                declared_kind: CellKind::Enum,
+                enum_variants: variants,
+            };
+        }
+    }
+
+    let declared_kind = match schema.get("type").and_then(serde_json::Value::as_str) {
+        Some("boolean") => CellKind::Bool,
+        Some("integer" | "number") => CellKind::Number,
+        Some("string") => CellKind::String,
+        // No constraining `type` keyword (incl. `x-ron-kind: "unknown"`) → free text.
+        _ => CellKind::Unknown,
+    };
+    CellTypeInfo {
+        declared_kind,
+        enum_variants: Vec::new(),
+    }
 }
 
 #[cfg(test)]

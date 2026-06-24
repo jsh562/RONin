@@ -563,7 +563,7 @@ fn diag(
 /// false tuple-arity claim).
 fn is_tuple_at(schema: &Value, pointer: &str, _projection: &CstJsonProjection) -> bool {
     // Resolve the schema sub-node for this instance pointer, then read x-ron-kind.
-    let node = resolve_schema_for_pointer(schema, pointer);
+    let node = resolve_type_at_pointer(schema, pointer);
     node.and_then(|n| n.get("x-ron-kind"))
         .and_then(Value::as_str)
         == Some("tuple")
@@ -574,7 +574,16 @@ fn is_tuple_at(schema: &Value, pointer: &str, _projection: &CstJsonProjection) -
 /// `properties`/`additionalProperties` for object keys, and
 /// `prefixItems`/`items` for array indices. Returns `None` if the path cannot be
 /// resolved (then the caller treats the kind conservatively).
-fn resolve_schema_for_pointer<'a>(schema: &'a Value, pointer: &str) -> Option<&'a Value> {
+///
+/// Public so other RONin surfaces (e.g. `ronin-app`'s table editor type query,
+/// E012/FR-005) can resolve the declared sub-schema at a JSON pointer without
+/// duplicating this walker (AD-002). Pure: `Value` in -> `Option<&Value>` out,
+/// no I/O, no mutation — keeps the crate WASM-clean (ADR-0006).
+///
+/// `schema` is a serialized `TypeModel` (JSON-Schema 2020-12 + `x-ron-*`).
+/// `pointer` is an RFC-6901 JSON pointer addressing the instance location
+/// (leading `/`, `~0`/`~1` escapes honored).
+pub fn resolve_type_at_pointer<'a>(schema: &'a Value, pointer: &str) -> Option<&'a Value> {
     let defs = schema.get("$defs");
     let mut current = resolve_ref_in(schema, defs);
     for raw_seg in pointer.split('/').filter(|s| !s.is_empty()) {
@@ -902,7 +911,7 @@ fn map_error_at(
 
 /// Whether the sub-schema for `pointer` in `schema` is an `x-ron-kind:tuple`.
 fn is_tuple_schema(schema: &Value, pointer: &str) -> bool {
-    resolve_schema_for_pointer(schema, pointer)
+    resolve_type_at_pointer(schema, pointer)
         .and_then(|n| n.get("x-ron-kind"))
         .and_then(Value::as_str)
         == Some("tuple")

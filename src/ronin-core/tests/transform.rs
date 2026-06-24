@@ -673,6 +673,79 @@ proptest! {
         prop_assert_eq!(print(&doc), src);
     }
 
+    /// FR-008 (E012 / US3, ADR-0001): DRAG-DRIVEN row reorder is lossless for an
+    /// ARBITRARY `from → to` index pair — the exact (from, to) a row drag produces,
+    /// covering `from < to`, `from > to`, adjacent moves, and the no-op `from == to`.
+    /// A row drag in the table is exactly a `StructuralOp::ReorderChild` over the
+    /// section's list. This pins three invariants for every such pair:
+    ///   1. the MULTISET of element texts is preserved (no element gained/lost),
+    ///   2. the TARGET PERMUTATION is correct (the moved element lands at final index
+    ///      `to`, and the others keep their relative order — the precise array-move
+    ///      semantics `reorder_child` documents),
+    ///   3. each element's own bytes (incl. its comment / trailing-comma trivia) are
+    ///      preserved BYTE-FOR-BYTE — the moved row's verbatim text and every
+    ///      untouched row's text are identical to the original (lossless CST).
+    /// The two raw `usize`s are mapped into range with the generated list's length,
+    /// so the pair spans the full drag space without a length-dependent strategy.
+    #[test]
+    fn prop_reorder_list_drag_driven_is_lossless(
+        src in ron_doc(),
+        from_seed in any::<usize>(),
+        to_seed in any::<usize>(),
+    ) {
+        let doc = parse(&src);
+        prop_assume!(first_opt(&doc, SyntaxKind::List).is_some());
+        let before = list_item_texts(&doc);
+        let len = before.len();
+        prop_assume!(len >= 2);
+
+        // The exact (from, to) a drag of one row onto another produces: both valid
+        // 0-based indices into the list, spanning from<to, from>to, adjacent, equal.
+        let from = from_seed % len;
+        let to = to_seed % len;
+
+        let outcome = apply_structural(
+            &doc,
+            StructuralOp::ReorderChild {
+                parent: list_parent(&doc),
+                from,
+                to,
+            },
+        );
+        let TransformOutcome::Applied(new_doc) = outcome else {
+            prop_assert!(false, "drag reorder blocked unexpectedly (from={}, to={})", from, to);
+            unreachable!();
+        };
+
+        // The original is never mutated (non-destructive).
+        prop_assert_eq!(print(&doc), src.clone());
+
+        // Reparse so each re-inserted (raw-token) element is a structured node again.
+        let new = reparse(&print(&new_doc));
+        let after = list_item_texts(&new);
+
+        // (1) MULTISET preserved: same element texts, just permuted.
+        let mut bsorted = before.clone();
+        bsorted.sort();
+        let mut asorted = after.clone();
+        asorted.sort();
+        prop_assert_eq!(&bsorted, &asorted, "multiset of element texts preserved");
+        prop_assert_eq!(after.len(), len, "element count unchanged");
+
+        // (2) TARGET PERMUTATION: the array-move semantics `reorder_child` documents —
+        // remove `before[from]`, then re-insert it at final index `to`.
+        let mut expected = before.clone();
+        let moved = expected.remove(from);
+        expected.insert(to.min(expected.len()), moved.clone());
+        prop_assert_eq!(&after, &expected, "drag from={} to={} lands the correct permutation", from, to);
+
+        // (3) LOSSLESS bytes: the moved row's verbatim text survived unchanged...
+        prop_assert_eq!(after.get(to).cloned(), Some(moved), "moved row's own bytes preserved");
+        // ...and every element's bytes are byte-identical to one of the originals
+        // (no reflow / re-indent of any row), guaranteed by the multiset equality plus
+        // the exact per-index expectation above.
+    }
+
     /// Blocked = zero change: a guaranteed-collision rename never alters bytes.
     #[test]
     fn prop_blocked_rename_is_zero_change(src in ron_doc()) {

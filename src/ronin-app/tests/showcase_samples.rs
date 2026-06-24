@@ -33,6 +33,7 @@ use ronin_app::reparse::ReparseWorker;
 use ronin_app::settings::AppSettings;
 use ronin_app::structural::classifier::{classify, FallbackReason};
 use ronin_app::structural::sections::{scan_table_sections, SectionShape};
+use ronin_app::structural::table::{CellClass, TableModel};
 use ronin_app::structural::tree::{TreeFormModel, TreeNode, TreeNodeKind};
 
 // =============================================================================
@@ -408,5 +409,183 @@ fn sample_files_all_exist_on_disk() {
             Path::new(&path).exists(),
             "expected showcase sample `{name}` at {path}"
         );
+    }
+}
+
+// =============================================================================
+// (T036) The new cell editors over the REAL sample corpus — bool / enum / numeric
+// cells in the bundled samples PROJECT and RENDER correctly with the E012 editors,
+// and the samples still load losslessly through the real worker.
+//
+// Not a duplicate of `table_ergonomics.rs` (which uses synthetic fixtures): this
+// asserts the new editors classify the cells in the actual on-disk corpus the app
+// ships. A sample that does NOT actually carry the targeted cell kinds FAILS.
+// =============================================================================
+
+/// The first column index whose every present cell's `scalar_type_name` equals `word`
+/// (an `integer` / `float` / `bool` column), or `None`.
+fn column_of_scalar_word(model: &TableModel, word: &str) -> Option<usize> {
+    (0..model.columns.len()).find(|&c| {
+        let present: Vec<_> = (0..model.row_count())
+            .filter_map(|r| model.cell(r, c))
+            .filter(|cell| cell.class == CellClass::Scalar)
+            .collect();
+        !present.is_empty() && present.iter().all(|cell| cell.scalar_type_name() == Some(word))
+    })
+}
+
+#[test]
+fn kitchen_sink_events_projects_numeric_and_enum_cells() {
+    // `showcase_kitchen_sink.ron` → the top-level `events` RecordList carries the new
+    // editors' target cell kinds: `at` is a NUMERIC cell (integer) and `kind` is an
+    // ENUM-like cell (a bare-identifier variant: Spawn / Move / Despawn). Both project
+    // as editable Scalar cells with the right lexical type — the numeric-increment and
+    // (text-fallback) enum editors apply to the real corpus.
+    let src = sample("showcase_kitchen_sink.ron");
+    assert_eq!(parse_error_count(&src), 0, "kitchen-sink must be valid RON");
+
+    // The `events` section is the LAST top-level RecordList; locate it by its `at` /
+    // `kind` / `payload` columns rather than by scan order.
+    let cst = parse(&src);
+    let events = scan_table_sections(&cst)
+        .into_iter()
+        .filter(|s| s.shape == SectionShape::RecordList)
+        .filter_map(|s| {
+            TableModel::derive_section(&cst, &s.path, SectionShape::RecordList, &[]).map(|m| (s, m))
+        })
+        .find(|(_, m)| {
+            let names: Vec<&str> = m.columns.iter().map(|c| c.field_name.as_str()).collect();
+            names.contains(&"at") && names.contains(&"kind")
+        })
+        .map(|(_, m)| m)
+        .expect("the `events` RecordList (at / kind / payload) is found");
+
+    assert_eq!(events.row_count(), 3, "events has 3 rows (Spawn / Move / Despawn)");
+
+    // The `at` column is a NUMERIC cell on every row (the numeric-increment editor).
+    let at_col = events
+        .columns
+        .iter()
+        .position(|c| c.field_name == "at")
+        .expect("an `at` column");
+    for r in 0..events.row_count() {
+        let cell = events.cell(r, at_col).expect("an `at` cell");
+        assert_eq!(cell.class, CellClass::Scalar, "the `at` cell is an editable scalar");
+        assert_eq!(
+            cell.scalar_type_name(),
+            Some("integer"),
+            "the `at` cell projects as a numeric (integer) cell: {:?}",
+            cell.text
+        );
+    }
+
+    // The `kind` column is an ENUM-like cell — a bare identifier variant token on every
+    // row (Spawn / Move / Despawn). It projects as an editable Scalar; with no type bound
+    // it edits as free text (the enum picker is the type-aware enhancement).
+    let kind_col = events
+        .columns
+        .iter()
+        .position(|c| c.field_name == "kind")
+        .expect("a `kind` column");
+    let variants: Vec<String> = (0..events.row_count())
+        .map(|r| {
+            let cell = events.cell(r, kind_col).expect("a `kind` cell");
+            assert_eq!(cell.class, CellClass::Scalar, "the `kind` cell is an editable scalar");
+            cell.text.clone().expect("a present `kind` token")
+        })
+        .collect();
+    for v in ["Spawn", "Move", "Despawn"] {
+        assert!(
+            variants.iter().any(|t| t == v),
+            "the `kind` enum column carries the `{v}` variant token: {variants:?}"
+        );
+    }
+}
+
+#[test]
+fn ships_cells_section_projects_bool_and_enum_cells() {
+    // `ships.ron` → each hull's `cells` RecordList carries a `structural` BOOL column
+    // and a `shape` ENUM-like column (the Full / … variants) alongside a numeric
+    // `section`. This is the real-corpus witness for the bool toggle editor (no
+    // synthetic fixture): the bool cells project with the `bool` scalar type so Space
+    // toggles them, and the enum-like cells project as editable Scalars.
+    let src = sample("ships.ron");
+    assert_eq!(parse_error_count(&src), 0, "ships.ron must be valid RON");
+
+    let cst = parse(&src);
+    // Find the first RecordList whose columns include `structural` (bool) + `shape`.
+    let cells = scan_table_sections(&cst)
+        .into_iter()
+        .filter(|s| s.shape == SectionShape::RecordList)
+        .filter_map(|s| {
+            TableModel::derive_section(&cst, &s.path, SectionShape::RecordList, &[]).map(|m| (s, m))
+        })
+        .find(|(_, m)| {
+            let names: Vec<&str> = m.columns.iter().map(|c| c.field_name.as_str()).collect();
+            names.contains(&"structural") && names.contains(&"shape")
+        })
+        .map(|(_, m)| m)
+        .expect("a hull `cells` RecordList (structural / shape) is found");
+
+    // The `structural` column is a BOOL cell on every present row (the Space-toggle /
+    // checkbox editor) — `true`/`false` tokens classify as `bool`.
+    let bool_col = column_of_scalar_word(&cells, "bool").expect("a bool column in `cells`");
+    assert_eq!(
+        cells.columns[bool_col].field_name, "structural",
+        "the bool column is `structural`"
+    );
+    let bool_tokens: Vec<String> = (0..cells.row_count())
+        .filter_map(|r| cells.cell(r, bool_col))
+        .filter_map(|c| c.text.clone())
+        .collect();
+    assert!(
+        bool_tokens.iter().any(|t| t == "true") || bool_tokens.iter().any(|t| t == "false"),
+        "the `structural` bool column carries true/false tokens: {bool_tokens:?}"
+    );
+    for t in &bool_tokens {
+        assert!(t == "true" || t == "false", "a bool cell holds only true/false: {t}");
+    }
+
+    // The `shape` column is an ENUM-like cell — a bare-identifier variant on every row.
+    let shape_col = cells
+        .columns
+        .iter()
+        .position(|c| c.field_name == "shape")
+        .expect("a `shape` column");
+    for r in 0..cells.row_count() {
+        if let Some(cell) = cells.cell(r, shape_col) {
+            if cell.class == CellClass::Scalar {
+                let tok = cell.text.clone().expect("a present `shape` token");
+                assert!(
+                    tok.chars().next().is_some_and(char::is_alphabetic),
+                    "the `shape` enum cell is a bare-identifier variant token: {tok}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn samples_with_new_cell_kinds_load_losslessly_through_the_worker() {
+    // The samples carrying the new cell kinds still LOAD losslessly: parsed + driven
+    // through the real off-frame worker, the buffer round-trips byte-for-byte (the new
+    // editors are projection-only reads — opening a sample never reflows it; FR-014).
+    let worker = ReparseWorker::new();
+    for name in ["showcase_kitchen_sink.ron", "ships.ron"] {
+        let src = sample(name);
+        let doc = doc_at(&src, &worker);
+        assert_eq!(
+            doc.buffer, src,
+            "`{name}` loaded byte-losslessly (projecting bool/enum/numeric cells did not reflow it)"
+        );
+        // And it parses with zero errors after the round-trip (still valid RON).
+        let parse = doc.parse.as_ref().expect("a parse landed");
+        let errors = parse
+            .cst
+            .diagnostics()
+            .iter()
+            .filter(|d| d.severity() == Severity::Error)
+            .count();
+        assert_eq!(errors, 0, "`{name}` is still valid RON after the worker round-trip");
     }
 }

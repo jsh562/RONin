@@ -1,0 +1,9 @@
+---
+source: src/ronin-app/tests/table_ergonomics.rs
+expression: doc.buffer
+---
+// scene config
+[
+    /* hero */ (name: "hero", on: true,  hp: 10), // primary
+        /* boss */ (name: "boss", on: false, hp: 100), // indented oddly
+] // end

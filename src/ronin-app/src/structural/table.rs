@@ -71,8 +71,9 @@ use ronin_core::{BlockedReason, CstDocument, SyntaxNode};
 
 use crate::byte_to_char::ByteCharIndex;
 use crate::diagnostics_map::DiagnosticView;
-use crate::document::EditorDocument;
+use crate::document::{CellKind, EditorDocument};
 use crate::reparse::ReparseWorker;
+use crate::settings::{section_layout_key, AppSettings, PersistedColumnLayout};
 use crate::structural::classifier::{scalar_class_of, ScalarClass};
 use crate::structural::indicators::{self, TypeIndicator};
 use crate::structural::sections::SectionShape;
@@ -171,6 +172,20 @@ impl Cell {
     #[must_use]
     pub fn scalar_type_name(&self) -> Option<&'static str> {
         self.scalar.map(|c| indicators::from_scalar_class(c).word())
+    }
+
+    /// `true` when this cell carries at least one **error**-severity diagnostic — a
+    /// malformed RON token (RON-P####, lexical) or a type-rule violation (RON-V####,
+    /// semantic when a type is bound), attached to the cell by CST range during
+    /// derivation (E012 / FR-009). Drives the in-cell error border in the validation
+    /// overlay so an invalid committed value is visibly flagged while staying editable
+    /// (never silently reverted). The detail text is shown via the existing
+    /// [`render_cell_diagnostics`] hover (the same RON-V#### message the text view uses).
+    #[must_use]
+    pub fn has_error_diagnostic(&self) -> bool {
+        self.diagnostics
+            .iter()
+            .any(|d| d.severity == ronin_core::Severity::Error)
     }
 }
 
@@ -1139,16 +1154,28 @@ pub(crate) fn combinable_child_fields(parent_node: &SyntaxNode) -> Vec<Combinabl
 }
 
 /// `true` when `value` is a nested collection (struct / map / list / tuple /
-/// enum-variant payload) — a drill-in cell, not an inline scalar (FR-006/FR-010).
+/// payload-carrying enum variant) — a drill-in cell, not an inline scalar
+/// (FR-006/FR-010).
+///
+/// A **unit** enum variant (a bare `Foo` with no payload) is NOT nested: it has
+/// nothing to drill into, and editing it means swapping the variant — exactly what
+/// the type-aware enum picker does (E012 / FR-005). So a unit variant stays an inline
+/// [`CellClass::Scalar`] cell (free-text when unbound, picker when a declared enum
+/// type is bound — AD-001). A struct-like variant `Foo { .. }` carries a payload and
+/// remains a tree/form drill-in.
 fn is_nested(value: &ast::Value) -> bool {
-    matches!(
-        value,
+    match value {
         ast::Value::Struct(_)
-            | ast::Value::Map(_)
-            | ast::Value::List(_)
-            | ast::Value::Tuple(_)
-            | ast::Value::EnumVariant(_)
-    )
+        | ast::Value::Map(_)
+        | ast::Value::List(_)
+        | ast::Value::Tuple(_) => true,
+        // A unit variant (no struct-like payload entries) is inline-editable; a
+        // struct-like variant (`Foo { .. }`) carries entries → drill-in. (A
+        // tuple-style variant `Foo(..)` parses as a Struct/Tuple node above, not an
+        // EnumVariant, so it is already covered.)
+        ast::Value::EnumVariant(v) => v.entries().next().is_some(),
+        _ => false,
+    }
 }
 
 /// `true` when `value` is a **multi-element collection** (a List or a Map) — the
@@ -1657,6 +1684,34 @@ impl EditorDocument {
             now,
         )
     }
+
+    /// Reorder rows: move the row (element) at `from` to position `to` within the
+    /// table section, as **one undo unit** (E012 / US3 / FR-008). This is the action a
+    /// row drag-handle dispatches.
+    ///
+    /// It REUSES the existing lossless [`StructuralOp::ReorderChild`] (no new core op
+    /// — AD-003 / HINT-005): the moved row's own bytes (incl. its comment / trailing-
+    /// comma trivia) are preserved verbatim and every untouched row stays byte-
+    /// identical (ADR-0001 / Principle I). `from`/`to` are 0-based row indices in the
+    /// PRE-MOVE indexing; `from == to` is a byte-unchanged no-op. Routing through
+    /// [`apply_structural_edit`](Self::apply_structural_edit) makes it a single E007
+    /// undo unit, exactly like [`apply_table_append_row`](Self::apply_table_append_row)
+    /// and [`apply_table_delete_row`](Self::apply_table_delete_row).
+    pub fn apply_table_reorder_row(
+        &mut self,
+        section: &StructuralPath,
+        from: usize,
+        to: usize,
+        worker: &ReparseWorker,
+        now: Instant,
+    ) -> Result<(), BlockedReason> {
+        let parent = self.table_resolve_list(section)?;
+        self.apply_structural_edit(
+            StructuralOp::ReorderChild { parent, from, to },
+            worker,
+            now,
+        )
+    }
 }
 
 // =============================================================================
@@ -1683,6 +1738,10 @@ enum PendingAction {
     AppendRow,
     /// Delete the row at `row`.
     DeleteRow { row: usize },
+    /// Reorder rows: move the row at `from` to position `to`, dispatched by a row
+    /// drag-handle release (E012 / US3 / FR-008). Reuses the lossless
+    /// [`StructuralOp::ReorderChild`] as one undo unit (no new core op — AD-003).
+    ReorderRow { from: usize, to: usize },
     /// Drill into the nested cell at `(row, column)` — open it in the tree/form
     /// surface (FR-006), keyed by its structural path. The originating cell's path +
     /// grid `(row, column)` are recorded as the return target so the drilled-in view
@@ -1696,6 +1755,14 @@ enum PendingAction {
     /// navigator's selected section to the cell's path and STAY in the Table view (no
     /// switch to tree/form). Byte-free — it only writes view state.
     OpenAsTable { path: StructuralPath },
+    /// Toggle a boolean cell from its checkbox affordance (E012 / FR-001): commit the
+    /// already-flipped `value` token at the cell's value `path` as one undo unit. The
+    /// click on the checkbox is the toggle gesture; Space is the keyboard equivalent —
+    /// both map to the same single action (no gesture overload).
+    ToggleBool {
+        path: StructuralPath,
+        value: String,
+    },
 }
 
 /// A keyboard cell-navigation intent collected during the render walk (FR-009).
@@ -1713,6 +1780,121 @@ enum CellNav {
     Up,
     /// The cell directly below (Down).
     Down,
+}
+
+/// A column-ergonomics intent captured from a header context menu this frame (E012 /
+/// US3 / FR-007), applied to the section's [`ColumnViewState`] after rendering.
+///
+/// Every variant is VIEW-ONLY (Principle I / HINT-002): hide / show / pin / reorder /
+/// reset change presentation state only and NEVER touch the CST — the document buffer
+/// stays byte-identical. Indices are MODEL-column indices (into [`TableModel::columns`]).
+///
+/// [`ColumnViewState`]: crate::structural::view_state::ColumnViewState
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ColumnViewIntent {
+    /// Hide the MODEL column at this index.
+    Hide(usize),
+    /// Show (un-hide) the MODEL column at this index.
+    Show(usize),
+    /// Toggle the pin on the MODEL column at this index (pin/unpin the key column).
+    TogglePin(usize),
+    /// Move the MODEL column `col` to display position `to` (visible-order index).
+    Move { col: usize, to: usize },
+    /// Reset the section's columns to the default layout (FR-015).
+    Reset,
+}
+
+// ===========================================================================
+// E012 / US3 — column-layout PERSISTENCE seam (FR-007 / FR-015)
+// ===========================================================================
+//
+// These three free functions bridge the LIVE per-section `ColumnViewState`
+// (`doc.view_state()`) and the PERSISTED layout in `AppSettings` (the OS config
+// file). They are PRESENTATION-only (Principle I / HINT-002): a column layout is
+// never a CST edit and the document buffer always stays byte-identical. The host
+// (`App::render_central`) calls `load_persisted_column_layout` before rendering a
+// section and `save_persisted_column_layout` after — and tests drive these same
+// functions directly (no live GUI). An UNTITLED document (no on-disk path) has no
+// stable key, so persistence is a no-op for it and its layout stays live-only.
+
+/// Load a section's PERSISTED column layout into the live view-state, when the
+/// section is first shown (E012 / US3 / FR-007 — the (a) leg of T025).
+///
+/// Only materializes when the section has **no** live `ColumnViewState` yet AND a
+/// persisted layout exists for it — so it seeds first-show and never clobbers an
+/// in-session change (a subsequent frame finds live state present and skips). The
+/// persisted indices are re-validated against the live `model_cols` column count
+/// ([`PersistedColumnLayout::to_view_state`]): a stale / out-of-range index is
+/// dropped, never corrupting the view. A no-op for an untitled document (no key) or a
+/// persisted layout that decays to default. View-only / byte-free.
+pub fn load_persisted_column_layout(
+    doc: &mut EditorDocument,
+    settings: &AppSettings,
+    section: &StructuralPath,
+    model_cols: usize,
+) {
+    // Already have live state for this section → first-show load already happened (or
+    // the user changed it this session); never overwrite it.
+    if doc.view_state().column_view_state(section).is_some() {
+        return;
+    }
+    let Some(key) = section_layout_key(doc.path.as_deref(), section) else {
+        return; // untitled / unsaved: no stable key, stays live-only.
+    };
+    let Some(layout) = settings.column_layout(&key) else {
+        return; // no persisted layout: the section uses its default.
+    };
+    let live = layout.to_view_state(model_cols);
+    if live.is_default() {
+        return; // nothing meaningful to materialize.
+    }
+    *doc.view_state_mut().column_view_state_mut(section) = live;
+}
+
+/// Save a section's LIVE column view-state back to the PERSISTED layout (E012 / US3 /
+/// FR-007 — the (b) leg of T025) and, by the same call, realize FR-015's
+/// reset-clears-persisted contract.
+///
+/// Snapshots the live `ColumnViewState` (or the DEFAULT layout when the section has no
+/// live state — e.g. just after a reset) into `AppSettings`. [`AppSettings::set_column_layout`]
+/// stores a non-default layout and **removes** a default one, so: a hide/reorder/pin
+/// persists, and a reset (which drops the live state) clears the persisted entry —
+/// the section truly returns to its first-seen default (FR-015). A no-op for an
+/// untitled document (no key). PRESENTATION-only — never a CST edit.
+pub fn save_persisted_column_layout(
+    doc: &EditorDocument,
+    settings: &mut AppSettings,
+    section: &StructuralPath,
+) {
+    let Some(key) = section_layout_key(doc.path.as_deref(), section) else {
+        return; // untitled / unsaved: nothing to persist.
+    };
+    let layout = doc
+        .view_state()
+        .column_view_state(section)
+        .map_or_else(PersistedColumnLayout::default, PersistedColumnLayout::from_view_state);
+    settings.set_column_layout(key, layout);
+}
+
+/// Reset a section's columns to the default layout, clearing BOTH the live view-state
+/// AND the persisted entry (E012 / US3 / FR-015 — T027).
+///
+/// The dedicated reset action: it drops the live `ColumnViewState`
+/// ([`ViewSelectionAndFocus::reset_column_view_state`]) so the renderer shows every
+/// column in natural model order, nothing hidden, nothing pinned, and removes the
+/// section's persisted layout ([`AppSettings::clear_column_layout`]) so the default
+/// survives the next launch. View-only / byte-free — a reset never touches the CST.
+///
+/// [`ViewSelectionAndFocus::reset_column_view_state`]: crate::structural::view_state::ViewSelectionAndFocus::reset_column_view_state
+pub fn reset_column_layout(
+    doc: &mut EditorDocument,
+    settings: &mut AppSettings,
+    section: &StructuralPath,
+) {
+    doc.view_state_mut().reset_column_view_state(section);
+    if let Some(key) = section_layout_key(doc.path.as_deref(), section) {
+        settings.clear_column_layout(&key);
+    }
 }
 
 /// Render the virtualized table view for the `section` of `shape` within `doc`,
@@ -1966,6 +2148,14 @@ fn render_table_grid(
         .view_state()
         .edit_focus()
         .map(|f| (f.path.clone(), f.draft.clone()));
+    // E012 / FR-005 / AD-001 — the declared type of the SINGLE cell currently being
+    // edited, resolved ONCE per frame (only the focused cell can host a type-aware
+    // editor, so this is never the per-cell whole-grid cost the plan warns against —
+    // HINT-003). `None` when no cell is editing or the document is unbound, which
+    // keeps the layered dispatch falling through to the lexical/text editor (FR-013).
+    let focused_cell_type: Option<crate::document::CellTypeInfo> = draft
+        .as_ref()
+        .and_then(|(path, _)| doc.query_cell_type(path));
     // The active cell's (row, column), recovered from focus by CST identity so it
     // survives a virtualization scroll (FR-016/FR-027): the focus path's last two
     // steps are the row index + field name, which we map back to grid coordinates.
@@ -1982,12 +2172,25 @@ fn render_table_grid(
     // selection intent captured from a cell click this frame.
     let sel_rect = doc.view_state().grid_selection_rect();
     let grid_cursor = doc.view_state().grid_cursor();
+    // E012 / US4 / FR-016 — the per-cell type-REJECTED fill/paste targets, snapshotted
+    // once per frame (like `sel_rect`) so the immutable model-borrow render closures can
+    // flag each cell by its value path without re-borrowing `doc`. Empty (the common case)
+    // whenever the last fill / paste refused nothing, so per-cell flagging stays cheap.
+    let rejected_cells: Vec<StructuralPath> = if doc.view_state().has_rejected_cells() {
+        doc.view_state().rejected_cells().to_vec()
+    } else {
+        Vec::new()
+    };
     // Selection intents captured from cell interaction this frame (E019c): an `anchor`
     // (plain click / drag origin) and an `extend` (shift-click / drag-over). Two slots,
     // not one, so a drag whose origin + moved-over cell land in the SAME frame keeps both
     // — anchor is applied first, then extend grows from it (robust to fast drags).
     let mut grid_anchor: Option<(usize, usize)> = None;
     let mut grid_extend: Option<(usize, usize)> = None;
+    // E012 / US3 / FR-008 — a captured row-reorder `(from, to)` from a drag-handle release
+    // this frame. Like the grid selection intents above, it is collected during the body
+    // walk and applied AFTER the immutable model borrow, dispatched as one undo unit.
+    let mut row_reorder: Option<(usize, usize)> = None;
     // E021 — a one-shot "the editor that just opened should grab keyboard focus" request,
     // so a freshly-opened cell editor is immediately ready to type into (Excel).
     let should_focus = doc.view_state_mut().take_editor_focus_pending();
@@ -2011,114 +2214,372 @@ fn render_table_grid(
     // stable + resizable).
     let col_widths = auto_column_widths(model, |s| text_px_width(ui, s, egui::TextStyle::Body));
 
-    // HORIZONTAL SCROLL (E013): a wide table (e.g. the `hulls` RecordMap = key column
-    // + 12 fields ≈ 13 columns) exceeds the viewport width. egui_extras 0.34's
-    // `TableBuilder` only scrolls VERTICALLY (its body's internal `ScrollArea` is
-    // hard-coded `[false, vscroll]`), so to make every column reachable we (a) give
-    // each column an INTRINSIC width via `TableColumn::initial(..)` — an *absolute*
-    // size that `Sizing::to_lengths` keeps verbatim regardless of available width, so
-    // the columns' total can exceed the viewport — and (b) wrap the whole table in a
-    // HORIZONTAL-ONLY outer `ScrollArea`. The outer area scrolls X only (vertical is
-    // disabled), so it does NOT take over the body's VERTICAL virtualization: the
-    // Table body keeps its own vertical `ScrollArea` + `TableBody::rows`, so the
-    // realized-row count stays bounded by the viewport (SC-010 unchanged).
+    // E012 / US3 / FR-007 — COLUMN VIEW-STATE as a VIEW TRANSFORM (Principle I /
+    // HINT-002 / AD-004). Hide / reorder / pin are presentation-only: they reshape ONLY
+    // the order we paint columns in, NEVER the CST (the buffer stays byte-identical).
+    //
+    // `visible_cols[vp] = model_col` is the VISIBLE→MODEL mapping: the model column index
+    // shown at each visible position. The pinned column (if any) leads; the rest follow
+    // the section's reorder, skipping hidden columns (a stale/out-of-range index drops
+    // out, mirroring grid_selection robustness). EVERYTHING downstream — selection,
+    // editing, fill/paste, increment, the enum picker — keeps indexing MODEL columns
+    // (`CellPos.column` carries the MODEL index, grid_selection stays in MODEL space), so
+    // this transform never disturbs a single one of those gestures; we remap only here at
+    // render. `pinned_pos` is the visible position of the pinned column (always 0 when set).
+    let col_state = doc.view_state().column_view_state(&section).cloned();
+    let visible_cols: Vec<usize> = match &col_state {
+        Some(cvs) => cvs.visible_columns(columns.len()),
+        None => (0..columns.len()).collect(),
+    };
+    let pinned_model: Option<usize> = col_state
+        .as_ref()
+        .and_then(|c| c.pinned)
+        .filter(|&p| p < columns.len() && visible_cols.first() == Some(&p));
+    // The non-pinned visible columns (everything after a leading pinned column).
+    let scroll_cols: Vec<usize> = if pinned_model.is_some() {
+        visible_cols[1..].to_vec()
+    } else {
+        visible_cols.clone()
+    };
+
+    // Header hide/show/pin/reset intents captured this frame, applied AFTER rendering so we
+    // never borrow the view-state mutably while the model is borrowed. Byte-free.
+    let mut col_intent: Option<ColumnViewIntent> = None;
+
     // E023: key the table + scroll state by the FULL section path AND the column signature,
     // not just `section.depth()`. Two different sections at the same depth (e.g.
     // hulls ▸ (1) ▸ cells vs hulls ▸ (2) ▸ cells) must NOT share egui_extras' persisted
     // column widths; and the grouped view's projected column-set gets its own state too.
     let col_sig: Vec<&str> = columns.iter().map(|c| c.field_name.as_str()).collect();
-    egui::ScrollArea::horizontal()
-        .id_salt(("ronin_table_hscroll", &section, &col_sig))
-        .auto_shrink([false, false])
-        // E019b: a click-drag must SELECT a cell range (Excel-style), not pan the view.
-        // Keep the scrollbar + mouse-wheel as scroll sources but drop drag-to-scroll, so
-        // a drag is free to be a range-select; this also stops panning over empty regions.
-        .scroll_source(egui::scroll_area::ScrollSource {
-            drag: false,
-            ..Default::default()
-        })
-        .show(ui, |ui| {
-            let mut builder = TableBuilder::new(ui)
-                .id_salt(("ronin_table", &section, &col_sig))
-                .striped(true)
-                .resizable(true)
-                .auto_shrink([false, false])
-                .cell_layout(egui::Layout::left_to_right(egui::Align::Center));
-            for (col_idx, _) in columns.iter().enumerate() {
-                // An intrinsic (absolute, resizable) width per column, fitted to content on
-                // load (E020): it keeps this width regardless of available width, so wide
-                // tables overflow the viewport and the outer horizontal scrollbar appears.
-                // NOT clipped — a clipped/auto column would shrink to fit and never overflow.
-                let w = col_widths.get(col_idx).copied().unwrap_or(GRID_COL_MIN_W);
-                builder = builder.column(TableColumn::initial(w).at_least(GRID_COL_MIN_W));
-            }
-            // A trailing column for per-row controls (delete) — only when row-ops apply.
-            if row_ops {
-                builder = builder.column(TableColumn::initial(40.0).at_least(40.0));
-            }
 
-            builder
-                .header(row_height, |mut header| {
-                    for (col_idx, col) in columns.iter().enumerate() {
-                        header.col(|ui| {
-                            render_column_header(ui, col, rows, col_idx);
-                        });
+    // Closure rendering ONE body row's cells for a given visible-column list. Used by both
+    // the (sticky) pinned table and the scrolling table; each carries the MODEL column index
+    // in `CellPos.column` so selection/edit/gestures stay in model space.
+    let render_row_cells =
+        |table_row: &mut egui_extras::TableRow,
+         row: &Row,
+         row_idx: usize,
+         cols_to_show: &[usize],
+         draft: &mut Option<(StructuralPath, String)>,
+         pending: &mut Option<PendingAction>,
+         new_focus: &mut Option<(StructuralPath, FocusSurface, String)>,
+         clear_focus: &mut bool,
+         nav: &mut Option<CellNav>,
+         grid_anchor: &mut Option<(usize, usize)>,
+         grid_extend: &mut Option<(usize, usize)>| {
+            for &mc in cols_to_show {
+                let col = &columns[mc];
+                let cell = &row.cells[mc];
+                // E012 / FR-016 — this cell was a type-REJECTED fill/paste target when its
+                // value path is in the frame's rejected snapshot (empty in the common case).
+                let rejected = !rejected_cells.is_empty()
+                    && cell
+                        .value_ref
+                        .as_ref()
+                        .is_some_and(|p| rejected_cells.iter().any(|r| r == p));
+                table_row.col(|ui| {
+                    render_cell(
+                        ui,
+                        &section,
+                        CellPos {
+                            row: row_idx,
+                            column: mc,
+                        },
+                        col,
+                        cell,
+                        row_ops,
+                        draft,
+                        pending,
+                        new_focus,
+                        clear_focus,
+                        nav,
+                        sel_rect,
+                        grid_cursor,
+                        grid_anchor,
+                        grid_extend,
+                        should_focus,
+                        focused_cell_type.as_ref(),
+                        rejected,
+                    );
+                });
+            }
+        };
+
+    // E012 / US3 / FR-008 — render ONE row's LEADING drag-handle grip cell. This is a
+    // DEDICATED affordance (a `⠿` grip glyph), DISTINCT from cell select-drag and from
+    // column reorder: dragging the grip reorders the ROW (one gesture, one action — memory
+    // rule). It is its OWN non-data column, so it never enters the visible→model column
+    // mapping (`CellPos.column` / column_view_state stay in MODEL space, untouched).
+    //
+    // egui delivers `dragged()` only to the ORIGIN widget in a virtualized `TableBuilder`
+    // (the same nuance the cell drag-select hit), so we cannot read `dragged()` on the row
+    // the pointer moves OVER. Instead: the grip whose drag STARTS stores its row as the
+    // origin in egui memory; while a row drag is active, every grip checks pointer geometry
+    // to detect the hovered target row; on release we capture `(from, to)`.
+    let render_row_grip = |table_row: &mut egui_extras::TableRow,
+                           row_idx: usize,
+                           row_reorder: &mut Option<(usize, usize)>| {
+        table_row.col(|ui| {
+            let resp = ui
+                .add(
+                    egui::Label::new("\u{2807}") // ⠿ vertical grip dots
+                        .sense(egui::Sense::drag()),
+                )
+                .on_hover_text("Drag to reorder row");
+            let grip_rect = resp.rect;
+            if resp.drag_started() {
+                // Record the row this drag began on; mark the row reorder active.
+                ui.memory_mut(|m| m.data.insert_temp(row_drag_id(), row_idx));
+            }
+            // While a row drag is active, detect the hovered target grip by geometry
+            // (egui only delivers `dragged()` to the origin grip — see note above).
+            let active_from: Option<usize> =
+                ui.memory(|m| m.data.get_temp::<usize>(row_drag_id()));
+            if let Some(from) = active_from {
+                if ui.input(|i| i.pointer.primary_down()) {
+                    // Track the last grip the pointer is over as the live target.
+                    if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
+                        if grip_rect.contains(p) {
+                            ui.memory_mut(|m| {
+                                m.data.insert_temp(row_drag_target_id(), row_idx);
+                            });
+                        }
                     }
-                    if row_ops {
-                        header.col(|ui| {
-                            ui.strong("");
-                        });
+                } else {
+                    // Pointer released: the drag ended. Commit the move to the last
+                    // hovered target (defaulting to the origin = a no-op) and clear.
+                    let to = ui
+                        .memory(|m| m.data.get_temp::<usize>(row_drag_target_id()))
+                        .unwrap_or(from);
+                    ui.memory_mut(|m| {
+                        m.data.remove::<usize>(row_drag_id());
+                        m.data.remove::<usize>(row_drag_target_id());
+                    });
+                    if from != to {
+                        *row_reorder = Some((from, to));
                     }
-                })
-                .body(|body| {
-                    // VIRTUALIZED: `TableBody::rows` realizes only viewport-visible rows
-                    // (NOT `::row` per element — AD-001/HINT-004/FR-008).
-                    body.rows(row_height, rows.len(), |mut table_row| {
-                        let row_idx = table_row.index();
-                        realized.set(realized.get() + 1);
-                        let row = &rows[row_idx];
-                        for (col_idx, col) in columns.iter().enumerate() {
-                            let cell = &row.cells[col_idx];
-                            table_row.col(|ui| {
-                                render_cell(
+                }
+            }
+        });
+    };
+
+    // The closure that renders the HORIZONTALLY-SCROLLING table for the (non-pinned)
+    // visible columns `scroll_cols`. Factored so it runs either standalone (no pin —
+    // identical layout to before, so every existing test/ID is unchanged) or to the
+    // RIGHT of the fixed pinned column.
+    //
+    // HORIZONTAL SCROLL (E013): a wide table exceeds the viewport width. egui_extras
+    // 0.34's `TableBuilder` only scrolls VERTICALLY, so to make every column reachable we
+    // (a) give each column an INTRINSIC width via `TableColumn::initial(..)` and (b) wrap
+    // the table in a HORIZONTAL-ONLY outer `ScrollArea`. The outer area scrolls X only, so
+    // it does NOT take over the body's VERTICAL virtualization (SC-010 unchanged).
+    let render_scroll_table = |ui: &mut Ui,
+                               draft: &mut Option<(StructuralPath, String)>,
+                               pending: &mut Option<PendingAction>,
+                               new_focus: &mut Option<(StructuralPath, FocusSurface, String)>,
+                               clear_focus: &mut bool,
+                               nav: &mut Option<CellNav>,
+                               grid_anchor: &mut Option<(usize, usize)>,
+                               grid_extend: &mut Option<(usize, usize)>,
+                               row_reorder: &mut Option<(usize, usize)>,
+                               col_intent: &mut Option<ColumnViewIntent>| {
+        egui::ScrollArea::horizontal()
+            .id_salt(("ronin_table_hscroll", &section, &col_sig))
+            .auto_shrink([false, false])
+            // E019b: a click-drag must SELECT a cell range (Excel-style), not pan the view.
+            .scroll_source(egui::scroll_area::ScrollSource {
+                drag: false,
+                ..Default::default()
+            })
+            .show(ui, |ui| {
+                let mut builder = TableBuilder::new(ui)
+                    .id_salt(("ronin_table", &section, &col_sig))
+                    .striped(true)
+                    .resizable(true)
+                    .auto_shrink([false, false])
+                    .cell_layout(egui::Layout::left_to_right(egui::Align::Center));
+                // A LEADING drag-handle column for row reorder (E012 / US3 / FR-008) — its
+                // own non-data column, fixed-width, only when row-ops apply. It is NOT in
+                // `scroll_cols`, so it never shifts the visible→model column mapping.
+                if row_ops {
+                    builder = builder.column(TableColumn::initial(24.0).at_least(24.0));
+                }
+                for &mc in &scroll_cols {
+                    let w = col_widths.get(mc).copied().unwrap_or(GRID_COL_MIN_W);
+                    builder = builder.column(TableColumn::initial(w).at_least(GRID_COL_MIN_W));
+                }
+                // A trailing column for per-row controls (delete) — only when row-ops apply.
+                if row_ops {
+                    builder = builder.column(TableColumn::initial(40.0).at_least(40.0));
+                }
+
+                builder
+                    .header(row_height, |mut header| {
+                        if row_ops {
+                            header.col(|ui| {
+                                ui.strong("");
+                            });
+                        }
+                        for &mc in &scroll_cols {
+                            header.col(|ui| {
+                                render_column_header(
                                     ui,
-                                    &section,
-                                    CellPos {
-                                        row: row_idx,
-                                        column: col_idx,
-                                    },
-                                    col,
-                                    cell,
-                                    row_ops,
-                                    &mut draft,
-                                    &mut pending,
-                                    &mut new_focus,
-                                    &mut clear_focus,
-                                    &mut nav,
-                                    sel_rect,
-                                    grid_cursor,
-                                    &mut grid_anchor,
-                                    &mut grid_extend,
-                                    should_focus,
+                                    columns,
+                                    rows,
+                                    mc,
+                                    col_state.as_ref(),
+                                    col_intent,
                                 );
                             });
                         }
-                        // The per-row delete control (discoverable row removal, FR-007)
-                        // — RecordList only.
                         if row_ops {
-                            table_row.col(|ui| {
-                                if ui
-                                    .small_button("\u{2716}")
-                                    .on_hover_text("Delete row")
-                                    .clicked()
-                                {
-                                    pending = Some(PendingAction::DeleteRow { row: row_idx });
-                                }
+                            header.col(|ui| {
+                                ui.strong("");
                             });
                         }
+                    })
+                    .body(|body| {
+                        // VIRTUALIZED: `TableBody::rows` realizes only viewport-visible rows
+                        // (NOT `::row` per element — AD-001/HINT-004/FR-008).
+                        body.rows(row_height, rows.len(), |mut table_row| {
+                            let row_idx = table_row.index();
+                            realized.set(realized.get() + 1);
+                            let row = &rows[row_idx];
+                            // The LEADING row drag-handle grip (FR-008) — dedicated reorder
+                            // affordance, distinct from cell select-drag / column reorder.
+                            if row_ops {
+                                render_row_grip(&mut table_row, row_idx, row_reorder);
+                            }
+                            render_row_cells(
+                                &mut table_row,
+                                row,
+                                row_idx,
+                                &scroll_cols,
+                                draft,
+                                pending,
+                                new_focus,
+                                clear_focus,
+                                nav,
+                                grid_anchor,
+                                grid_extend,
+                            );
+                            // The per-row delete control (discoverable row removal, FR-007).
+                            if row_ops {
+                                table_row.col(|ui| {
+                                    if ui
+                                        .small_button("\u{2716}")
+                                        .on_hover_text("Delete row")
+                                        .clicked()
+                                    {
+                                        *pending = Some(PendingAction::DeleteRow { row: row_idx });
+                                    }
+                                });
+                            }
+                        });
                     });
-                });
+            });
+    };
+
+    // STICKY PIN. When a column is pinned it is rendered in its OWN fixed left region
+    // OUTSIDE the horizontal ScrollArea, so it stays visible while the rest scroll
+    // sideways (egui_extras 0.34 has no native frozen column — a side-by-side split is
+    // the supported way to freeze a key column). When nothing is pinned we render the
+    // scroll table DIRECTLY on `ui` — byte-for-byte the same layout/IDs as before this
+    // feature, so no existing interaction (selection/edit/picker) shifts (regression-safe).
+    if let Some(pin_mc) = pinned_model {
+        let pin_w = col_widths.get(pin_mc).copied().unwrap_or(GRID_COL_MIN_W);
+        ui.horizontal_top(|ui| {
+            // A fixed (non-scrolling) single-column table for the pinned key column.
+            ui.allocate_ui(egui::vec2(pin_w, ui.available_height()), |ui| {
+                TableBuilder::new(ui)
+                    .id_salt((
+                        "ronin_table_pinned",
+                        &section,
+                        columns[pin_mc].field_name.as_str(),
+                    ))
+                    .striped(true)
+                    .resizable(false)
+                    .auto_shrink([false, false])
+                    .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+                    .column(TableColumn::initial(pin_w).at_least(GRID_COL_MIN_W))
+                    .header(row_height, |mut header| {
+                        header.col(|ui| {
+                            render_column_header(
+                                ui,
+                                columns,
+                                rows,
+                                pin_mc,
+                                col_state.as_ref(),
+                                &mut col_intent,
+                            );
+                        });
+                    })
+                    .body(|body| {
+                        body.rows(row_height, rows.len(), |mut table_row| {
+                            let row_idx = table_row.index();
+                            let row = &rows[row_idx];
+                            render_row_cells(
+                                &mut table_row,
+                                row,
+                                row_idx,
+                                std::slice::from_ref(&pin_mc),
+                                &mut draft,
+                                &mut pending,
+                                &mut new_focus,
+                                &mut clear_focus,
+                                &mut nav,
+                                &mut grid_anchor,
+                                &mut grid_extend,
+                            );
+                        });
+                    });
+            });
+            render_scroll_table(
+                ui,
+                &mut draft,
+                &mut pending,
+                &mut new_focus,
+                &mut clear_focus,
+                &mut nav,
+                &mut grid_anchor,
+                &mut grid_extend,
+                &mut row_reorder,
+                &mut col_intent,
+            );
         });
+    } else {
+        render_scroll_table(
+            ui,
+            &mut draft,
+            &mut pending,
+            &mut new_focus,
+            &mut clear_focus,
+            &mut nav,
+            &mut grid_anchor,
+            &mut grid_extend,
+            &mut row_reorder,
+            &mut col_intent,
+        );
+    }
+
+    // Apply the captured column view-state intent (byte-free — FR-007 / Principle I):
+    // hide / show / pin / reorder / reset change ONLY presentation state, never the CST.
+    if let Some(intent) = col_intent {
+        let n = model.columns.len();
+        match intent {
+            ColumnViewIntent::Hide(mc) => doc.view_state_mut().column_view_state_mut(&section).hide(mc),
+            ColumnViewIntent::Show(mc) => doc.view_state_mut().column_view_state_mut(&section).show(mc),
+            ColumnViewIntent::TogglePin(mc) => doc
+                .view_state_mut()
+                .column_view_state_mut(&section)
+                .toggle_pinned(mc),
+            ColumnViewIntent::Move { col, to } => doc
+                .view_state_mut()
+                .column_view_state_mut(&section)
+                .move_column(col, to, n),
+            ColumnViewIntent::Reset => doc.view_state_mut().reset_column_view_state(&section),
+        }
+    }
 
     // Apply view-state focus changes (byte-free — FR-020).
     if clear_focus {
@@ -2183,20 +2644,47 @@ fn render_table_grid(
         // don't move egui's widget focus out of the grid (E024).
         let tab = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Tab));
         let shift_tab = ui.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, Key::Tab));
-        let (select_all, escape, shift, up, down, left, right, enter, f2, delete) = ui.input(|i| {
-            (
-                i.modifiers.command && i.key_pressed(Key::A),
-                i.key_pressed(Key::Escape),
-                i.modifiers.shift,
-                i.key_pressed(Key::ArrowUp),
-                i.key_pressed(Key::ArrowDown),
-                i.key_pressed(Key::ArrowLeft),
-                i.key_pressed(Key::ArrowRight),
-                i.key_pressed(Key::Enter),
-                i.key_pressed(Key::F2),
-                i.key_pressed(Key::Delete) || i.key_pressed(Key::Backspace),
-            )
-        });
+        // E012 / FR-003 — Ctrl+D fills the cell directly above the selection down into
+        // it. Consume it via the borrowing input so the matching `Event::Text("d")`
+        // never reaches the printable-text path below that would otherwise open the
+        // editor seeded with `d` (one gesture, one action — DISTINCT from typing 'd').
+        let fill_down = ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, Key::D));
+        let (select_all, escape, shift, command, up, down, left, right, enter, f2, delete) =
+            ui.input(|i| {
+                (
+                    i.modifiers.command && i.key_pressed(Key::A),
+                    i.key_pressed(Key::Escape),
+                    i.modifiers.shift,
+                    i.modifiers.command,
+                    i.key_pressed(Key::ArrowUp),
+                    i.key_pressed(Key::ArrowDown),
+                    i.key_pressed(Key::ArrowLeft),
+                    i.key_pressed(Key::ArrowRight),
+                    i.key_pressed(Key::Enter),
+                    i.key_pressed(Key::F2),
+                    i.key_pressed(Key::Delete) || i.key_pressed(Key::Backspace),
+                )
+            });
+        // E012 / FR-002 — numeric keyboard increment: Ctrl+↑/↓ nudges the selected
+        // numeric cells by ±1, Ctrl+Shift+↑/↓ by ±10. Gated on `command` so it is
+        // DISTINCT from a plain arrow (which moves the selection — one gesture, one
+        // action). `steps` is signed: up = +, down = −.
+        let increment_step: Option<i64> = if command && (up || down) {
+            let magnitude = if shift { 10 } else { 1 };
+            Some(if up { magnitude } else { -magnitude })
+        } else {
+            None
+        };
+        // E012 / FR-001 — Space toggles boolean cells. Read it via the borrowing input
+        // so we can CONSUME it for bool selections: a consumed Space never reaches the
+        // `Event::Text(" ")` path below that would otherwise open the text editor (Space
+        // is a printable char). It is only consumed when the selection holds a bool cell,
+        // so Space over a non-bool selection still falls through to typing.
+        let space_pressed = ui.input(|i| i.key_pressed(Key::Space));
+        // A plain arrow moves the selection, but a Ctrl+arrow is an increment, not a
+        // move — so suppress movement while `command` is held with up/down (FR-012).
+        let up = up && !command;
+        let down = down && !command;
         let arrow = up || down || left || right;
         // Excel movement: arrows + Enter (down, Shift+Enter up) + Tab (right) / Shift+Tab
         // (left). Editing is NOT entered by these — only by F2 / typing / double-click.
@@ -2205,6 +2693,22 @@ fn render_table_grid(
         let move_left = left || shift_tab;
         let move_right = right || tab;
         let moved = move_up || move_down || move_left || move_right;
+        // E012 / FR-007 — left/right step follows the VISIBLE column order so movement
+        // matches what the user sees after a hide/reorder/pin (the cursor stays in MODEL
+        // space; we translate via `visible_cols` only to pick the visual neighbour). With
+        // the default layout `visible_cols == [0,1,…]`, so this is identity (no regression).
+        let visible_step = |cc: usize, delta: isize| -> usize {
+            match visible_cols.iter().position(|&c| c == cc) {
+                Some(vp) => {
+                    let nv = (vp as isize + delta)
+                        .clamp(0, visible_cols.len().saturating_sub(1) as isize)
+                        as usize;
+                    visible_cols.get(nv).copied().unwrap_or(cc)
+                }
+                // A hidden cursor column (not in the visible set): fall back to model order.
+                None => (cc as isize + delta).max(0) as usize,
+            }
+        };
         let step = |cr: usize, cc: usize| -> (usize, usize) {
             let nr = if move_up {
                 cr.saturating_sub(1)
@@ -2214,18 +2718,59 @@ fn render_table_grid(
                 cr
             };
             let nc = if move_left {
-                cc.saturating_sub(1)
+                visible_step(cc, -1)
             } else if move_right {
-                (cc + 1).min(cols.saturating_sub(1))
+                visible_step(cc, 1)
             } else {
                 cc
             };
             (nr, nc)
         };
+        // True once a Space-toggle fired this frame, so the `Event::Text(" ")` path below
+        // skips the matching whitespace text and does NOT open the cell editor (FR-001).
+        let mut toggled_bool = false;
         if select_all && rows > 0 && cols > 0 {
+            doc.view_state_mut().clear_rejected_cells();
             doc.view_state_mut().select_grid_all(rows, cols);
         } else if escape {
+            doc.view_state_mut().clear_rejected_cells();
             doc.view_state_mut().clear_grid_selection();
+        } else if let Some(steps) = increment_step {
+            // E012 / FR-002 — Ctrl+↑/↓ (±1) / Ctrl+Shift+↑/↓ (±10) on numeric cells: nudge
+            // every numeric scalar cell in the selection, preserving int-vs-float form,
+            // committed as one undo unit. Non-numeric cells in the selection are skipped.
+            if let Some((r0, c0, r1, c1)) = doc.view_state().grid_selection_rect() {
+                let writes = increment_writes(model, r0, c0, r1, c1, steps);
+                if !writes.is_empty() {
+                    let _ = doc.apply_grid_writes(&writes, worker, Instant::now());
+                }
+            }
+        } else if space_pressed {
+            // E012 / FR-001 — Space flips boolean cells in the selection (per cell), one
+            // undo unit. Consume Space ONLY when a bool cell is present so it does not reach
+            // the printable-text path that would open the editor; over a non-bool selection
+            // Space falls through to typing (one gesture, one action).
+            if let Some((r0, c0, r1, c1)) = doc.view_state().grid_selection_rect() {
+                let writes = bool_toggle_writes(model, r0, c0, r1, c1);
+                if !writes.is_empty() {
+                    let _ = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Space));
+                    toggled_bool = true;
+                    let _ = doc.apply_grid_writes(&writes, worker, Instant::now());
+                }
+            }
+        } else if fill_down {
+            // E012 / FR-003 — Ctrl+D copies the cell DIRECTLY ABOVE the selection top
+            // into every selected cell, per column, as one undo unit. A selection whose
+            // top is row 0 (no row above) is a no-op; only editable scalar targets are
+            // written (read-only / nested / blank cells are skipped).
+            if let Some((r0, c0, r1, c1)) = doc.view_state().grid_selection_rect() {
+                let writes = fill_down_writes(model, r0, c0, r1, c1);
+                // E012 / FR-016 — drop any write whose value is incompatible with the
+                // target cell's DECLARED type (never silently corrupting a typed cell);
+                // the compatible subset still commits as ONE undo unit, and the refused
+                // targets are flagged so the user sees which cells were rejected.
+                commit_guarded_writes(doc, writes, worker);
+            }
         } else if delete {
             // Delete / Backspace clears the editable scalar cells in the selection to a
             // type-appropriate empty value, one undo (Excel-style clear — E024).
@@ -2236,6 +2781,9 @@ fn render_table_grid(
                 }
             }
         } else if moved {
+            // A different gesture: clear any stale fill/paste rejection flags so they do
+            // not linger past the operation they described (FR-016 marker lifetime).
+            doc.view_state_mut().clear_rejected_cells();
             // Move the active cell; Shift+Arrow extends the selection (Tab/Enter always
             // move + collapse). With no selection yet, the first move lands top-left.
             match doc.view_state().grid_cursor() {
@@ -2251,6 +2799,8 @@ fn render_table_grid(
                 None => {}
             }
         } else if f2 {
+            // A different gesture: clear any stale fill/paste rejection flags (FR-016).
+            doc.view_state_mut().clear_rejected_cells();
             // F2 begins editing the active cell (if it is editable). Enter no longer edits —
             // it moves down (Excel); typing / double-click also edit.
             if let Some((cr, cc)) = grid_cursor {
@@ -2282,27 +2832,73 @@ fn render_table_grid(
                         // selection; otherwise it's a block paste from the top-left.
                         let single = !text.contains('\t') && !text.trim_end().contains('\n');
                         let multi_cell = r0 != r1 || c0 != c1;
-                        let writes = if single && multi_cell {
+                        if single && multi_cell {
                             let value = text.trim_end_matches(['\n', '\r']);
-                            grid_fill_writes(model, r0, c0, r1, c1, value)
+                            let writes = grid_fill_writes(model, r0, c0, r1, c1, value);
+                            // E012 / FR-016 — guard each prospective write against the
+                            // target cell's declared type; incompatible cells are refused
+                            // (never written) and flagged, the compatible subset commits
+                            // as one undo unit.
+                            commit_guarded_writes(doc, writes, worker);
                         } else {
-                            grid_paste_writes(model, r0, c0, text)
-                        };
-                        if !writes.is_empty() {
-                            let now = Instant::now();
-                            // A blocked batch changes no bytes; the next reparse keeps
-                            // the grid as-is (the single-cell path surfaces errors the
-                            // same way).
-                            let _ = doc.apply_grid_writes(&writes, worker, now);
+                            // Block paste from the top-left anchor (r0, c0). E012 / FR-004:
+                            // when the block is TALLER than the rows below the anchor AND the
+                            // section is add-capable (RecordList), append the missing rows so
+                            // the whole block lands instead of clipping vertically; a block
+                            // WIDER than the columns still clips at the last column (no new
+                            // columns are ever created — `paste_expand_writes` builds no path
+                            // past the schema).
+                            let rows_in_paste = paste_block_row_count(text);
+                            let rows_below_anchor = model.row_count().saturating_sub(r0);
+                            let appended = if row_ops && rows_in_paste > rows_below_anchor {
+                                rows_in_paste - rows_below_anchor
+                            } else {
+                                0
+                            };
+                            // Append the missing rows first (each a single undo unit) so the
+                            // appended-row field paths resolve against the post-append buffer.
+                            let mut append_ok = true;
+                            for _ in 0..appended {
+                                let value = default_row_text_typed(doc, model);
+                                if doc
+                                    .apply_table_append_row(&section, value, worker, Instant::now())
+                                    .is_err()
+                                {
+                                    append_ok = false;
+                                    break;
+                                }
+                            }
+                            // If a non-add-capable section (or an append failure), `appended`
+                            // collapses to the rows that actually exist now — the unappended
+                            // overhang is clipped, today's behavior.
+                            let landed = if append_ok { appended } else { 0 };
+                            let writes = paste_expand_writes(model, r0, c0, landed, text);
+                            // E012 / FR-016 — drop writes incompatible with each target's
+                            // declared type (never silent corruption) and flag them; the
+                            // compatible subset still lands as ONE undo unit. A fully
+                            // rejected / empty batch changes no bytes; the next reparse
+                            // keeps the grid as-is (the single-cell path surfaces errors
+                            // the same way). Appended rows remain `appended` preceding undo
+                            // units (documented).
+                            commit_guarded_writes(doc, writes, worker);
                         }
                     }
                     egui::Event::Text(t) if !t.is_empty() => {
+                        // A Space-toggle (FR-001) already handled this frame's Space: skip the
+                        // matching whitespace text so the bool toggle does NOT also open the
+                        // editor seeded with a space (one gesture, one action).
+                        if toggled_bool && t.trim().is_empty() {
+                            continue;
+                        }
                         // Excel "just start typing" (E021/E024): a printable char opens the
                         // ACTIVE (cursor) cell's editor seeded with the char (overwrite) —
                         // whether one cell or a range is selected. `focus_target_for` returns
                         // `None` for read-only / nested cells, so those are left alone.
                         if let Some((cr, cc)) = doc.view_state().grid_cursor() {
                             if let Some((path, _)) = focus_target_for(model, cr, cc) {
+                                // A new edit gesture: clear any stale fill/paste rejection
+                                // flags so they do not outlive their operation (FR-016).
+                                doc.view_state_mut().clear_rejected_cells();
                                 doc.view_state_mut().set_focus(
                                     path,
                                     FocusSurface::TableCell {
@@ -2318,6 +2914,14 @@ fn render_table_grid(
                 }
             }
         }
+    }
+
+    // E012 / US3 / FR-008 — a row drag-handle released this frame supersedes any cell
+    // action: dispatch the reorder as the frame's single structural op (one undo unit,
+    // reusing `StructuralOp::ReorderChild` — no new core op). Captured during the body
+    // walk; a grip drag is a deliberate row move, so it takes the slot.
+    if let Some((from, to)) = row_reorder {
+        pending = Some(PendingAction::ReorderRow { from, to });
     }
 
     // Apply at most one structural op this frame, as one undo unit. A blocked op is
@@ -2354,11 +2958,19 @@ fn render_table_grid(
                 res
             }
             PendingAction::AppendRow => {
-                let value = default_row_text(model);
+                // Seed type-correct defaults when a type is bound (FR-006), else placeholders.
+                let value = default_row_text_typed(doc, model);
                 doc.apply_table_append_row(&section, value, worker, now)
             }
             PendingAction::DeleteRow { row } => {
                 doc.apply_table_delete_row(&section, row, worker, now)
+            }
+            PendingAction::ReorderRow { from, to } => {
+                // A row drag landed: move the row losslessly as one undo unit (FR-008).
+                // Clear any active drag-select so the reorder is the frame's sole action
+                // (one gesture, one action — the grip drag is distinct from cell select).
+                doc.view_state_mut().clear_grid_selection();
+                doc.apply_table_reorder_row(&section, from, to, worker, now)
             }
             PendingAction::DrillIn { path, row, column } => {
                 // Drill-in is a focus change onto the nested subtree in the
@@ -2387,6 +2999,11 @@ fn render_table_grid(
                 doc.view_state_mut().clear_focus();
                 doc.view_state_mut().navigate_table_section(path);
                 Ok(())
+            }
+            PendingAction::ToggleBool { path, value } => {
+                // E012 / FR-001 — commit the flipped bool token at the clicked cell as one
+                // undo unit, via the same lossless write batch the Space toggle uses.
+                doc.apply_grid_writes(&[(path, value)], worker, now)
             }
         };
         if let Err(reason) = result {
@@ -2487,22 +3104,78 @@ fn path_is_record_list(doc: &EditorDocument, path: &StructuralPath) -> bool {
     }
 }
 
-/// A placeholder element text for an appended row: one field per column with a `0`
-/// scalar placeholder for each scalar column (the user then edits each cell). A
-/// nested column gets an empty list placeholder so the row stays well-formed.
-fn default_row_text(model: &TableModel) -> String {
+/// The type-UNAWARE placeholder RON literal for a column (the existing behavior): a
+/// scalar column seeds `0`, a nested column an empty list `[]` so the row stays
+/// well-formed. The type-aware seeding path is [`default_row_text_typed`]; this is the
+/// fallback when no type is bound (FR-006: "otherwise the existing placeholder
+/// behavior applies") so unbound behavior is unchanged.
+fn placeholder_default_for(class: ColumnClass) -> &'static str {
+    match class {
+        ColumnClass::Nested => "[]",
+        ColumnClass::Scalar => "0",
+    }
+}
+
+/// The element text for an appended row, seeding each column from its **declared
+/// type** when one is bound (E012 / FR-006 / SC-003), and otherwise the existing
+/// placeholder ([`default_row_text`]). For each column the prospective new-row cell
+/// path (`section / Index(<new row>) / Field(<name>)`) is resolved through
+/// [`EditorDocument::query_cell_type`] (the same schema-by-pointer read path the
+/// editor dispatch uses, AD-001/AD-002): the array index resolves to the section's
+/// item schema, so the not-yet-created row's field types resolve.
+///
+/// Type-correct defaults (all valid RON tokens, committed via the existing lossless
+/// append/`SetValue` path — never bypassing it, HINT-001):
+///
+/// * [`CellKind::Bool`] → `false`
+/// * [`CellKind::Number`] → `0`
+/// * [`CellKind::String`] → `""`
+/// * [`CellKind::Enum`] → the first declared variant (a valid unit-or-named token);
+///   an empty variant list (no natural "first") falls back to the placeholder
+/// * [`CellKind::Unknown`] or no bound type → the existing placeholder (unchanged)
+///
+/// Cheap: only the appended row's cells are queried (one resolve per column), never
+/// the whole grid.
+fn default_row_text_typed(doc: &EditorDocument, model: &TableModel) -> String {
+    let new_row = model.row_count();
     let fields: Vec<String> = model
         .columns
         .iter()
         .map(|c| {
-            let placeholder = match c.class {
-                ColumnClass::Nested => "[]",
-                ColumnClass::Scalar => "0",
-            };
-            format!("{}: {placeholder}", c.field_name)
+            let value = typed_default_for(doc, model, new_row, c)
+                .unwrap_or_else(|| placeholder_default_for(c.class).to_string());
+            format!("{}: {value}", c.field_name)
         })
         .collect();
     format!("({})", fields.join(", "))
+}
+
+/// The type-correct default RON token for column `col` of the prospective row
+/// `new_row`, or `None` to fall back to the placeholder (unbound / unknown kind /
+/// an enum with no declared variants). Only scalar columns query a declared type;
+/// a nested column always uses its placeholder. A bound enum seeds its first
+/// declared variant (FR-006 — "enums with no natural first" degrade to placeholder).
+fn typed_default_for(
+    doc: &EditorDocument,
+    model: &TableModel,
+    new_row: usize,
+    col: &Column,
+) -> Option<String> {
+    if col.class != ColumnClass::Scalar {
+        return None;
+    }
+    let path = model
+        .section_ref
+        .child(PathStep::Index(new_row))
+        .child(PathStep::Field(col.field_name.clone()));
+    let info = doc.query_cell_type(&path)?;
+    match info.declared_kind {
+        CellKind::Bool => Some("false".to_string()),
+        CellKind::Number => Some("0".to_string()),
+        CellKind::String => Some("\"\"".to_string()),
+        CellKind::Enum => info.enum_variants.first().cloned(),
+        CellKind::Unknown => None,
+    }
 }
 
 // =============================================================================
@@ -2647,7 +3320,8 @@ fn advance_focus(
     } else if row_ops && matches!(dir, CellNav::Next) {
         // Past the last cell of the last row → append a new row (one undo unit) and SELECT
         // its first cell (FR-009). The appended row is a separate undo unit from the commit.
-        let value = default_row_text(model);
+        // Seed type-correct defaults when a type is bound (FR-006), else placeholders.
+        let value = default_row_text_typed(doc, model);
         if doc
             .apply_table_append_row(section, value, worker, now)
             .is_ok()
@@ -2748,6 +3422,77 @@ pub fn grid_paste_writes(
     writes
 }
 
+/// The number of TSV **rows** a clipboard block holds (E012 / FR-004 — paste-expand).
+/// Rows are split on `\n` after trimming the trailing newline; an empty clipboard is 0.
+/// Pure so the row-fit math (`rows_in_paste` vs `row_count - anchor_row`) is testable.
+#[must_use]
+pub fn paste_block_row_count(tsv: &str) -> usize {
+    let body = tsv.trim_end_matches(['\n', '\r']);
+    if body.is_empty() {
+        return 0;
+    }
+    body.split('\n').count()
+}
+
+/// Build the writes for a **block paste** that may EXPAND the table (E012 / FR-004 — paste
+/// taller than the grid appends rows so the whole block lands instead of being clipped).
+///
+/// Unlike [`grid_paste_writes`], the appended-row count `appended` widens the addressable
+/// row space by `appended` rows beyond the model's current rows: a target row that already
+/// exists is written via its live cell `value_ref`; a target row in the appended region is
+/// written via the prospective `section / Index(row) / Field(column)` path (the same path
+/// [`focus_target_for`] uses for a blank cell), which resolves against the freshly-appended
+/// buffer. A clipboard **wider** than the columns still clips at the last column — no path
+/// is built past `model.columns.len()`, so no new columns are ever created (columns are
+/// schema-shaped). Only RecordList-shaped sections (where a `Field(name)` path is
+/// well-defined) should pass `appended > 0`; other shapes keep the clip behavior.
+pub fn paste_expand_writes(
+    model: &TableModel,
+    anchor_row: usize,
+    anchor_col: usize,
+    appended: usize,
+    tsv: &str,
+) -> Vec<(StructuralPath, String)> {
+    if tsv.is_empty() {
+        return Vec::new();
+    }
+    let existing_rows = model.row_count();
+    let total_rows = existing_rows + appended;
+    let cols = model.columns.len();
+    let mut writes = Vec::new();
+    let body = tsv.trim_end_matches(['\n', '\r']);
+    for (i, line) in body.split('\n').enumerate() {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        for (j, val) in line.split('\t').enumerate() {
+            let (r, c) = (anchor_row + i, anchor_col + j);
+            // Clip wider-than-columns (no new columns) and taller-than-appended overhang.
+            if c >= cols || r >= total_rows {
+                continue;
+            }
+            if r < existing_rows {
+                // An existing row: write via the live cell's value path (skips read-only
+                // / nested / blank cells, exactly like `grid_paste_writes`).
+                if let Some(cell) = model.cell(r, c) {
+                    if matches!(cell.class, CellClass::Scalar) {
+                        if let Some(path) = &cell.value_ref {
+                            writes.push((path.clone(), val.to_string()));
+                        }
+                    }
+                }
+            } else if matches!(model.columns[c].class, ColumnClass::Scalar) {
+                // An appended row: build the prospective field path (resolves against the
+                // post-append buffer). Only scalar columns are addressable inline.
+                let path = model
+                    .section_ref
+                    .child(PathStep::Index(r))
+                    .child(PathStep::Field(model.columns[c].field_name.clone()));
+                writes.push((path, val.to_string()));
+            }
+        }
+    }
+    writes
+}
+
 /// A type-appropriate "empty" RON literal for clearing a scalar cell (E024 — Delete). RON
 /// has no empty literal, so clearing resets to the type's neutral value; unknown/unit types
 /// return `None` (left untouched rather than risk invalid RON).
@@ -2759,6 +3504,248 @@ fn clear_value_for(scalar: Option<ScalarClass>) -> Option<&'static str> {
         Some(ScalarClass::Str) => Some("\"\""),
         Some(ScalarClass::Char) => Some("' '"),
         Some(ScalarClass::Unit) | Some(ScalarClass::Other) | None => None,
+    }
+}
+
+/// `true` when `token` is an **empty string** literal — a present `""` (or its raw-string
+/// form `r""` / `r#""#`) whose content is empty (E012 / FR-010). A present-but-empty string
+/// is rendered DISTINCTLY from an absent field and from an explicit null/unit so the user can
+/// tell the three apart at a glance. Pure so the distinction is unit-testable without the harness.
+fn is_empty_string_token(token: &str) -> bool {
+    let t = token.trim();
+    // A plain empty string.
+    if t == "\"\"" {
+        return true;
+    }
+    // A raw string `r#"…"#` with zero `#`..N `#` and empty content: `r""`, `r#""#`, …
+    if let Some(rest) = t.strip_prefix('r') {
+        let hashes = rest.chars().take_while(|&c| c == '#').count();
+        let inner = &rest[hashes..];
+        let fence = "#".repeat(hashes);
+        if let Some(body) = inner
+            .strip_prefix('"')
+            .and_then(|b| b.strip_suffix(&format!("\"{fence}")))
+        {
+            return body.is_empty();
+        }
+    }
+    false
+}
+
+/// `true` when `token` is an explicit **unit / null** value — RON's `()` (E012 / FR-010).
+/// An explicit null is rendered DISTINCTLY from an absent field and from an empty string.
+/// Pure so the distinction is unit-testable without the harness.
+fn is_unit_token(token: &str) -> bool {
+    matches!(token.trim(), "()")
+}
+
+/// `true` when `token` is a **lexically valid** single RON value — it parses to
+/// exactly one value with no parse diagnostics (E012 / FR-009 / AD-005).
+///
+/// This is the commit-time GATE that keeps an unparseable cell edit from corrupting
+/// the buffer: a cell commit splices its token verbatim through the lossless
+/// `SetValue` path (`set_value` in `ronin-core` does not itself reject), so a
+/// malformed token (e.g. `1 2 3`, an unterminated `"abc`, a stray `]`) would otherwise
+/// be written as raw bytes and merge with adjacent tokens. Rejecting it here means the
+/// editor stays open with the draft preserved and the prior bytes untouched (no silent
+/// revert, no byte corruption — FR-009).
+///
+/// LEXICAL only: it answers "is this a well-formed RON value?", not "is it valid for
+/// the cell's declared type?". The SEMANTIC check is authoritative on commit via the
+/// off-frame reparse + `ronin-validate` (a RON-V#### finding that attaches to the cell),
+/// per AD-005 — so a lexically valid but type-violating token still commits (it stays
+/// editable, visibly flagged) and is never silently reverted.
+///
+/// An empty token is treated as invalid (committing nothing into a value position is
+/// never a well-formed value). Pure (parses a tiny standalone string) so it is
+/// unit-testable without the harness and cheap enough for an as-you-type hint.
+#[must_use]
+pub fn token_is_lexically_valid(token: &str) -> bool {
+    let trimmed = token.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let cst = ronin_core::parse(trimmed);
+    // No parse diagnostics ⇒ the whole token is one well-formed RON value (the parser
+    // emits `UnexpectedToken` for stray/trailing tokens and unexpected value tokens, so
+    // multi-token / malformed input always carries at least one diagnostic).
+    cst.diagnostics().is_empty()
+}
+
+/// `true` when the RON token `value` is **compatible** with the cell's DECLARED type
+/// `info` (E012 / US4 / FR-016 — the per-cell type guard for bulk fill-down / paste).
+///
+/// This is the SEMANTIC gate a bulk fill / paste consults BEFORE writing: a write whose
+/// value would land an invalid value into a typed cell is dropped (never spliced), so the
+/// buffer is never silently corrupted. Unlike the single-edit commit gate (which is
+/// lexical only and lets a type-violating value commit-then-flag via the off-frame
+/// validator), a fill / paste can target many cells at once with no chance to inspect each
+/// — so the type check is applied up front, per cell, and the incompatible subset is
+/// refused rather than written-then-flagged.
+///
+/// Compatibility by [`CellKind`] (only the kinds with a constrainable token form):
+/// * [`CellKind::Bool`] — the token must be exactly `true` or `false`.
+/// * [`CellKind::Number`] — the token must parse as a RON integer or float.
+/// * [`CellKind::Enum`] — the token's leading identifier (the variant name, before any
+///   `(...)` / `{...}` payload) must be one of the declared `enum_variants`.
+/// * [`CellKind::String`] — ALWAYS compatible: a string column accepts any token (the
+///   existing free-text behavior; a non-quoted token still round-trips as that cell's
+///   value and is the user's to fix). Never refused (no false-positive corruption guard).
+/// * [`CellKind::Unknown`] — ALWAYS compatible: no constraint is known, so nothing is
+///   refused (Progressive Intelligence — never block an edit on an unresolved type).
+///
+/// Pure (no document / CST access) so the rule set is unit-testable in isolation and cheap
+/// enough to run only over the actual fill / paste target cells (HINT-003).
+#[must_use]
+pub fn token_is_type_compatible(value: &str, info: &crate::document::CellTypeInfo) -> bool {
+    use crate::document::CellKind;
+    let trimmed = value.trim();
+    match info.declared_kind {
+        // A string column accepts any value, and an unknown column has no constraint —
+        // both proceed exactly as before (never refused).
+        CellKind::String | CellKind::Unknown => true,
+        CellKind::Bool => matches!(trimmed, "true" | "false"),
+        // A RON number is an integer or a float; reuse the same int/float lexical split
+        // the increment helper uses, then confirm the token actually parses as that form.
+        CellKind::Number => {
+            if trimmed.is_empty() {
+                return false;
+            }
+            if trimmed.contains('.') || trimmed.contains(['e', 'E']) {
+                trimmed.parse::<f64>().is_ok()
+            } else {
+                trimmed.parse::<i64>().is_ok()
+            }
+        }
+        // The token's leading identifier is the variant name (a unit variant is just the
+        // name; a payload variant is `Name(...)` / `Name {...}`). Compatible only when
+        // that name is one of the declared variants.
+        CellKind::Enum => {
+            let name: String = trimmed
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            !name.is_empty() && info.enum_variants.iter().any(|v| v == &name)
+        }
+    }
+}
+
+/// Split bulk fill / paste `writes` into the **type-compatible** subset that will commit
+/// and the **rejected** target paths a typed cell refused (E012 / US4 / FR-016).
+///
+/// `cell_type` is the per-cell declared-type query (`EditorDocument::query_cell_type`
+/// curried by the caller, which holds `doc`): `None` ⇒ the cell is unbound / has no
+/// declared type ⇒ NO constraint, so the write is always kept (Progressive Intelligence —
+/// FR-013). When the query resolves a declared type, the write is kept only if
+/// [`token_is_type_compatible`] accepts the value for that kind; otherwise the write is
+/// DROPPED (never spliced — no silent corruption) and its path is recorded as rejected so
+/// the grid can flag exactly which targets were refused.
+///
+/// Returns `(kept, rejected)`: `kept` is the writes to commit (as ONE undo unit, the same
+/// `apply_grid_writes` batch a fully-compatible fill / paste uses — the compatible subset
+/// is unaffected by the rejected cells); `rejected` is the dropped targets' paths. The
+/// type query runs over the actual fill / paste targets ONLY (one query per prospective
+/// write), keeping it cheap (HINT-003). Takes a closure (not `&doc`) so it is pure w.r.t.
+/// the document borrow and unit-testable without a live document.
+pub fn partition_type_compatible_writes(
+    writes: Vec<(StructuralPath, String)>,
+    cell_type: impl Fn(&StructuralPath) -> Option<crate::document::CellTypeInfo>,
+) -> (Vec<(StructuralPath, String)>, Vec<StructuralPath>) {
+    let mut kept = Vec::with_capacity(writes.len());
+    let mut rejected = Vec::new();
+    for (path, value) in writes {
+        match cell_type(&path) {
+            // Bound + incompatible ⇒ refuse the write, flag the target.
+            Some(info) if !token_is_type_compatible(&value, &info) => rejected.push(path),
+            // Unbound (no constraint) or compatible ⇒ keep the write.
+            _ => kept.push((path, value)),
+        }
+    }
+    (kept, rejected)
+}
+
+/// Commit a bulk fill / paste `writes` batch through the per-cell type guard (E012 /
+/// US4 / FR-016).
+///
+/// The single fill-down / paste commit seam: it [`partition_type_compatible_writes`] the
+/// prospective writes against the live document's declared cell types, COMMITS the
+/// type-compatible subset as ONE undo unit via [`apply_grid_writes`], and records the
+/// refused targets on the view-state ([`set_rejected_cells`]) so the grid flags exactly
+/// which cells were rejected. An incompatible target is never written — no silent
+/// corruption (FR-016). With NO bound type every write is compatible (`query_cell_type`
+/// returns `None`), so an unbound fill / paste writes everything exactly as before
+/// (FR-013). An empty `writes`, or a batch where every write was refused, changes zero
+/// bytes (the rejection flags still surface).
+///
+/// [`set_rejected_cells`]: crate::structural::view_state::ViewSelectionAndFocus::set_rejected_cells
+/// [`apply_grid_writes`]: EditorDocument::apply_grid_writes
+fn commit_guarded_writes(
+    doc: &mut EditorDocument,
+    writes: Vec<(StructuralPath, String)>,
+    worker: &ReparseWorker,
+) {
+    if writes.is_empty() {
+        return;
+    }
+    // Phase 1 — query the per-cell declared type over the actual targets ONLY (the
+    // closure borrows `doc` immutably; the borrow ends when `partition…` returns owned
+    // results, freeing `doc` for the mutating commit below).
+    let (kept, rejected) = partition_type_compatible_writes(writes, |path| doc.query_cell_type(path));
+    // Phase 2 — commit the compatible subset as one undo unit (skipped when the whole
+    // batch was refused: a zero-byte op never pollutes the undo stack).
+    if !kept.is_empty() {
+        let _ = doc.apply_grid_writes(&kept, worker, Instant::now());
+    }
+    // Phase 3 — flag the refused targets (replaces any prior rejection set). When nothing
+    // was refused this clears a stale set so a clean fill / paste shows no lingering flag.
+    doc.view_state_mut().set_rejected_cells(rejected);
+}
+
+/// Flip a boolean RON token: `true` → `"false"`, `false` → `"true"` (E012 / FR-001 —
+/// Space toggle + checkbox). Returns `None` for any non-bool token, so a caller only
+/// ever commits a valid RON bool literal (never corrupting a mis-typed cell). A small,
+/// pure helper so the toggle math is unit-testable without the harness.
+fn flip_bool_token(token: &str) -> Option<&'static str> {
+    match token.trim() {
+        "true" => Some("false"),
+        "false" => Some("true"),
+        _ => None,
+    }
+}
+
+/// Increment a numeric RON token by `steps` (signed), preserving its integer-vs-float
+/// **form** (E012 / FR-002 — keyboard ±1 / ±10). An integer token stays an integer
+/// (`"41"` +1 → `"42"`); a float token keeps a decimal point (`"1.5"` +1 → `"2.5"`,
+/// `"2.0"` +1 → `"3.0"`). Returns `None` when `token` is not a number, so the caller
+/// never writes an invalid RON value into a non-numeric cell (no silent corruption).
+///
+/// The int-vs-float decision is purely lexical — a token is treated as a float when it
+/// carries a `.` or an exponent (`e`/`E`) — so it works without any bound type model
+/// (Progressive Intelligence): it operates on the cell's current token text, not on the
+/// `pub(crate)` [`ScalarClass`]. `pub` + pure so it is externally testable (T005) and
+/// reusable by the key handler.
+#[must_use]
+pub fn increment_number_token(token: &str, steps: i64) -> Option<String> {
+    let trimmed = token.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // Float form: a decimal point or an exponent marker. RON ints never carry either,
+    // so this lexical test cleanly separates `2.0`/`1e3` (float) from `41` (integer).
+    let is_float = trimmed.contains('.') || trimmed.contains(['e', 'E']);
+    if is_float {
+        let value: f64 = trimmed.parse().ok()?;
+        let next = value + steps as f64;
+        // Keep an explicit decimal point so the result stays a RON float literal even
+        // when it lands on a whole number (`2.0` +1 → `3.0`, never `3`).
+        let mut out = format!("{next}");
+        if !out.contains('.') && !out.contains(['e', 'E']) {
+            out.push_str(".0");
+        }
+        Some(out)
+    } else {
+        let value: i64 = trimmed.parse().ok()?;
+        Some(value.saturating_add(steps).to_string())
     }
 }
 
@@ -2793,6 +3780,119 @@ pub fn clear_writes(
     writes
 }
 
+/// Build the writes that **toggle** each boolean scalar cell in a rectangular range
+/// (E012 / FR-001 — Space flips `true`↔`false` per cell). One write per `Scalar` cell
+/// whose token is a bool literal; non-bool / read-only / nested / blank cells are skipped
+/// (Space is consumed only when at least one bool cell is in the selection). Applied via
+/// the one-undo [`apply_grid_writes`] so a multi-cell toggle is a single undo unit.
+pub fn bool_toggle_writes(
+    model: &TableModel,
+    r0: usize,
+    c0: usize,
+    r1: usize,
+    c1: usize,
+) -> Vec<(StructuralPath, String)> {
+    let max_row = model.row_count().saturating_sub(1);
+    let max_col = model.columns.len().saturating_sub(1);
+    let (r0, r1) = (r0.min(max_row), r1.min(max_row));
+    let (c0, c1) = (c0.min(max_col), c1.min(max_col));
+    let mut writes = Vec::new();
+    for r in r0..=r1 {
+        for c in c0..=c1 {
+            if let Some(cell) = model.cell(r, c) {
+                if matches!(cell.class, CellClass::Scalar) {
+                    if let (Some(path), Some(text)) = (&cell.value_ref, &cell.text) {
+                        if let Some(flipped) = flip_bool_token(text) {
+                            writes.push((path.clone(), flipped.to_string()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    writes
+}
+
+/// Build the writes that **increment** each numeric scalar cell in a rectangular range
+/// by `steps` (E012 / FR-002 — Ctrl+↑/↓ = ±1, with Shift = ±10), preserving each cell's
+/// integer-vs-float form via [`increment_number_token`]. One write per `Scalar` cell
+/// whose token is a number; non-numeric / read-only / nested / blank cells are skipped.
+/// Applied via the one-undo [`apply_grid_writes`] so a multi-cell nudge is one undo unit.
+pub fn increment_writes(
+    model: &TableModel,
+    r0: usize,
+    c0: usize,
+    r1: usize,
+    c1: usize,
+    steps: i64,
+) -> Vec<(StructuralPath, String)> {
+    let max_row = model.row_count().saturating_sub(1);
+    let max_col = model.columns.len().saturating_sub(1);
+    let (r0, r1) = (r0.min(max_row), r1.min(max_row));
+    let (c0, c1) = (c0.min(max_col), c1.min(max_col));
+    let mut writes = Vec::new();
+    for r in r0..=r1 {
+        for c in c0..=c1 {
+            if let Some(cell) = model.cell(r, c) {
+                if matches!(cell.class, CellClass::Scalar) {
+                    if let (Some(path), Some(text)) = (&cell.value_ref, &cell.text) {
+                        if let Some(next) = increment_number_token(text, steps) {
+                            writes.push((path.clone(), next));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    writes
+}
+
+/// Build the writes that **fill down** the row directly above the selection into the
+/// rectangular range (E012 / FR-003 — Ctrl+D). For each column `c` in `c0..=c1`, the
+/// value of the cell at `(r0 - 1, c)` (the cell ABOVE the selection top) is written into
+/// every selected row `r` in `r0..=r1`. A `None`/blank source cell fills its column with
+/// the empty string (matching the source's "no value"); only *writable* scalar target
+/// cells (a [`CellClass::Scalar`] with a `value_ref`) receive a write, so read-only /
+/// nested / blank targets are skipped — the same write-eligibility the other bulk
+/// helpers honor. When `r0 == 0` there is no row above, so this is a no-op (empty Vec).
+/// Applied via the one-undo [`apply_grid_writes`] so a multi-cell fill is one undo unit.
+pub fn fill_down_writes(
+    model: &TableModel,
+    r0: usize,
+    c0: usize,
+    r1: usize,
+    c1: usize,
+) -> Vec<(StructuralPath, String)> {
+    // No row above the selection top ⇒ nothing to copy from (FR-003).
+    if r0 == 0 {
+        return Vec::new();
+    }
+    let max_row = model.row_count().saturating_sub(1);
+    let max_col = model.columns.len().saturating_sub(1);
+    let (r0, r1) = (r0.min(max_row), r1.min(max_row));
+    let (c0, c1) = (c0.min(max_col), c1.min(max_col));
+    let source_row = r0 - 1;
+    let mut writes = Vec::new();
+    for c in c0..=c1 {
+        // The verbatim token of the source cell ABOVE the selection for this column
+        // (empty when the source is blank/absent — fill copies the "no value" too).
+        let source = model
+            .cell(source_row, c)
+            .and_then(|cell| cell.text.clone())
+            .unwrap_or_default();
+        for r in r0..=r1 {
+            if let Some(cell) = model.cell(r, c) {
+                if matches!(cell.class, CellClass::Scalar) {
+                    if let Some(path) = &cell.value_ref {
+                        writes.push((path.clone(), source.clone()));
+                    }
+                }
+            }
+        }
+    }
+    writes
+}
+
 /// The grid position of a cell being rendered.
 #[derive(Debug, Clone, Copy)]
 struct CellPos {
@@ -2808,7 +3908,10 @@ struct CellPos {
 ///
 /// `section` addresses the table section (for building a blank cell's prospective
 /// add-field path); `row_ops` is true only for a RecordList section (the only shape
-/// where a blank cell becomes an editable add-field affordance).
+/// where a blank cell becomes an editable add-field affordance). `rejected` is set when
+/// this cell was a type-incompatible fill/paste target the bulk op REFUSED to write
+/// (E012 / FR-016) — it is flagged (error border + a queryable rejected marker) so the
+/// user sees which targets were skipped; the cell's bytes are unchanged (no corruption).
 #[allow(clippy::too_many_arguments)]
 fn render_cell(
     ui: &mut Ui,
@@ -2827,6 +3930,8 @@ fn render_cell(
     grid_anchor: &mut Option<(usize, usize)>,
     grid_extend: &mut Option<(usize, usize)>,
     should_focus: bool,
+    cell_type: Option<&crate::document::CellTypeInfo>,
+    rejected: bool,
 ) {
     let cell_rect = ui.max_rect();
 
@@ -2863,23 +3968,71 @@ fn render_cell(
             CellClass::Scalar => cell.value_ref.clone(),
             _ => None,
         };
+        // E012 / FR-005 / AD-001 — layered editor selection. When the cell's DECLARED
+        // type is an enum (the bound type resolved a `oneOf` with variants), render a
+        // type-to-filter variant picker constrained to those variants INSTEAD of the
+        // free-text editor; for every other declared kind — or when no type is bound
+        // (`cell_type` is `None`) — fall through to the existing lexical/text editor so
+        // bool / numeric / string / unknown cells keep their current behavior (FR-013).
+        let enum_variants: Option<&[String]> = cell_type.and_then(|info| {
+            (info.declared_kind == crate::document::CellKind::Enum)
+                .then_some(info.enum_variants.as_slice())
+        });
+        // Free-text path only: the enum picker is CONSTRAINED to declared variants, so
+        // it can never produce a malformed token (no overlay needed there).
+        let is_free_text = enum_variants.is_none();
         ui.horizontal(|ui| {
             if matches!(cell.class, CellClass::Scalar) {
                 render_scalar_type_indicator(ui, cell);
             }
-            edit_inline(
-                ui,
-                &path,
-                value_ref,
-                pos,
-                col,
-                draft,
-                pending,
-                clear_focus,
-                nav,
-                should_focus,
-            );
+            match enum_variants {
+                Some(variants) => edit_enum_picker(
+                    ui,
+                    &path,
+                    value_ref,
+                    pos,
+                    col,
+                    variants,
+                    draft,
+                    pending,
+                    clear_focus,
+                    should_focus,
+                ),
+                None => edit_inline(
+                    ui,
+                    &path,
+                    value_ref,
+                    pos,
+                    col,
+                    draft,
+                    pending,
+                    clear_focus,
+                    nav,
+                    should_focus,
+                ),
+            }
         });
+        // E012 / FR-009 / AD-005 — light AS-YOU-TYPE hint: while the free-text editor is
+        // open, flag a draft that is not yet a well-formed RON value with the in-cell
+        // error border + an explanatory tooltip. This is a hint, not a gate — the value
+        // stays fully editable and is never reverted; the commit path
+        // ([`edit_inline`] → [`PendingAction::SetCell`]) is what authoritatively refuses
+        // to splice a malformed token (keeping the prior bytes — no byte corruption),
+        // while the off-frame reparse provides the authoritative SEMANTIC check on a
+        // committed value (a RON-V#### finding rendered on the flat cell below).
+        if is_free_text {
+            let draft_text = draft.as_ref().map(|(_, t)| t.as_str()).unwrap_or("");
+            if !token_is_lexically_valid(draft_text) {
+                paint_error_border(ui, cell_rect);
+                // A visible (queryable) error glyph carrying the explanatory tooltip, drawn
+                // through the shared error [`TypeIndicator`] so it matches the cell / tree /
+                // text-view error affordance. The painted glyph (`✖`) is exposed as its
+                // accessibility label (headless-assertable — T028); the hover gives the reason.
+                indicators::from_severity(ronin_core::Severity::Error)
+                    .show(ui)
+                    .on_hover_text("not a valid RON value — fix it to commit");
+            }
+        }
         return;
     }
 
@@ -2890,6 +4043,10 @@ fn render_cell(
     // sub-rect — not by a second gesture, and with no overlapping interactive widgets —
     // keeps one input = one action (E019c).
     let mut icon_rect: Option<egui::Rect> = None;
+    // E012 / FR-001 — the rect of a bool cell's clickable checkbox affordance (a click
+    // landing here toggles, like Space; a click elsewhere selects — one gesture, one
+    // action), set only for a present bool scalar cell.
+    let mut checkbox_rect: Option<egui::Rect> = None;
     ui.horizontal(|ui| {
         match cell.class {
             CellClass::ReadOnly => {
@@ -2916,16 +4073,64 @@ fn render_cell(
                 ui.label(cell.text.clone().unwrap_or_default());
             }
             CellClass::Blank => {
-                // An absent-field cell (RecordList: double-click adds the field).
-                ui.weak("\u{2014}");
+                // FR-010 — an ABSENT field (the field does not exist in this record):
+                // a faint em-dash `—` placeholder, visually distinct from a present empty
+                // string (`""`) and from an explicit null/unit (`()`), with an accessible
+                // hover label so the state is unambiguous (RecordList: double-click adds
+                // the field). View-only — painting it changes zero document bytes.
+                ui.weak("\u{2014}").on_hover_text("absent field");
             }
             CellClass::Scalar => {
                 render_scalar_type_indicator(ui, cell);
-                ui.label(cell.text.clone().unwrap_or_default());
+                // A bool cell shows a checkbox glyph reflecting its value (☑ true / ☐
+                // false) as a clickable toggle affordance (FR-001); its rect is recorded
+                // so a click landing on it flips the value, while a click elsewhere on the
+                // cell selects (one gesture, one action — E019c). Drawn as a glyph, not an
+                // interactive `egui::Checkbox`, so it never competes with the whole-cell
+                // selection interaction below.
+                match cell.text.as_deref().and_then(flip_bool_token) {
+                    // `flip_bool_token` returns the FLIPPED token, so `Some("false")`
+                    // means the current value is `true` (checked) and vice versa.
+                    Some("false") => {
+                        checkbox_rect = Some(ui.label("\u{2611}").rect); // ☑ (currently true)
+                    }
+                    Some(_) => {
+                        checkbox_rect = Some(ui.label("\u{2610}").rect); // ☐ (currently false)
+                    }
+                    None => render_scalar_value(ui, cell.text.as_deref().unwrap_or_default()),
+                }
             }
         }
         render_cell_diagnostics(ui, cell);
+        // E012 / US4 / FR-016 — REJECTED fill/paste marker. This cell was a target of the
+        // last bulk fill / paste whose value was incompatible with the cell's DECLARED
+        // type, so the write was REFUSED (the cell's bytes are unchanged — no silent
+        // corruption). Flag it with a queryable error glyph carrying an explanatory tooltip
+        // (the shared error [`TypeIndicator`], the same affordance the as-you-type hint and
+        // committed-value overlay use), so the user sees exactly which targets were skipped.
+        // The painted glyph (`✖`) is exposed as its accessibility label (headless-assertable
+        // — T030). Transient: the next fill / paste replaces it and any other grid action
+        // clears it.
+        if rejected {
+            indicators::from_severity(ronin_core::Severity::Error)
+                .show(ui)
+                .on_hover_text("type-incompatible value rejected — cell left unchanged");
+        }
     });
+
+    // E012 / FR-009 — in-cell VALIDATION OVERLAY for a committed value. A cell whose
+    // value is invalid — lexically (a malformed RON token → RON-P#### parse finding) or
+    // semantically (a bound type the value violates → RON-V#### type finding) — carries
+    // an error-severity diagnostic attached by CST range during derivation, and is
+    // flagged with an error border here. The explanatory tooltip is the existing
+    // `render_cell_diagnostics` hover (the same RON-V#### message the text view shows).
+    // The flagged value stays in the buffer and remains EDITABLE (double-click / F2 to
+    // re-edit) — never silently reverted (AD-005).
+    // A REJECTED fill/paste target (FR-016) also gets the error border so the refused cell
+    // reads as flagged at a glance, matching the committed-value overlay.
+    if cell.has_error_diagnostic() || rejected {
+        paint_error_border(ui, cell_rect);
+    }
 
     // The active-cell border (selection cursor), drawn on top of the content. Four line
     // segments (a version-stable way to stroke a rect outline) inset by 1px.
@@ -2951,9 +4156,13 @@ fn render_cell(
         (icon_rect, cell_resp.interact_pointer_pos()),
         (Some(r), Some(p)) if r.contains(p)
     );
+    let on_checkbox = matches!(
+        (checkbox_rect, cell_resp.interact_pointer_pos()),
+        (Some(r), Some(p)) if r.contains(p)
+    );
 
-    // A pointing-hand cursor over the open-icon hints that it is clickable.
-    if let (Some(r), true) = (icon_rect, cell_resp.hovered()) {
+    // A pointing-hand cursor over the open-icon / checkbox hints that it is clickable.
+    if let (Some(r), true) = (icon_rect.or(checkbox_rect), cell_resp.hovered()) {
         if ui
             .input(|i| i.pointer.interact_pos())
             .is_some_and(|p| r.contains(p))
@@ -2977,6 +4186,16 @@ fn render_cell(
                 *pending = Some(PendingAction::OpenAsTable { path: path.clone() });
             }
             _ => {}
+        }
+    } else if cell_resp.clicked() && on_checkbox {
+        // Checkbox click → flip the bool cell (FR-001), the same single action as Space.
+        if let (Some(path), Some(flipped)) =
+            (&cell.value_ref, cell.text.as_deref().and_then(flip_bool_token))
+        {
+            *pending = Some(PendingAction::ToggleBool {
+                path: path.clone(),
+                value: flipped.to_string(),
+            });
         }
     } else if cell_resp.double_clicked() {
         match cell.class {
@@ -3046,6 +4265,22 @@ fn grid_drag_id() -> egui::Id {
     egui::Id::new("ronin_grid_drag_active")
 }
 
+/// The egui memory key for "a row REORDER drag is in progress" (E012 / US3 / FR-008),
+/// holding the ORIGIN row index dragged from. Set when a row drag-handle's drag starts,
+/// read by every grip to detect the hovered target row, cleared on the reorder commit /
+/// pointer release. Distinct from [`grid_drag_id`] so the grip drag (reorder) never
+/// confuses the cell drag (select) — one gesture, one action (memory rule / FR-012).
+fn row_drag_id() -> egui::Id {
+    egui::Id::new("ronin_row_reorder_from")
+}
+
+/// The egui memory key for the LAST row a row-reorder drag's pointer hovered over (its
+/// live target). Read on pointer release to land the moved row at the dropped position
+/// (E012 / US3 / FR-008). Cleared together with [`row_drag_id`] on commit / release.
+fn row_drag_target_id() -> egui::Id {
+    egui::Id::new("ronin_row_reorder_to")
+}
+
 /// Render the inline text editor for a scalar/blank cell (FR-006/FR-009): commit on
 /// Enter / Tab (advancing focus to the next cell), cancel on Esc; Shift-Tab and the
 /// arrow keys move the active cell without committing.
@@ -3113,12 +4348,138 @@ fn edit_inline(
     };
 
     if let Some(advance) = advance {
+        // E012 / FR-009 / AD-005 — REFUSE to commit a lexically-malformed token. The
+        // `SetValue` splice path writes the token VERBATIM (it does not itself reject), so
+        // committing e.g. `1 2 3` or an unterminated `"abc` would merge with adjacent
+        // tokens and corrupt the buffer. Instead, keep the editor OPEN with the draft
+        // intact (no `clear_focus`) and change ZERO bytes (no `SetCell`): the user's input
+        // is preserved (no silent revert) and the prior bytes are untouched (no byte
+        // corruption). The as-you-type overlay in `render_cell` already shows the error
+        // border + tooltip explaining why it cannot commit. A lexically VALID token (even
+        // one that violates a bound type) DOES commit — the off-frame reparse then attaches
+        // the authoritative semantic RON-V#### finding, flagged on the flat cell.
+        if !token_is_lexically_valid(&text) {
+            return;
+        }
         *pending = Some(PendingAction::SetCell {
             row: pos.row,
             field: col.field_name.clone(),
             value: text,
             value_ref,
             advance,
+        });
+    }
+}
+
+/// Render the inline **enum-variant picker** for a cell whose DECLARED type is an enum
+/// (E012 / FR-005 / AD-001). A *type-to-filter* widget constrained to the declared
+/// `variants`: the user types into a filter field to narrow the list, then picks a
+/// variant (which commits that variant name as the cell's RON token). Unlike the
+/// free-text [`edit_inline`] editor, only a name drawn from `variants` can be
+/// committed — there is no way to type an arbitrary, invalid variant. This is the
+/// type-aware leg of the layered dispatch; the unbound / non-enum case stays on
+/// [`edit_inline`] (text fallback, FR-013).
+///
+/// One gesture = one action: the picker opens on edit-enter (F2 / typing /
+/// double-click — the same gesture that opens the text editor), and a single click on a
+/// variant row commits it. The filter draft is carried on the same view-state
+/// [`EditFocus`](crate::structural::view_state::EditFocus) draft slot the text editor
+/// uses, keyed by the cell's [`StructuralPath`], so a virtualization scroll never
+/// mis-targets it (HINT-004).
+///
+/// Commits via the existing [`PendingAction::SetCell`] path so the chosen variant is
+/// spliced losslessly through the same `SetValue` pipeline every other cell edit uses
+/// (HINT-001) — the picker only ever emits a valid variant token.
+#[allow(clippy::too_many_arguments)]
+fn edit_enum_picker(
+    ui: &mut Ui,
+    path: &StructuralPath,
+    value_ref: Option<StructuralPath>,
+    pos: CellPos,
+    col: &Column,
+    variants: &[String],
+    draft: &mut Option<(StructuralPath, String)>,
+    pending: &mut Option<PendingAction>,
+    clear_focus: &mut bool,
+    should_focus: bool,
+) {
+    // The filter text the user has typed so far (carried on the draft slot). A leading
+    // typed char filters the list; an empty filter offers EVERY variant.
+    let mut filter = draft.as_ref().map(|(_, t)| t.clone()).unwrap_or_default();
+
+    // On the frame the picker just opened (`should_focus`), the draft holds the seed the
+    // editor opened with: either the cell's CURRENT variant token (F2 / double-click) or
+    // a single typed char (the Excel "just start typing" path). A seed that equals the
+    // current variant must NOT pre-filter the list to one entry — the picker should open
+    // showing all variants — so reset it to an empty filter. A genuine typed-char seed
+    // (not itself a full variant name) is kept so typing-to-open narrows immediately.
+    if should_focus && variants.iter().any(|v| v.eq_ignore_ascii_case(&filter)) {
+        filter.clear();
+    }
+
+    // The filter field: typing narrows the variant list. Constrained — its text is a
+    // FILTER, never the committed value (only a `variants` entry can commit), so an
+    // unmatched filter simply shows no rows rather than writing an invalid token.
+    let resp = ui.add(egui::TextEdit::singleline(&mut filter).hint_text("variant\u{2026}"));
+    if should_focus {
+        resp.request_focus();
+    }
+    *draft = Some((path.clone(), filter.clone()));
+
+    // The variants matching the filter (case-insensitive substring), in declaration
+    // order. An empty filter matches all (the full constrained variant set).
+    let needle = filter.to_lowercase();
+    let matches: Vec<&String> = variants
+        .iter()
+        .filter(|v| needle.is_empty() || v.to_lowercase().contains(&needle))
+        .collect();
+
+    // The variant to commit this frame, if any.
+    let mut chosen: Option<String> = None;
+
+    // A single click on a variant row picks it (one gesture, one action). Each row is a
+    // `selectable_label` so its text lands in the AccessKit tree (headless-queryable —
+    // T014) and a click is the pick gesture.
+    for variant in &matches {
+        if ui.selectable_label(false, variant.as_str()).clicked() {
+            chosen = Some((*variant).to_string());
+        }
+    }
+
+    let (enter, esc, tab) = ui.input(|i| {
+        (
+            i.key_pressed(Key::Enter),
+            i.key_pressed(Key::Escape),
+            i.key_pressed(Key::Tab),
+        )
+    });
+
+    if esc {
+        // Cancel the pick (FR-009): discard the draft, no byte change.
+        *clear_focus = true;
+        return;
+    }
+
+    // Enter / Tab commits the filtered selection: an exact (case-insensitive) match if
+    // the filter names one, else the single remaining match. With several still showing,
+    // Enter/Tab is a no-op so the user must disambiguate — never commit an ambiguous or
+    // invalid value (constrained editing).
+    if chosen.is_none() && (enter || tab) {
+        let exact = matches
+            .iter()
+            .find(|v| v.eq_ignore_ascii_case(&filter))
+            .map(|v| (*v).to_string());
+        chosen = exact.or_else(|| (matches.len() == 1).then(|| matches[0].to_string()));
+    }
+
+    if let Some(value) = chosen {
+        *pending = Some(PendingAction::SetCell {
+            row: pos.row,
+            field: col.field_name.clone(),
+            value,
+            value_ref,
+            // Advance DOWN on commit, matching the text editor's Enter behavior.
+            advance: Some(CellNav::Down),
         });
     }
 }
@@ -3147,6 +4508,22 @@ fn render_cell_diagnostics(ui: &mut Ui, cell: &Cell) {
 /// The inline-error text colour (re-uses the shared error indicator's colour for FR-003).
 fn error_color(ui: &Ui) -> egui::Color32 {
     TypeIndicator::Error.color(ui)
+}
+
+/// Stroke an **error border** around `rect` in the shared error colour (E012 / FR-009 —
+/// the in-cell validation overlay). Drawn as four line segments inset by 1px (the same
+/// version-stable rect-outline technique the active-cell cursor border uses), so it sits
+/// cleanly inside the cell over its content without an extra interactive widget. Used to
+/// flag a cell whose committed value is invalid (a RON-P####/RON-V#### diagnostic) and,
+/// while editing, as the light as-you-type hint on a lexically-malformed draft.
+fn paint_error_border(ui: &Ui, rect: egui::Rect) {
+    let r = rect.shrink(1.0);
+    let stroke = egui::Stroke::new(2.0, error_color(ui));
+    let p = ui.painter();
+    p.line_segment([r.left_top(), r.right_top()], stroke);
+    p.line_segment([r.right_top(), r.right_bottom()], stroke);
+    p.line_segment([r.right_bottom(), r.left_bottom()], stroke);
+    p.line_segment([r.left_bottom(), r.left_top()], stroke);
 }
 
 // =============================================================================
@@ -3201,6 +4578,29 @@ fn render_scalar_type_indicator(ui: &mut Ui, cell: &Cell) {
         let indicator = indicators::from_scalar_class(class);
         // The fixed-width slot keeps the value start-X aligned across scalar cells.
         indicator.show(ui).on_hover_text(indicator.word());
+    }
+}
+
+/// Render a present scalar cell's value `text` (the non-bool, non-editing flat display),
+/// distinguishing the three optional-field states FR-010 requires the user to tell apart:
+///
+/// * an **empty string** (`""`) → a subtle empty-quotes affordance (`""` drawn weak) with an
+///   accessible "empty string" hover, so a present-but-empty string never looks like an absent
+///   field (`—`) or an explicit null (`()`);
+/// * an explicit **null / unit** (`()`) → a styled `()` (drawn weak) with a "null / unit" hover;
+/// * any other scalar token → its verbatim text as a plain label (unchanged behavior).
+///
+/// View-only — it paints display text and never mutates the buffer, so it does not affect the
+/// inline editor (which takes over the whole cell when editing).
+fn render_scalar_value(ui: &mut Ui, text: &str) {
+    if is_empty_string_token(text) {
+        // A subtle empty-quotes affordance — clearly an EMPTY string, distinct from `—`/`()`.
+        ui.weak("\u{201C}\u{201D}").on_hover_text("empty string"); // “”
+    } else if is_unit_token(text) {
+        // A styled explicit null/unit, distinct from an absent field and an empty string.
+        ui.weak("()").on_hover_text("null / unit");
+    } else {
+        ui.label(text);
     }
 }
 
@@ -3262,15 +4662,91 @@ fn column_type_indicator(column: &Column, rows: &[Row], col_idx: usize) -> Optio
 
 /// Render one column header (E014): the column's shared [`TypeIndicator`] glyph (same
 /// glyph/size/color as the tree paints) + the field name (strong).
-fn render_column_header(ui: &mut Ui, column: &Column, rows: &[Row], col_idx: usize) {
+fn render_column_header(
+    ui: &mut Ui,
+    columns: &[Column],
+    rows: &[Row],
+    col_idx: usize,
+    col_state: Option<&crate::structural::view_state::ColumnViewState>,
+    intent: &mut Option<ColumnViewIntent>,
+) {
+    let column = &columns[col_idx];
     let indicator = column_type_indicator(column, rows, col_idx);
-    ui.horizontal(|ui| {
-        // Draw the header icon through the shared fixed-width slot (E014) so column
-        // headers align with one another.
-        if let Some(indicator) = indicator {
-            indicator.show(ui).on_hover_text(indicator.word());
+    let resp = ui
+        .horizontal(|ui| {
+            // Draw the header icon through the shared fixed-width slot (E014) so column
+            // headers align with one another.
+            if let Some(indicator) = indicator {
+                indicator.show(ui).on_hover_text(indicator.word());
+            }
+            // E012 / FR-007 — a pin glyph prefixes the pinned key column's header so the
+            // frozen column is identifiable at a glance (view-only marker).
+            if col_state.is_some_and(|c| c.pinned == Some(col_idx)) {
+                ui.label("\u{1F4CC}"); // 📌
+            }
+            ui.strong(&column.field_name);
+        })
+        .response;
+
+    // E012 / FR-007 / FR-012 — column ergonomics live on a DEDICATED affordance: a
+    // right-click header CONTEXT MENU (hide / pin / move / show-all / reset). This never
+    // overloads the existing header gestures (left-click, resize-drag), so one gesture =
+    // one action (memory rule). Every action is VIEW-ONLY — it captures an intent the
+    // caller applies to the column view-state; the document buffer is never touched.
+    resp.context_menu(|ui| {
+        let pinned = col_state.is_some_and(|c| c.pinned == Some(col_idx));
+        if ui.button(if pinned { "Unpin column" } else { "Pin column" }).clicked() {
+            *intent = Some(ColumnViewIntent::TogglePin(col_idx));
+            ui.close();
         }
-        ui.strong(&column.field_name);
+        if ui.button("Hide column").clicked() {
+            *intent = Some(ColumnViewIntent::Hide(col_idx));
+            ui.close();
+        }
+        ui.separator();
+        if ui.button("Move left").clicked() {
+            // Move one visible position to the left (toward 0). The view transform clamps
+            // the target, so a no-op at the leftmost position is harmless.
+            let cur = col_state
+                .map(|c| c.visible_columns(usize::MAX))
+                .and_then(|v| v.iter().position(|&c| c == col_idx))
+                .unwrap_or(col_idx);
+            *intent = Some(ColumnViewIntent::Move {
+                col: col_idx,
+                to: cur.saturating_sub(1),
+            });
+            ui.close();
+        }
+        if ui.button("Move right").clicked() {
+            let cur = col_state
+                .map(|c| c.visible_columns(usize::MAX))
+                .and_then(|v| v.iter().position(|&c| c == col_idx))
+                .unwrap_or(col_idx);
+            *intent = Some(ColumnViewIntent::Move {
+                col: col_idx,
+                to: cur + 1,
+            });
+            ui.close();
+        }
+        ui.separator();
+        // Show any hidden columns by name (FR-007) + reset everything to default (FR-015).
+        if let Some(cvs) = col_state {
+            for &h in &cvs.hidden {
+                if let Some(hidden_col) = columns.get(h) {
+                    if ui
+                        .button(format!("Show \u{201C}{}\u{201D}", hidden_col.field_name))
+                        .clicked()
+                    {
+                        *intent = Some(ColumnViewIntent::Show(h));
+                        ui.close();
+                    }
+                }
+            }
+        }
+        if ui.button("Reset columns").clicked() {
+            *intent = Some(ColumnViewIntent::Reset);
+            ui.close();
+        }
     });
 }
 

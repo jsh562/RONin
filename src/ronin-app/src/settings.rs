@@ -15,6 +15,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::structural::view_state::{ColumnViewState, PathStep, StructuralPath};
+
 /// `ProjectDirs` qualifier/organization/application triple identifying RONin's
 /// OS-specific config and data directories. Stable across the app.
 const QUALIFIER: &str = "dev";
@@ -251,6 +253,163 @@ impl ConversionSettings {
     pub const fn max_json_indent() -> u32 {
         MAX_JSON_INDENT
     }
+}
+
+// --- E012 / US3 NEW-CONFIG: per-section column layout (FR-007) ----------------
+//
+// The Table view's per-section column **presentation** state — which columns are
+// hidden, their display order, and the single pinned key column — persists with the
+// app settings as PRESENTATION CONFIG, strictly SEPARATE from the document (E012
+// US3 / FR-007 / Principle I / HINT-002 / AD-004). A column layout is VIEW-ONLY: it
+// NEVER produces a CST edit and the document buffer stays byte-identical. Each
+// layout is keyed by `<file-path>\u{1F}<serialized-StructuralPath>` (see
+// `section_layout_key`), so the same logical section in two different files keeps
+// independent layouts (per-file cross-doc scope), and an untitled / unsaved buffer
+// (no on-disk path) is NOT persisted — its layout stays live-only for the session.
+//
+// Robustness contract (project-instructions §I): an absent / corrupt block falls
+// back to NO persisted layouts (serde `default` ⇒ empty map; a wholly corrupt file
+// still recovers to `AppSettings::default`), so a section simply shows its default
+// layout — never a crash and never a startup block. Stored model-column indices are
+// presentation hints only; they are re-validated against the LIVE model column count
+// when a layout is materialized into a `ColumnViewState`
+// ([`PersistedColumnLayout::to_view_state`]), where any out-of-range index is
+// dropped — so a hand-edited / stale-after-reparse index can never corrupt the view.
+
+/// One section's persisted column **presentation** layout (E012 / US3 / FR-007) —
+/// the on-disk mirror of a [`ColumnViewState`].
+///
+/// Holds the display order, the hidden set, and the single pinned key column, all as
+/// MODEL-column indices. `hidden` is a `Vec` (not a `BTreeSet`) so the JSON form is a
+/// plain array; it is de-duplicated and validated when materialized. Every value is a
+/// **presentation hint, not a lock**: indices are re-validated against the live model
+/// when loaded ([`to_view_state`](Self::to_view_state)), so a stale / hand-edited /
+/// out-of-range index is silently dropped rather than corrupting the view (FR-007,
+/// project-instructions §I).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PersistedColumnLayout {
+    /// The display order as MODEL-column indices (a partial / full permutation).
+    pub order: Vec<usize>,
+    /// The hidden MODEL-column indices.
+    pub hidden: Vec<usize>,
+    /// The single pinned/frozen key column (a MODEL-column index), or `None`.
+    pub pinned: Option<usize>,
+}
+
+impl PersistedColumnLayout {
+    /// Snapshot a live [`ColumnViewState`] into its persisted form (E012 / FR-007).
+    ///
+    /// The `BTreeSet` of hidden indices is flattened to a sorted `Vec` so the JSON is
+    /// a plain array; the order and pin are copied verbatim. View-only — capturing a
+    /// layout changes zero document bytes.
+    #[must_use]
+    pub fn from_view_state(state: &ColumnViewState) -> Self {
+        Self {
+            order: state.order.clone(),
+            hidden: state.hidden.iter().copied().collect(),
+            pinned: state.pinned,
+        }
+    }
+
+    /// Materialize this persisted layout into a live [`ColumnViewState`], re-validating
+    /// every index against the live model's `model_cols` column count (E012 / FR-007).
+    ///
+    /// Robustness (FR-007, project-instructions §I): an order / hidden / pin index
+    /// `>= model_cols` (a stale-after-reparse or hand-edited value) is **dropped**, and
+    /// `order` is de-duplicated — so a corrupt persisted layout can never push the live
+    /// view-state out of range or corrupt the grid. The result is always a valid
+    /// `ColumnViewState` for the current model.
+    #[must_use]
+    pub fn to_view_state(&self, model_cols: usize) -> ColumnViewState {
+        let mut state = ColumnViewState::new();
+        let mut seen = vec![false; model_cols];
+        for &c in &self.order {
+            if c < model_cols && !seen[c] {
+                seen[c] = true;
+                state.order.push(c);
+            }
+        }
+        for &c in &self.hidden {
+            if c < model_cols {
+                state.hidden.insert(c);
+            }
+        }
+        if let Some(p) = self.pinned {
+            if p < model_cols {
+                // Pinning reveals the column (mirrors `ColumnViewState::pin`).
+                state.hidden.remove(&p);
+                state.pinned = Some(p);
+            }
+        }
+        state
+    }
+
+    /// `true` when this layout carries no customization (no order, nothing hidden, no
+    /// pin) — equivalent to the default [`ColumnViewState`]. The wiring removes a
+    /// persisted entry that has decayed to default rather than storing an empty layout.
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        self.order.is_empty() && self.hidden.is_empty() && self.pinned.is_none()
+    }
+}
+
+/// The stable settings key for a section's persisted column layout (E012 / FR-007):
+/// `<file-path>\u{1F}<serialized-StructuralPath>`.
+///
+/// Returns `None` for an **untitled / unsaved** document (`doc_path == None`): with no
+/// stable on-disk identity a layout cannot be keyed across sessions, so it stays
+/// live-only (never persisted). The `\u{1F}` (ASCII Unit Separator) joiner can never
+/// appear in a path or a serialized path step, so the key is unambiguous. The
+/// per-file prefix gives the documented cross-doc scope: the same section path in two
+/// different files keys two independent layouts.
+#[must_use]
+pub fn section_layout_key(doc_path: Option<&Path>, section: &StructuralPath) -> Option<String> {
+    let path = doc_path?;
+    Some(format!(
+        "{}\u{1f}{}",
+        path.to_string_lossy(),
+        serialize_structural_path(section)
+    ))
+}
+
+/// Serialize a [`StructuralPath`] to a stable, reversible-enough string for use as a
+/// settings key (E012 / FR-007).
+///
+/// Each step is rendered as a typed token (`F:`/`K:`/`I:`/`V:`/`C:`) joined by `/`;
+/// the empty (root) path is the empty string. Only the **identity** matters here (two
+/// equal paths must produce the same key), not perfect round-tripping — the key is
+/// never parsed back, only compared.
+fn serialize_structural_path(path: &StructuralPath) -> String {
+    let mut out = String::new();
+    for (i, step) in path.steps().iter().enumerate() {
+        if i > 0 {
+            out.push('/');
+        }
+        match step {
+            PathStep::Field(name) => {
+                out.push_str("F:");
+                out.push_str(name);
+            }
+            PathStep::Key(text) => {
+                out.push_str("K:");
+                out.push_str(text);
+            }
+            PathStep::Index(idx) => {
+                out.push_str("I:");
+                out.push_str(&idx.to_string());
+            }
+            PathStep::VariantField(name) => {
+                out.push_str("V:");
+                out.push_str(name);
+            }
+            PathStep::CombinedChild(name) => {
+                out.push_str("C:");
+                out.push_str(name);
+            }
+        }
+    }
+    out
 }
 
 /// Saved window position and size (logical pixels).
@@ -529,6 +688,15 @@ pub struct AppSettings {
     /// carrier. Defaults on absent / corrupt (JSONC + default indent); the indent
     /// is clamped on load. The only on-disk artifact E010 adds.
     pub conversion: ConversionSettings,
+    /// Per-section Table **column** layouts (E012 / US3 / FR-007): hide / order / pin
+    /// presentation state, keyed by `<file-path>\u{1F}<serialized-StructuralPath>`
+    /// (see [`section_layout_key`]). PRESENTATION config, strictly separate from the
+    /// document — a column op is NEVER a CST edit (Principle I / HINT-002). Defaults to
+    /// an empty map on absent / corrupt (serde `default`); stored indices are
+    /// re-validated against the live model when materialized
+    /// ([`PersistedColumnLayout::to_view_state`]), so a stale / out-of-range index can
+    /// never corrupt the view.
+    pub column_layouts: BTreeMap<String, PersistedColumnLayout>,
 }
 
 impl Default for AppSettings {
@@ -541,6 +709,7 @@ impl Default for AppSettings {
             undo: UndoConfig::default(),
             autosave: AutosaveConfig::default(),
             conversion: ConversionSettings::default(),
+            column_layouts: BTreeMap::new(),
         }
     }
 }
@@ -659,6 +828,36 @@ impl AppSettings {
     #[must_use]
     pub const fn min_large_file_threshold() -> u64 {
         MIN_LARGE_FILE_THRESHOLD
+    }
+
+    // --- E012 / US3: per-section column layout persistence (FR-007) ----------
+
+    /// The persisted column layout for the section keyed by `key`, if one exists
+    /// (E012 / FR-007). `None` ⇒ the section uses its default layout (every column
+    /// shown, natural model order, no pin). Build `key` with [`section_layout_key`].
+    #[must_use]
+    pub fn column_layout(&self, key: &str) -> Option<&PersistedColumnLayout> {
+        self.column_layouts.get(key)
+    }
+
+    /// Persist (or replace) the column layout for the section keyed by `key` (E012 /
+    /// FR-007). A **default** layout (no hide / order / pin) is stored as a removal so
+    /// the map never accumulates empty entries — a reset truly returns the section to
+    /// the schema/first-seen default (FR-015). PRESENTATION config only: this never
+    /// touches the document (Principle I).
+    pub fn set_column_layout(&mut self, key: String, layout: PersistedColumnLayout) {
+        if layout.is_default() {
+            self.column_layouts.remove(&key);
+        } else {
+            self.column_layouts.insert(key, layout);
+        }
+    }
+
+    /// Remove the persisted column layout for the section keyed by `key` (E012 /
+    /// FR-015) — the reset-to-default path: the section returns to every column shown,
+    /// natural model order, no pin. A no-op when no layout is stored.
+    pub fn clear_column_layout(&mut self, key: &str) {
+        self.column_layouts.remove(key);
     }
 }
 
@@ -1331,6 +1530,139 @@ mod tests {
             StrictCommentCarrier::PureNoComments
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    // --- E012 / US3 NEW-CONFIG: per-section column layout (FR-007 / FR-015) -----
+
+    #[test]
+    fn column_layouts_default_is_empty() {
+        // The default app settings carry NO column layouts (every section uses its
+        // default layout until the user customizes one).
+        assert!(AppSettings::default().column_layouts.is_empty());
+    }
+
+    #[test]
+    fn load_from_uses_column_layouts_default_when_absent() {
+        // An older settings file with no `column_layouts` block loads with an empty map
+        // (serde `default`), never a parse error (project-instructions §I / FR-007).
+        let dir = std::env::temp_dir().join("ronin_settings_e012_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("absent.json");
+        std::fs::write(&path, br#"{"large_file_threshold": 1048576}"#).unwrap();
+        let loaded = AppSettings::load_from(&path);
+        assert!(loaded.column_layouts.is_empty());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_from_recovers_corrupt_file_to_empty_column_layouts() {
+        // A wholly corrupt settings file recovers to defaults — no panic, no startup
+        // block — and so to NO persisted column layouts (FR-007 robustness contract).
+        let dir = std::env::temp_dir().join("ronin_settings_e012_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("corrupt.json");
+        std::fs::write(&path, b"{ this is not valid json").unwrap();
+        let loaded = AppSettings::load_from(&path);
+        assert!(loaded.column_layouts.is_empty());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn set_default_layout_removes_the_entry() {
+        // FR-015: storing a DEFAULT layout (nothing hidden/reordered/pinned) removes the
+        // entry rather than accumulating an empty one — a reset truly returns to default.
+        let mut s = AppSettings::default();
+        let layout = PersistedColumnLayout {
+            hidden: vec![2],
+            ..Default::default()
+        };
+        s.set_column_layout("k".to_string(), layout);
+        assert!(s.column_layout("k").is_some(), "a non-default layout is stored");
+        s.set_column_layout("k".to_string(), PersistedColumnLayout::default());
+        assert!(
+            s.column_layout("k").is_none(),
+            "storing the default layout removes the persisted entry"
+        );
+    }
+
+    #[test]
+    fn clear_column_layout_removes_the_entry() {
+        let mut s = AppSettings::default();
+        let layout = PersistedColumnLayout {
+            pinned: Some(0),
+            ..Default::default()
+        };
+        s.set_column_layout("k".to_string(), layout);
+        assert!(s.column_layout("k").is_some());
+        s.clear_column_layout("k");
+        assert!(
+            s.column_layout("k").is_none(),
+            "clear_column_layout removes the entry (FR-015 reset path)"
+        );
+    }
+
+    #[test]
+    fn persisted_layout_round_trips_through_save_and_load() {
+        let dir = std::env::temp_dir().join("ronin_settings_e012_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("roundtrip.json");
+        let mut s = AppSettings::default();
+        let layout = PersistedColumnLayout {
+            order: vec![2, 0, 1],
+            hidden: vec![3],
+            pinned: Some(0),
+        };
+        s.set_column_layout("file.ron\u{1f}".to_string(), layout.clone());
+        s.save_to(&path).unwrap();
+        let loaded = AppSettings::load_from(&path);
+        assert_eq!(loaded.column_layout("file.ron\u{1f}"), Some(&layout));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn to_view_state_drops_out_of_range_indices() {
+        // FR-007 robustness: a stale-after-reparse / hand-edited index >= model_cols is
+        // dropped when materializing into a live ColumnViewState — never a corrupt view.
+        let layout = PersistedColumnLayout {
+            order: vec![5, 1, 1, 0], // 5 is out of range (model has 3 cols); 1 duplicated
+            hidden: vec![2, 9],      // 9 is out of range
+            pinned: Some(7),         // out of range → no pin
+        };
+        let cvs = layout.to_view_state(3);
+        assert_eq!(cvs.order, vec![1, 0], "out-of-range / duplicate order indices dropped");
+        assert!(cvs.hidden.contains(&2) && !cvs.hidden.contains(&9));
+        assert_eq!(cvs.pinned, None, "an out-of-range pin index is dropped");
+    }
+
+    #[test]
+    fn from_view_state_round_trips_through_to_view_state() {
+        let mut cvs = ColumnViewState::new();
+        cvs.hide(2);
+        cvs.move_column(1, 0, 4);
+        cvs.pin(0);
+        let layout = PersistedColumnLayout::from_view_state(&cvs);
+        let back = layout.to_view_state(4);
+        assert_eq!(back.pinned, cvs.pinned);
+        assert_eq!(back.hidden, cvs.hidden);
+        assert_eq!(back.visible_columns(4), cvs.visible_columns(4));
+    }
+
+    #[test]
+    fn section_layout_key_is_none_for_untitled_and_distinguishes_files_and_sections() {
+        // An untitled (path-less) document has no stable key — it is never persisted.
+        assert!(section_layout_key(None, &StructuralPath::root()).is_none());
+        // The same section path in two different files keys two INDEPENDENT layouts
+        // (the documented per-file cross-doc scope).
+        let a = section_layout_key(Some(Path::new("/a.ron")), &StructuralPath::root());
+        let b = section_layout_key(Some(Path::new("/b.ron")), &StructuralPath::root());
+        assert_ne!(a, b, "different files key different layouts");
+        // Two different sections in the SAME file also key independent layouts.
+        let root = section_layout_key(Some(Path::new("/a.ron")), &StructuralPath::root());
+        let nested = section_layout_key(
+            Some(Path::new("/a.ron")),
+            &StructuralPath::from_steps(vec![PathStep::Field("hulls".to_string())]),
+        );
+        assert_ne!(root, nested, "different sections key different layouts");
     }
 
     #[test]

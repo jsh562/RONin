@@ -23,13 +23,23 @@
 //! Every loop is bounded; the off-frame worker is the real one, driven to
 //! completion exactly as `table_view.rs` / `showcase_samples.rs` do.
 
+use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+use egui_kittest::kittest::Queryable;
+use egui_kittest::Harness;
+
 use ronin_app::app::{App, NoticeKind};
+use ronin_app::document::EditorDocument;
+use ronin_app::reparse::ReparseWorker;
 use ronin_app::settings::AppSettings;
+use ronin_app::structural::sections::{scan_table_sections, SectionShape};
+use ronin_app::structural::table::{render_table_view_any, CellClass, TableModel};
 use ronin_app::structural::view_state::StructuralPath;
+use ronin_core::parse;
 
 // =============================================================================
 // Harness
@@ -337,5 +347,160 @@ fn sample_ron_root_renders_a_field_value_grid() {
     assert!(
         model.row_count() >= 1,
         "the field/value grid has one row per struct field"
+    );
+}
+
+// =============================================================================
+// (T036) The new cell editors RENDER over the REAL sample corpus — a sample
+// section carrying bool / enum / numeric cells is opened via the real path and
+// rendered through the real virtualized grid headlessly (egui_kittest — never a
+// live-GUI screenshot; memory rule), proving the new editors paint their cells
+// for the actual on-disk corpus, not just synthetic fixtures.
+// =============================================================================
+
+/// Spin-poll a document's own off-frame worker to completion (the `table_view.rs`
+/// pattern), bounded.
+fn drive_doc_reparse(doc: &mut EditorDocument, worker: &ReparseWorker) {
+    doc.request_reparse(worker);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        if doc.poll_parse(worker) {
+            return;
+        }
+        assert!(Instant::now() < deadline, "reparse did not land within timeout");
+        std::thread::yield_now();
+    }
+}
+
+/// The path of the first scanned RecordList section whose union columns include every
+/// name in `must_have`, over the file at `name`'s on-disk bytes.
+fn record_list_section_with(name: &str, must_have: &[&str]) -> (String, StructuralPath) {
+    let dir = samples_dir();
+    let src = std::fs::read_to_string(dir.join(name)).expect("read sample");
+    let cst = parse(&src);
+    let path = scan_table_sections(&cst)
+        .into_iter()
+        .filter(|s| s.shape == SectionShape::RecordList)
+        .filter_map(|s| {
+            TableModel::derive_section(&cst, &s.path, SectionShape::RecordList, &[]).map(|m| (s, m))
+        })
+        .find(|(_, m)| {
+            let cols: Vec<&str> = m.columns.iter().map(|c| c.field_name.as_str()).collect();
+            must_have.iter().all(|need| cols.contains(need))
+        })
+        .map(|(s, _)| s.path)
+        .unwrap_or_else(|| panic!("no RecordList in `{name}` with columns {must_have:?}"));
+    (src, path)
+}
+
+#[test]
+fn corpus_bool_enum_numeric_section_renders_through_the_grid() {
+    // `ships.ron`'s hull `cells` RecordList carries a bool (`structural`), an enum-like
+    // (`shape`), and a numeric (`section`) column. Open the bytes, render THAT section
+    // through the real grid headlessly, and assert the new editors painted their cells:
+    // the bool column's true/false values, the enum variant tokens, and the numeric
+    // values are all present in the AccessKit tree (the grid drew the rows, not a blank).
+    let worker = Rc::new(ReparseWorker::new());
+    let (src, section) = record_list_section_with("ships.ron", &["structural", "shape", "section"]);
+
+    let mut doc = EditorDocument::new_untitled(1);
+    doc.buffer = src.clone();
+    doc.on_edit();
+    drive_doc_reparse(&mut doc, &worker);
+
+    // Sanity: the section projects bool + enum + numeric Scalar cells.
+    let model = doc
+        .cached_table_model_any(&section)
+        .cloned()
+        .expect("the `cells` section projects a table model");
+    let bool_col = model
+        .columns
+        .iter()
+        .position(|c| c.field_name == "structural")
+        .unwrap();
+    let bool_word_ok = (0..model.row_count())
+        .filter_map(|r| model.cell(r, bool_col))
+        .filter(|c| c.class == CellClass::Scalar)
+        .all(|c| c.scalar_type_name() == Some("bool"));
+    assert!(bool_word_ok, "the `structural` column projects bool cells");
+
+    let doc = Rc::new(RefCell::new(doc));
+    let doc_ui = Rc::clone(&doc);
+    let worker_ui = Rc::clone(&worker);
+    let section_ui = section.clone();
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(700.0, 400.0))
+        .build_ui(move |ui| {
+            let mut d = doc_ui.borrow_mut();
+            render_table_view_any(ui, &mut d, &worker_ui, &section_ui);
+        });
+    harness.run();
+
+    // The grid painted the new-editor cells: the bool cells render as the E012 checkbox
+    // affordance (☑ true / ☐ false, FR-001) — not as literal `true`/`false` text — so
+    // its presence proves the bool editor drew the corpus cells. The header field names
+    // are all in the rendered tree too.
+    assert!(
+        harness.query_all_by_label_contains("\u{2611}").next().is_some()
+            || harness.query_all_by_label_contains("\u{2610}").next().is_some(),
+        "the bool cells rendered the ☑/☐ checkbox affordance in the grid"
+    );
+    for header in ["structural", "shape", "section"] {
+        assert!(
+            harness.query_all_by_label_contains(header).next().is_some(),
+            "the `{header}` column header rendered in the grid"
+        );
+    }
+
+    // Rendering the corpus section is VIEW-ONLY — it changed zero bytes.
+    assert_eq!(
+        doc.borrow().buffer,
+        src,
+        "rendering the corpus section with the new editors did not reflow the file"
+    );
+}
+
+#[test]
+fn corpus_events_numeric_and_enum_cells_render_through_the_grid() {
+    // `showcase_kitchen_sink.ron`'s top-level `events` RecordList carries a numeric
+    // (`at`) and an enum-like (`kind`) column. Render that section through the real grid
+    // headlessly and assert the numeric values + the enum variant tokens painted.
+    let worker = Rc::new(ReparseWorker::new());
+    let (src, section) = record_list_section_with("showcase_kitchen_sink.ron", &["at", "kind"]);
+
+    let mut doc = EditorDocument::new_untitled(1);
+    doc.buffer = src.clone();
+    doc.on_edit();
+    drive_doc_reparse(&mut doc, &worker);
+
+    let doc = Rc::new(RefCell::new(doc));
+    let doc_ui = Rc::clone(&doc);
+    let worker_ui = Rc::clone(&worker);
+    let section_ui = section.clone();
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(700.0, 400.0))
+        .build_ui(move |ui| {
+            let mut d = doc_ui.borrow_mut();
+            render_table_view_any(ui, &mut d, &worker_ui, &section_ui);
+        });
+    harness.run();
+
+    // The enum variant tokens render (Spawn / Move / Despawn) and the headers paint.
+    for variant in ["Spawn", "Move", "Despawn"] {
+        assert!(
+            harness.query_all_by_label_contains(variant).next().is_some(),
+            "the `{variant}` enum cell rendered in the grid"
+        );
+    }
+    for header in ["at", "kind"] {
+        assert!(
+            harness.query_all_by_label_contains(header).next().is_some(),
+            "the `{header}` column header rendered in the grid"
+        );
+    }
+    assert_eq!(
+        doc.borrow().buffer,
+        src,
+        "rendering the events section with the new editors did not reflow the file"
     );
 }
