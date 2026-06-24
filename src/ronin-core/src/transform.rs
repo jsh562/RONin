@@ -406,6 +406,10 @@ struct CollectionStyle {
     closing_indent: String,
     /// `true` if the predominant convention is a trailing comma after each element.
     trailing_comma: bool,
+    /// The document's end-of-line sequence (`"\r\n"` or `"\n"`) used for any
+    /// synthesized newline, so an insert/append into a CRLF document keeps CRLF
+    /// (byte-losslessness — Principle I) instead of flipping edited lines to LF.
+    eol: String,
 }
 
 /// Infer a collection's append style from its existing element siblings, falling
@@ -446,6 +450,7 @@ fn infer_style(
         element_indent,
         closing_indent,
         trailing_comma,
+        eol: detect_document_eol(doc),
     }
 }
 
@@ -589,6 +594,37 @@ fn document_default_style(doc: &CstDocument, located: &SyntaxNode) -> Collection
         element_indent,
         closing_indent: base_indent,
         trailing_comma,
+        eol: detect_document_eol(doc),
+    }
+}
+
+/// Detect the document's predominant end-of-line sequence so any *synthesized*
+/// newline (an inserted/appended element's separator + indent) matches the file's
+/// existing convention instead of a hardcoded LF — otherwise inserting into a CRLF
+/// document would silently flip edited lines to LF (Principle I, "never corrupt").
+///
+/// Counts `\r\n` pairs vs lone `\n` over the printed document and returns the
+/// dominant; ties (and a document with no newline) resolve to `"\n"`. Mirrors the
+/// app-layer `ByteFidelityProfile` dominant rule, kept here so `ronin-core` stays
+/// WASM-clean (no app dependency).
+fn detect_document_eol(doc: &CstDocument) -> String {
+    let text = crate::printer::print(doc);
+    let bytes = text.as_bytes();
+    let mut crlf = 0usize;
+    let mut lone_lf = 0usize;
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b'\n' {
+            if i > 0 && bytes[i - 1] == b'\r' {
+                crlf += 1;
+            } else {
+                lone_lf += 1;
+            }
+        }
+    }
+    if crlf > lone_lf {
+        "\r\n".to_string()
+    } else {
+        "\n".to_string()
     }
 }
 
@@ -705,7 +741,7 @@ fn insert_child_text(
         // Insert before the element currently at `idx`.
         let target = &elements[idx];
         let payload = if style.multiline {
-            format!("{child_text},\n{}", style.element_indent)
+            format!("{child_text},{}{}", style.eol, style.element_indent)
         } else {
             format!("{child_text}, ")
         };
@@ -784,8 +820,10 @@ fn append_child_text(
         let payload = if style.multiline {
             let comma = if style.trailing_comma { "," } else { "" };
             format!(
-                "\n{}{child_text}{comma}\n{}",
-                style.element_indent, style.closing_indent
+                "{eol}{}{child_text}{comma}{eol}{}",
+                style.element_indent,
+                style.closing_indent,
+                eol = style.eol
             )
         } else {
             child_text.to_string()
@@ -817,14 +855,18 @@ fn build_append_after_last(
         let new_trailing = if style.trailing_comma { "," } else { "" };
         if last_has_trailing_comma {
             format!(
-                "{}{child_text}{new_trailing}\n{}",
-                style.element_indent, style.closing_indent
+                "{}{child_text}{new_trailing}{eol}{}",
+                style.element_indent,
+                style.closing_indent,
+                eol = style.eol
             )
         } else {
             // Last element has no trailing comma; add one to it then the new one.
             format!(
-                ",\n{}{child_text}{new_trailing}\n{}",
-                style.element_indent, style.closing_indent
+                ",{eol}{}{child_text}{new_trailing}{eol}{}",
+                style.element_indent,
+                style.closing_indent,
+                eol = style.eol
             )
         }
     } else {

@@ -154,6 +154,116 @@ fn insert_field_multiline_inherits_indent_and_trailing_comma() {
     assert_eq!(out, "Foo(\n    x: 1,\n    y: 2,\n    z: 3,\n)");
 }
 
+// -----------------------------------------------------------------------------
+// EOL preservation on synthesized inserts (Principle I "Never Corrupt User Data").
+// A structural insert/append into a CRLF document must synthesize CRLF for the new
+// separator + closing-delimiter indent, not a hardcoded LF — otherwise an edit
+// silently flips line endings on the touched lines. Regression for the
+// shrink->expand->shrink byte-identity bug (Bevy elision; see bevy_elision.rs).
+// -----------------------------------------------------------------------------
+
+#[test]
+fn insert_field_multiline_preserves_crlf_eol() {
+    let src = "Foo(\r\n    x: 1,\r\n    y: 2,\r\n)";
+    let doc = parse(src);
+    let out = applied(
+        &doc,
+        StructuralOp::InsertField {
+            parent: struct_parent(&doc),
+            index: 2,
+            name: "z".into(),
+            value: "3".into(),
+        },
+    );
+    // The synthesized line uses CRLF (matching the document), not LF.
+    assert_eq!(out, "Foo(\r\n    x: 1,\r\n    y: 2,\r\n    z: 3,\r\n)");
+}
+
+#[test]
+fn insert_element_append_preserves_crlf_eol() {
+    let src = "[\r\n    1,\r\n    2,\r\n]";
+    let doc = parse(src);
+    let out = applied(
+        &doc,
+        StructuralOp::InsertElement {
+            parent: list_parent(&doc),
+            index: 2,
+            value: "3".into(),
+        },
+    );
+    assert_eq!(out, "[\r\n    1,\r\n    2,\r\n    3,\r\n]");
+}
+
+#[test]
+fn insert_element_into_empty_crlf_collection_uses_crlf() {
+    // Empty-collection layout path: the document default style must use the
+    // document's dominant EOL (CRLF here, inferred from the surrounding lines).
+    let src = "(\r\n    items: [],\r\n    other: 1,\r\n)";
+    let doc = parse(src);
+    let list = ParentRef::List(first_node(&doc, SyntaxKind::List));
+    let out = applied(
+        &doc,
+        StructuralOp::InsertElement {
+            parent: list,
+            index: 0,
+            value: "1".into(),
+        },
+    );
+    // The first element of the previously-empty list lands on a CRLF line.
+    assert!(
+        out.contains("items: [\r\n") && !out.contains("items: [\n"),
+        "empty-collection insert must use CRLF, got: {out:?}"
+    );
+}
+
+#[test]
+fn crlf_append_then_remove_round_trips_byte_identical() {
+    // The exact shrink->expand->shrink shape: append a field to a CRLF struct,
+    // then remove it again — the result must be byte-identical to the original.
+    // Before the EOL fix, the append injected an LF before the closing `)`, which
+    // the remove preserved, leaving `1,\n)` where the source had `1,\r\n)`.
+    let src = "Foo(\r\n    x: 1,\r\n)";
+    let doc = parse(src);
+    let expanded = applied(
+        &doc,
+        StructuralOp::InsertField {
+            parent: struct_parent(&doc),
+            index: 1,
+            name: "y".into(),
+            value: "2".into(),
+        },
+    );
+    assert_eq!(expanded, "Foo(\r\n    x: 1,\r\n    y: 2,\r\n)");
+
+    let doc2 = parse(&expanded);
+    let shrunk = applied(
+        &doc2,
+        StructuralOp::RemoveField {
+            parent: struct_parent(&doc2),
+            index: 1,
+        },
+    );
+    assert_eq!(shrunk, src, "append-then-remove must restore the original CRLF bytes");
+}
+
+#[test]
+fn lf_insert_is_unchanged_by_eol_detection() {
+    // An LF document still gets LF — detect_document_eol resolves ties / LF docs
+    // to "\n", so existing behavior is preserved.
+    let src = "Foo(\n    x: 1,\n)";
+    let doc = parse(src);
+    let out = applied(
+        &doc,
+        StructuralOp::InsertField {
+            parent: struct_parent(&doc),
+            index: 1,
+            name: "y".into(),
+            value: "2".into(),
+        },
+    );
+    assert_eq!(out, "Foo(\n    x: 1,\n    y: 2,\n)");
+}
+
 #[test]
 fn remove_middle_field_normalizes_separator() {
     let src = "Foo(x: 1, y: 2, z: 3)";
