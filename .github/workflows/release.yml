@@ -215,7 +215,7 @@ jobs:
         # install-action's manifest lacks cargo-dist@0.30.0; install from crates.io.
         run: cargo install cargo-dist@0.30.0 --locked
       - name: Download per-target artifacts
-        uses: actions/download-artifact@v4 # real major tag; TODO(OR-010): SHA-pin once resolvable
+        uses: actions/download-artifact@v8 # real major tag; TODO(OR-010): SHA-pin once resolvable
         with:
           pattern: artifacts-*
           path: target/distrib
@@ -270,7 +270,7 @@ jobs:
         # install-action's manifest lacks cargo-dist@0.30.0; install from crates.io.
         run: cargo install cargo-dist@0.30.0 --locked
       - name: Download all artifacts
-        uses: actions/download-artifact@v4 # real major tag; TODO(OR-010): SHA-pin once resolvable
+        uses: actions/download-artifact@v8 # real major tag; TODO(OR-010): SHA-pin once resolvable
         with:
           pattern: artifacts-*
           path: target/distrib
