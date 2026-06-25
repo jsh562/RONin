@@ -4188,6 +4188,12 @@ impl App {
                 // persisted settings BEFORE rendering, so a section's saved hide/order/pin
                 // is in effect the first time it is shown this session. View-only / byte-free.
                 self.load_active_column_layouts(idx);
+                // Seed the "highlight changed cells" toggle on the active doc before render
+                // (same stage-state-before-render pattern as the column layout above), so the
+                // table grid's immutable model-borrow path reads it via `&doc`. View-only.
+                if let Some(doc) = self.workspace.get_mut(idx) {
+                    doc.set_highlight_changes(self.settings.highlight_changes);
+                }
                 match view {
                     ActiveView::Text => {
                         if let Some(doc) = self.workspace.get_mut(idx) {
@@ -4593,6 +4599,20 @@ impl App {
 
                 ui.add_space(6.0);
                 ui.weak("Run Format \u{25B8} Format Document or Format Selection from the menu.");
+
+                ui.add_space(10.0);
+                ui.separator();
+                ui.heading("View");
+                ui.add_space(4.0);
+
+                // "Highlight changed cells" toggle (default ON): marks table cells whose
+                // value differs from the last saved version with a left-edge accent bar.
+                // Persistence is automatic via the existing `persist_settings` tick.
+                ui.checkbox(
+                    &mut self.settings.highlight_changes,
+                    "Highlight changed cells",
+                );
+                ui.weak("Mark cells that differ from the last saved version.");
             });
         self.show_settings = open;
     }

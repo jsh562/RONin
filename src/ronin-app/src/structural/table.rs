@@ -2181,6 +2181,20 @@ fn render_table_grid(
     } else {
         Vec::new()
     };
+    // "Changed since last save" indicator (gated on the seeded `highlight_changes`
+    // toggle, default ON). Parse + borrow the last-saved baseline tree ONCE here,
+    // while `doc` is still mutably borrowed (before the virtualized body walk), so
+    // each VISIBLE cell can be checked `&`-only inside the immutable model-borrow
+    // render closures via the free `resolve_path` against this root — the per-cell
+    // change check thus pays only path-depth resolution, never a re-parse (and only
+    // viewport-visible rows are checked, since only they realize). `None` when the
+    // toggle is off OR there is no baseline (a never-saved empty doc) ⇒ no marks.
+    let highlight_changes = doc.highlight_changes();
+    let baseline_root: Option<SyntaxNode> = if highlight_changes {
+        doc.baseline_root_for_changes()
+    } else {
+        None
+    };
     // Selection intents captured from cell interaction this frame (E019c): an `anchor`
     // (plain click / drag origin) and an `extend` (shift-click / drag-over). Two slots,
     // not one, so a drag whose origin + moved-over cell land in the SAME frame keeps both
@@ -2277,6 +2291,22 @@ fn render_table_grid(
                         .value_ref
                         .as_ref()
                         .is_some_and(|p| rejected_cells.iter().any(|r| r == p));
+                // "Changed since last save": this present cell's value differs from its
+                // value in the last-saved baseline (or it is a cell that did not exist at
+                // last save). Gated on the toggle via `baseline_root` being `Some`; checked
+                // `&`-only here against the once-parsed baseline tree (path-depth cost), and
+                // only for the viewport-VISIBLE rows the body realizes.
+                let changed = baseline_root.as_ref().is_some_and(|root| {
+                    cell.value_ref
+                        .as_ref()
+                        .zip(cell.text.as_ref())
+                        .is_some_and(|(p, t)| {
+                            // Changed iff the saved node text differs, OR the path is absent
+                            // in the baseline (a newly-added cell ⇒ changed).
+                            // (`SyntaxText: PartialEq<&str>` compares without allocating.)
+                            resolve_path(root, p).is_none_or(|n| n.text() != t.as_str())
+                        })
+                });
                 table_row.col(|ui| {
                     render_cell(
                         ui,
@@ -2300,6 +2330,7 @@ fn render_table_grid(
                         should_focus,
                         focused_cell_type.as_ref(),
                         rejected,
+                        changed,
                     );
                 });
             }
@@ -3932,6 +3963,7 @@ fn render_cell(
     should_focus: bool,
     cell_type: Option<&crate::document::CellTypeInfo>,
     rejected: bool,
+    changed: bool,
 ) {
     let cell_rect = ui.max_rect();
 
@@ -4132,6 +4164,16 @@ fn render_cell(
         paint_error_border(ui, cell_rect);
     }
 
+    // "Changed since last save" indicator: a thin left-edge accent bar (IDE
+    // change-gutter style), glyph-free and visually distinct from the red error
+    // border (a full rect outline) and the selection stroke. View-only — painting it
+    // changes zero document bytes (Principle I). Gated upstream on the toggle +
+    // baseline; only ever `true` for a present cell whose value differs from its
+    // last-saved value (or a cell absent at last save).
+    if changed {
+        paint_change_bar(ui, cell_rect);
+    }
+
     // The active-cell border (selection cursor), drawn on top of the content. Four line
     // segments (a version-stable way to stroke a rect outline) inset by 1px.
     if cursor == Some((pos.row, pos.column)) {
@@ -4151,7 +4193,13 @@ fn render_cell(
     //  • anywhere else → select (Shift+click extends);
     //  • drag → range select; double-click on a scalar/blank → edit.
     let id = ui.id().with(("grid_cell", pos.row, pos.column));
-    let cell_resp = ui.interact(cell_rect, id, egui::Sense::click_and_drag());
+    let mut cell_resp = ui.interact(cell_rect, id, egui::Sense::click_and_drag());
+    // Make the "changed since last save" state discoverable on hover AND detectable in
+    // the AccessKit tree for headless tests: a hovered changed cell surfaces the
+    // explanatory tooltip (the glyph-free bar alone carries no label).
+    if changed {
+        cell_resp = cell_resp.on_hover_text("modified — changed since last save");
+    }
     let on_icon = matches!(
         (icon_rect, cell_resp.interact_pointer_pos()),
         (Some(r), Some(p)) if r.contains(p)
@@ -4524,6 +4572,36 @@ fn paint_error_border(ui: &Ui, rect: egui::Rect) {
     p.line_segment([r.right_top(), r.right_bottom()], stroke);
     p.line_segment([r.right_bottom(), r.left_bottom()], stroke);
     p.line_segment([r.left_bottom(), r.left_top()], stroke);
+}
+
+/// Width (px) of the "changed since last save" left-edge accent bar.
+const CHANGE_BAR_WIDTH: f32 = 3.0;
+
+/// The "modified" accent colour for the change bar — an amber that is deliberately
+/// DISTINCT from both the red error border and the (blue) selection stroke, with a
+/// dark/light pair so it stays visible in either theme (mirrors the shared
+/// indicator palette's dark-mode branch convention).
+fn change_color(ui: &Ui) -> egui::Color32 {
+    if ui.visuals().dark_mode {
+        egui::Color32::from_rgb(0xF0, 0xA8, 0x30)
+    } else {
+        egui::Color32::from_rgb(0xC8, 0x80, 0x10)
+    }
+}
+
+/// Stroke a thin **left-edge accent bar** down `rect`'s left side (IDE
+/// change-gutter style) in the "modified" accent colour — the glyph-free per-cell
+/// "changed since last save" indicator. A filled rectangle hugging the left edge
+/// (not a full outline like [`paint_error_border`]), so the two read distinctly
+/// even when a cell is both changed and invalid. View-only; paints zero bytes.
+fn paint_change_bar(ui: &Ui, rect: egui::Rect) {
+    // Inset by 1px top/bottom so the bar sits cleanly inside the cell (matching the
+    // error border's 1px inset), then a `CHANGE_BAR_WIDTH`-wide strip on the left.
+    let bar = egui::Rect::from_min_max(
+        egui::pos2(rect.left(), rect.top() + 1.0),
+        egui::pos2(rect.left() + CHANGE_BAR_WIDTH, rect.bottom() - 1.0),
+    );
+    ui.painter().rect_filled(bar, 0.0, change_color(ui));
 }
 
 // =============================================================================

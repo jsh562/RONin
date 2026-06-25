@@ -395,6 +395,27 @@ pub struct EditorDocument {
     pub path: Option<PathBuf>,
     /// Snapshot of the content at the last save/load, for dirty-tracking.
     pub last_saved: SavedSnapshot,
+    /// The full last-saved (or last-loaded) buffer text, retained so the table
+    /// view can compare each cell against its saved value (the "changed since last
+    /// save" indicator). Set wherever [`last_saved`](Self::last_saved) is set —
+    /// load / restore / new — and refreshed in [`mark_saved`](Self::mark_saved),
+    /// which is what clears the per-cell change marks on save. This is the **text**
+    /// baseline; the parsed baseline tree is cached lazily in
+    /// [`baseline_cst`](Self::baseline_cst). Kept separate from the O(1)
+    /// [`SavedSnapshot`] (a hash) since the per-cell compare needs the actual bytes.
+    saved_baseline_text: String,
+    /// Lazily-parsed CST of [`saved_baseline_text`](Self::saved_baseline_text),
+    /// cached so the per-cell change query parses the baseline **once per baseline
+    /// change**, not once per cell per frame. `None` until first built; rebuilt when
+    /// [`baseline_cst_key`](Self::baseline_cst_key) no longer matches the live
+    /// baseline text's hash (i.e. after a save / load re-baselined it). Cheap to
+    /// clone (a rowan green tree is reference-counted).
+    baseline_cst: Option<ronin_core::CstDocument>,
+    /// The hash of the baseline text the cached [`baseline_cst`](Self::baseline_cst)
+    /// was parsed from — the cache-invalidation key. A mismatch with the live
+    /// [`saved_baseline_text`](Self::saved_baseline_text)'s hash means the baseline
+    /// changed (a re-baseline on save/load), so the cached tree is rebuilt on demand.
+    baseline_cst_key: Option<u64>,
     /// Byte-fidelity metadata captured at load (or defaults for a new buffer).
     pub byte_profile: ByteFidelityProfile,
     /// Caret/selection/scroll state in character offsets.
@@ -604,6 +625,16 @@ pub struct EditorDocument {
     /// well-formed file). Invalidated wholesale when a newer parse lands via
     /// [`poll_parse`](Self::poll_parse). Transient/session-only; never persisted.
     structural_cache: StructuralModelCache,
+    /// Per-frame render input: whether the table view should mark cells changed
+    /// since the last save (the `AppSettings::highlight_changes` toggle).
+    ///
+    /// Seeded by the shell on the active document each frame **before** rendering
+    /// the table (the same "stage render-relevant state on the doc" pattern the
+    /// column-layout load uses), so the immutable model-borrow render path can read
+    /// it via `&doc` without threading the flag through every grid entry point.
+    /// Transient/session-only; never persisted. Defaults to `false` so a document
+    /// the shell never seeds (or a unit test) shows no marks unless asked.
+    highlight_changes: bool,
 }
 
 impl EditorDocument {
@@ -625,11 +656,15 @@ impl EditorDocument {
         // buffer but remembered on the profile so save can re-emit it.
         let buffer = text.strip_prefix('\u{FEFF}').unwrap_or(text).to_string();
         let last_saved = SavedSnapshot::of(&buffer);
+        let saved_baseline_text = buffer.clone();
         let mut doc = Self {
             id: mint_doc_id(),
             buffer,
             path: Some(path.into()),
             last_saved,
+            saved_baseline_text,
+            baseline_cst: None,
+            baseline_cst_key: None,
             byte_profile: profile,
             cursor: CursorState::default(),
             parse: None,
@@ -658,6 +693,7 @@ impl EditorDocument {
             projection: None,
             tree_error: None,
             structural_cache: StructuralModelCache::default(),
+            highlight_changes: false,
         };
         // Seed the undo baseline at the loaded (generation-0) state so the first
         // edit's snapshot pushes the original as the first undo boundary (TR-010).
@@ -671,11 +707,15 @@ impl EditorDocument {
     pub fn new_untitled(seq: u32) -> Self {
         let buffer = String::new();
         let last_saved = SavedSnapshot::of(&buffer);
+        let saved_baseline_text = buffer.clone();
         let mut doc = Self {
             id: mint_doc_id(),
             buffer,
             path: None,
             last_saved,
+            saved_baseline_text,
+            baseline_cst: None,
+            baseline_cst_key: None,
             // A new buffer has no file bytes; default to LF, no BOM, no trailing
             // newline. `original_hash` is the hash of empty content.
             byte_profile: ByteFidelityProfile {
@@ -712,6 +752,7 @@ impl EditorDocument {
             projection: None,
             tree_error: None,
             structural_cache: StructuralModelCache::default(),
+            highlight_changes: false,
         };
         // Seed the undo baseline at the empty (generation-0) state.
         doc.seed_undo();
@@ -736,11 +777,20 @@ impl EditorDocument {
         cursor: CursorState,
         untitled_seq: Option<u32>,
     ) -> Self {
+        // The pre-close saved text is not retained across a close/reopen (only the
+        // O(1) `last_saved` hash is), so the restored buffer is the best available
+        // change baseline: a freshly reopened doc starts with no per-cell change
+        // marks, then marks accrue as the user edits. `dirty()` is still
+        // reconstructed faithfully from `last_saved` (a reopened-unsaved doc is dirty).
+        let saved_baseline_text = buffer.clone();
         let mut doc = Self {
             id: mint_doc_id(),
             buffer,
             path,
             last_saved,
+            saved_baseline_text,
+            baseline_cst: None,
+            baseline_cst_key: None,
             byte_profile,
             cursor,
             parse: None,
@@ -769,6 +819,7 @@ impl EditorDocument {
             projection: None,
             tree_error: None,
             structural_cache: StructuralModelCache::default(),
+            highlight_changes: false,
         };
         // Seed the undo baseline at the restored (generation-0) state so the first
         // post-reopen edit pushes the restored content as the first undo boundary.
@@ -792,8 +843,109 @@ impl EditorDocument {
     }
 
     /// Re-baseline the saved snapshot to the current buffer (call after a save).
+    ///
+    /// Also refreshes the per-cell change baseline text (and drops the cached
+    /// baseline CST so it rebuilds against the new baseline on next query): this is
+    /// what **clears the "changed since last save" marks** on save — every cell now
+    /// equals its baseline.
     pub fn mark_saved(&mut self) {
         self.last_saved = SavedSnapshot::of(&self.buffer);
+        self.saved_baseline_text = self.buffer.clone();
+        // Invalidate the cached baseline tree; it is rebuilt lazily on the next
+        // change query against the new baseline (parsed once, not per cell).
+        self.baseline_cst = None;
+        self.baseline_cst_key = None;
+    }
+
+    /// `true` if `value_ref`'s cell value differs from its value in the last-saved
+    /// baseline — the per-cell "changed since last save" predicate the table view's
+    /// left-edge change bar draws on.
+    ///
+    /// Returns `true` when the path resolves in the baseline but its node text
+    /// differs from `current_token`, **or** when the path does not resolve in the
+    /// baseline at all (a newly-added cell — a field/row that did not exist when the
+    /// document was last saved). Returns `false` when the resolved baseline node
+    /// matches `current_token` (unchanged) **or** when there is no baseline yet (an
+    /// untitled, never-saved empty document shows no marks).
+    ///
+    /// Cell identity is the positional [`StructuralPath`]; in-place value edits and
+    /// keyed maps compare exactly, but for index-keyed lists a structural edit
+    /// (insert/delete/reorder) shifts indices, so rows after such an edit may read
+    /// as changed. This matches the structural-identity model used throughout
+    /// (focus/selection re-resolution) and is an accepted v1 limitation.
+    ///
+    /// Read-only and cheap: the baseline is parsed **once per baseline change**
+    /// (cached on [`baseline_cst`](Self::baseline_cst), keyed by the baseline text's
+    /// hash) and resolution descends the path one step at a time (cost ∝ path depth,
+    /// not document size — see [`resolve_path`](crate::structural::view_state::resolve_path)).
+    /// Takes `&mut self` to populate the lazy cache.
+    pub fn cell_changed_since_save(
+        &mut self,
+        value_ref: &StructuralPath,
+        current_token: &str,
+    ) -> bool {
+        // No baseline content ⇒ nothing to compare against ⇒ no marks (an empty,
+        // never-saved untitled doc). An empty baseline text means there is no saved
+        // structure to resolve a cell path against.
+        if self.saved_baseline_text.is_empty() {
+            return false;
+        }
+        let baseline = self.baseline_cst();
+        match crate::structural::view_state::resolve_path(&baseline.root(), value_ref) {
+            // Resolves in the baseline: changed iff the saved token differs.
+            // (`SyntaxText: PartialEq<&str>` compares without allocating.)
+            Some(node) => node.text() != current_token,
+            // Absent in the baseline: a cell that did not exist at last save ⇒ changed.
+            None => true,
+        }
+    }
+
+    /// The root [`SyntaxNode`](ronin_core::SyntaxNode) of the last-saved baseline
+    /// CST, for the table view to resolve many cell paths against in one frame —
+    /// `None` when there is no baseline (an empty, never-saved document ⇒ no marks).
+    ///
+    /// The render path holds `&mut doc` only *before* the virtualized body walk, so
+    /// it calls this **once per frame** to warm + borrow the cached baseline tree (a
+    /// single parse, reused across frames until the baseline changes), then resolves
+    /// each visible cell against the returned root with the free
+    /// [`resolve_path`](crate::structural::view_state::resolve_path) — keeping the
+    /// per-cell change check inside the immutable model-borrow closures `&`-only and
+    /// the parse cost off the per-cell path.
+    #[must_use]
+    pub fn baseline_root_for_changes(&mut self) -> Option<ronin_core::SyntaxNode> {
+        if self.saved_baseline_text.is_empty() {
+            return None;
+        }
+        Some(self.baseline_cst().root())
+    }
+
+    /// Get the cached baseline CST, parsing [`saved_baseline_text`](Self::saved_baseline_text)
+    /// once and reusing it until the baseline changes (keyed by the baseline text's
+    /// hash). Internal seam behind [`cell_changed_since_save`](Self::cell_changed_since_save).
+    fn baseline_cst(&mut self) -> &ronin_core::CstDocument {
+        let key = hash_bytes(self.saved_baseline_text.as_bytes());
+        if self.baseline_cst_key != Some(key) || self.baseline_cst.is_none() {
+            self.baseline_cst = Some(ronin_core::parse(&self.saved_baseline_text));
+            self.baseline_cst_key = Some(key);
+        }
+        self.baseline_cst
+            .as_ref()
+            .expect("baseline_cst was just populated")
+    }
+
+    /// Seed the per-frame "highlight changed cells" toggle (the
+    /// `AppSettings::highlight_changes` setting) the table view reads. The shell
+    /// calls this on the active document before rendering the table, mirroring how
+    /// it seeds the persisted column layout before render. View-only / byte-free.
+    pub fn set_highlight_changes(&mut self, on: bool) {
+        self.highlight_changes = on;
+    }
+
+    /// Whether the table view should mark cells changed since the last save this
+    /// frame (the seeded [`set_highlight_changes`](Self::set_highlight_changes) flag).
+    #[must_use]
+    pub fn highlight_changes(&self) -> bool {
+        self.highlight_changes
     }
 
     // --- E007 OBJ2: autosave / crash-recovery lifecycle hooks ----------------

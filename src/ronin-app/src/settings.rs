@@ -35,6 +35,15 @@ const DEFAULT_LARGE_FILE_THRESHOLD: u64 = 5_242_880;
 /// hand-edited settings file can never push the effective threshold below it.
 const MIN_LARGE_FILE_THRESHOLD: u64 = 65_536;
 
+/// Default for the "highlight changed cells" view toggle: ON.
+///
+/// A free function (not just the struct `Default`) so the field can carry an
+/// explicit `#[serde(default = ...)]` — an older on-disk settings file that
+/// predates this field deserializes to the ON default rather than `false`.
+const fn default_highlight_changes() -> bool {
+    true
+}
+
 /// Default indent width for the formatter: 4 spaces (FR-007).
 const DEFAULT_INDENT_WIDTH: u32 = 4;
 
@@ -697,6 +706,13 @@ pub struct AppSettings {
     /// ([`PersistedColumnLayout::to_view_state`]), so a stale / out-of-range index can
     /// never corrupt the view.
     pub column_layouts: BTreeMap<String, PersistedColumnLayout>,
+    /// Table **View** toggle (default ON): mark cells whose value differs from the
+    /// last-saved version with a left-edge "changed" accent bar. Pure presentation
+    /// — reads the document's saved baseline, changes zero bytes (Principle I).
+    /// Carries an explicit `#[serde(default = ...)]` so a settings file written
+    /// before this field existed still loads with the ON default.
+    #[serde(default = "default_highlight_changes")]
+    pub highlight_changes: bool,
 }
 
 impl Default for AppSettings {
@@ -710,6 +726,7 @@ impl Default for AppSettings {
             autosave: AutosaveConfig::default(),
             conversion: ConversionSettings::default(),
             column_layouts: BTreeMap::new(),
+            highlight_changes: default_highlight_changes(),
         }
     }
 }
@@ -1178,6 +1195,36 @@ mod tests {
         let loaded = AppSettings::load_from(&path);
         assert_eq!(loaded.formatting, FormattingConfig::default());
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn highlight_changes_defaults_on_when_absent_and_round_trips() {
+        // An older settings file predating the field loads with the ON default
+        // (`#[serde(default = ...)]`), never a parse error (project-instructions §I);
+        // and an explicit value round-trips through save/load.
+        let dir = std::env::temp_dir().join("ronin_settings_highlight_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let absent = dir.join("absent.json");
+        std::fs::write(&absent, br#"{"large_file_threshold": 1048576}"#).unwrap();
+        let loaded = AppSettings::load_from(&absent);
+        assert!(
+            loaded.highlight_changes,
+            "absent `highlight_changes` defaults to ON"
+        );
+        let _ = std::fs::remove_file(&absent);
+
+        let roundtrip = dir.join("roundtrip.json");
+        let s = AppSettings {
+            highlight_changes: false,
+            ..AppSettings::default()
+        };
+        s.save_to(&roundtrip).unwrap();
+        let back = AppSettings::load_from(&roundtrip);
+        assert!(
+            !back.highlight_changes,
+            "an explicit OFF value round-trips through save/load"
+        );
+        let _ = std::fs::remove_file(&roundtrip);
     }
 
     #[test]

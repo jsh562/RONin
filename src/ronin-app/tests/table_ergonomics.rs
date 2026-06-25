@@ -3698,3 +3698,197 @@ fn snapshot_cross_action_sequence_pins_exact_bytes() {
 
     insta::assert_snapshot!("cross_action_sequence", doc.buffer);
 }
+
+// ===========================================================================
+// Phase 7 — "Changed since last save" per-cell indicator.
+//
+// A table cell whose value differs from the LAST-SAVED baseline is marked with a
+// glyph-free left-edge accent bar, discoverable on hover via a "modified" tooltip.
+// Baseline = last save: on load the baseline is the loaded content; `mark_saved()`
+// re-baselines and clears the marks. Gated by the `highlight_changes` toggle
+// (default ON, seeded on the doc each frame by the shell).
+//
+//   (a) Unit: edit one cell → `cell_changed_since_save` true for that path, false
+//       for a sibling; after `mark_saved()` → false for all.
+//   (b) Headless: with the toggle ON, edit a cell, render, hover it → the
+//       "modified" tooltip is queryable; an untouched cell has none. After
+//       `mark_saved()` the mark clears; with the toggle OFF no marks appear.
+//
+//   egui_kittest headless — NEVER a live-GUI screenshot (memory rule).
+// ===========================================================================
+
+#[test]
+fn cell_changed_since_save_tracks_per_cell_edits_and_clears_on_save() {
+    // (a) Unit: against a clean baseline (= last save), editing one cell's value makes
+    // that cell — and ONLY that cell — read as changed; re-saving clears every mark.
+    let worker = ReparseWorker::new();
+    let mut doc = doc_at(
+        "[\n    (name: \"a\", hp: 1),\n    (name: \"b\", hp: 2),\n]",
+        &worker,
+    );
+    // Baseline the loaded content (mirrors a load/save): no cell is changed yet.
+    doc.mark_saved();
+    let hp_col = col_of(&doc, "hp");
+
+    // The two `hp` cells' value paths (stable identities) + their saved tokens.
+    let (row0_hp, row1_hp) = {
+        let m = model_of(&doc);
+        (
+            m.cell(0, hp_col).unwrap().value_ref.clone().unwrap(),
+            m.cell(1, hp_col).unwrap().value_ref.clone().unwrap(),
+        )
+    };
+    // Against the fresh baseline, nothing is changed (each cell equals its saved value).
+    assert!(
+        !doc.cell_changed_since_save(&row0_hp, "1"),
+        "row 0 hp matches the baseline ⇒ not changed"
+    );
+    assert!(
+        !doc.cell_changed_since_save(&row1_hp, "2"),
+        "row 1 hp matches the baseline ⇒ not changed"
+    );
+
+    // Edit ONLY row 0's hp (1 → 42) through the real commit path; reparse so the model
+    // reflects the new token.
+    doc.apply_grid_writes(&[(row0_hp.clone(), "42".to_string())], &worker, Instant::now())
+        .expect("the cell write commits");
+    drive_reparse(&mut doc, &worker);
+
+    // The edited cell differs from its saved value; the sibling still matches.
+    let edited_tok = {
+        let m = model_of(&doc);
+        m.cell(0, hp_col).unwrap().text.clone().unwrap()
+    };
+    assert_eq!(edited_tok, "42", "the buffer now holds the edited token");
+    assert!(
+        doc.cell_changed_since_save(&row0_hp, &edited_tok),
+        "the edited cell reads as changed since last save"
+    );
+    assert!(
+        !doc.cell_changed_since_save(&row1_hp, "2"),
+        "the untouched sibling cell does NOT read as changed"
+    );
+
+    // Re-saving re-baselines: every mark clears (the edited cell now equals the new save).
+    doc.mark_saved();
+    assert!(
+        !doc.cell_changed_since_save(&row0_hp, &edited_tok),
+        "after mark_saved the previously-edited cell is no longer changed"
+    );
+    assert!(
+        !doc.cell_changed_since_save(&row1_hp, "2"),
+        "after mark_saved the sibling is still unchanged"
+    );
+}
+
+#[test]
+fn cell_changed_since_save_is_false_with_no_baseline() {
+    // A never-saved empty untitled doc has no baseline content ⇒ no cell ever reads as
+    // changed (the predicate returns false rather than flagging everything).
+    let mut doc = EditorDocument::new_untitled(1);
+    assert!(
+        !doc.cell_changed_since_save(&field("anything"), "x"),
+        "no baseline ⇒ no change marks"
+    );
+}
+
+/// Render the document's top-level table, sharing the `Rc<RefCell<..>>` AND honoring
+/// the doc's seeded `highlight_changes` flag (set on the doc before building this).
+/// Reuses `harness_over` — the flag lives on the doc, read by the grid each frame.
+fn modified_label_present(harness: &mut Harness<'static>) -> bool {
+    harness
+        .query_all_by_label_contains("modified")
+        .next()
+        .is_some()
+}
+
+#[test]
+fn changed_cell_shows_modified_marker_clears_on_save_and_respects_toggle() {
+    // (b) Headless: the per-cell "modified" state is discoverable in the AccessKit tree
+    // (on hover) for a changed cell, absent for an untouched one, cleared by save, and
+    // suppressed when the toggle is off. Driven through the REAL grid renderer.
+    let worker = Rc::new(ReparseWorker::new());
+    let doc = Rc::new(RefCell::new(doc_at(
+        "[\n    (name: \"a\", hp: 1),\n    (name: \"b\", hp: 2),\n]",
+        &worker,
+    )));
+    // Baseline the loaded content (= last save) and enable the toggle.
+    {
+        let mut d = doc.borrow_mut();
+        d.mark_saved();
+        d.set_highlight_changes(true);
+    }
+    let hp_col = col_of(&doc.borrow(), "hp");
+
+    // Edit ONLY row 0's hp (1 → 42) through the real commit path; reparse.
+    let row0_hp = {
+        let d = doc.borrow();
+        model_of(&d).cell(0, hp_col).unwrap().value_ref.clone().unwrap()
+    };
+    {
+        let mut d = doc.borrow_mut();
+        d.apply_grid_writes(&[(row0_hp, "42".to_string())], &worker, Instant::now())
+            .expect("the cell write commits");
+        drive_reparse(&mut d, &worker);
+    }
+
+    // Render, then hover the CHANGED cell (its value `42` is queryable) → the "modified"
+    // tooltip surfaces in the AccessKit tree. Hovering settles via `run_ok` (a hover
+    // tooltip repaints indefinitely, which would trip `run`'s convergence guard).
+    let mut harness = harness_over(&doc, &worker);
+    harness.run();
+    let changed_center = harness.get_by_label_contains("42").rect().center();
+    harness.hover_at(changed_center);
+    harness.run_ok();
+    assert!(
+        modified_label_present(&mut harness),
+        "hovering the changed cell surfaces the `modified` tooltip"
+    );
+
+    // Hover an UNTOUCHED cell (row 1's hp `2`) → no `modified` tooltip there. Move the
+    // pointer off the changed cell first so its tooltip dismisses.
+    let untouched_center = harness.get_by_label_contains("\"b\"").rect().center();
+    harness.hover_at(untouched_center);
+    harness.run_ok();
+    assert!(
+        !modified_label_present(&mut harness),
+        "an untouched cell shows NO `modified` tooltip"
+    );
+
+    // Save re-baselines → the mark clears even on the (still-)edited cell.
+    {
+        let mut d = doc.borrow_mut();
+        d.mark_saved();
+    }
+    let mut harness = harness_over(&doc, &worker);
+    harness.run();
+    let center = harness.get_by_label_contains("42").rect().center();
+    harness.hover_at(center);
+    harness.run_ok();
+    assert!(
+        !modified_label_present(&mut harness),
+        "after save the `modified` mark clears (re-baselined)"
+    );
+
+    // Re-edit so a change exists again, then turn the toggle OFF → no marks at all.
+    let row0_hp2 = {
+        let d = doc.borrow();
+        model_of(&d).cell(0, hp_col).unwrap().value_ref.clone().unwrap()
+    };
+    {
+        let mut d = doc.borrow_mut();
+        d.apply_grid_writes(&[(row0_hp2, "7".to_string())], &worker, Instant::now())
+            .expect("the cell write commits");
+        drive_reparse(&mut d, &worker);
+        d.set_highlight_changes(false);
+    }
+    let mut harness = harness_over(&doc, &worker);
+    harness.run();
+    let center = harness.get_by_label_contains("7").rect().center();
+    harness.hover_at(center);
+    harness.run_ok();
+    assert!(
+        !modified_label_present(&mut harness),
+        "with the toggle OFF, a changed cell shows NO `modified` marker"
+    );
+}
