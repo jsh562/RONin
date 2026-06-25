@@ -301,7 +301,7 @@ jobs:
         # NEW action (not in gates/ci.yml): cannot resolve its tag→SHA offline.
         # TODO(OR-010): resolve actions/attest-build-provenance@v3 to a full
         # commit SHA before the first release — offline now.
-        uses: actions/attest-build-provenance@v2 # real major tag; TODO(OR-010): SHA-pin once resolvable
+        uses: actions/attest-build-provenance@v4 # real major tag; TODO(OR-010): SHA-pin once resolvable
         with:
           subject-path: "target/distrib/*.tar.gz"
 
