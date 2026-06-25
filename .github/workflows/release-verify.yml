@@ -91,7 +91,7 @@ jobs:
       - name: Install cargo-dist (matches dist-workspace.toml cargo-dist-version 0.30.0)
         run: cargo install cargo-dist@0.30.0 --locked
       - name: Install cargo-semver-checks + cargo-cyclonedx (pinned action)
-        uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
+        uses: taiki-e/install-action@ace6ebe54a6a0c86dfb5f7764b17f793b6925bc3 # v2.82.3
         with:
           tool: cargo-semver-checks@0.48.0,cargo-cyclonedx@0.5.7
 
